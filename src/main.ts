@@ -11,6 +11,7 @@ const progTabs   = document.getElementById('prog-tabs')        as HTMLElement;
 const hexPanel   = document.getElementById('hex-view')         as HTMLElement;
 const basicPanel = document.getElementById('basic-view')       as HTMLElement;
 const waveCanvas = document.getElementById('waveform-canvas')  as HTMLCanvasElement;
+const statusBar  = document.getElementById('statusbar')        as HTMLElement;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let programs:    Program[]         = [];
@@ -69,6 +70,7 @@ function renderAll(): void {
   renderHex(prog);
   renderBasic(prog);
   if (leftSamples) waveform.setData(leftSamples, prog);
+  updateStatusBar();
 }
 
 function renderTabs(): void {
@@ -201,6 +203,53 @@ function selectByte(i: number): void {
   }
 
   waveform.selectByte(i);
+  updateStatusBar();
+}
+
+// ── Status bar ────────────────────────────────────────────────────────────────
+function updateStatusBar(): void {
+  const prog = programs[activeIdx];
+  if (selByte === null || !prog) {
+    statusBar.innerHTML = '<span class="sb-dim">Click a byte or BASIC line to inspect.</span>';
+    return;
+  }
+
+  const byte = prog.bytes[selByte];
+  if (!byte) { statusBar.innerHTML = ''; return; }
+
+  const dot = ' <span class="sb-dim">·</span> ';
+  const pipe = '  <span class="sb-dim">│</span>  ';
+
+  // Byte number: offset from the first byte of BASIC content (negative = preamble).
+  const contentStart = prog.lines[0]?.firstByte;
+  const byteNum = contentStart !== undefined ? selByte - contentStart : selByte;
+  const byteSegs: string[] = [];
+  byteSegs.push(`Byte ${byteNum}`);
+  if (byte.unclear) byteSegs.push('<span class="sb-warn">Unclear</span>');
+  if (byte.chkErr)  byteSegs.push('<span class="sb-err">Checksum error</span>');
+
+  const sections: string[] = [byteSegs.join(dot)];
+
+  // Line section: 1-based file line number, or '-' for preamble bytes.
+  // Omitted entirely if the program has no BASIC content.
+  if (prog.lines.length > 0) {
+    const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
+    const lineSegs: string[] = [];
+    if (li < 0) {
+      lineSegs.push('Line -');
+    } else {
+      const line = prog.lines[li];
+      lineSegs.push(`Line ${li + 1}`);
+      if (line.lenErr) {
+        const expected = line.expectedLastByte - line.firstByte + 1;
+        const actual   = line.lastByte         - line.firstByte + 1;
+        lineSegs.push(`<span class="sb-err">Line length error (expected ${expected} bytes, found ${actual})</span>`);
+      }
+    }
+    sections.push(lineSegs.join(dot));
+  }
+
+  statusBar.innerHTML = sections.join(pipe);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
