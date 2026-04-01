@@ -138,7 +138,13 @@ function renderBasic(prog: Program): void {
       ...(i === selLine ? ['sel'] : []),
     ].join(' ');
     const elemsHtml = line.elements.map((el, ei) => {
-      const cls = `elem${i === selLine && ei === selElem ? ' sel' : ''}`;
+      let cls = 'elem';
+      if (i === selLine && ei === selElem) {
+        cls += ' sel';
+        const b = prog.bytes[selByte!];
+        if (b?.chkErr)       cls += ' elem-err';
+        else if (b?.unclear) cls += ' elem-warn';
+      }
       return `<span class="${cls}" data-ei="${ei}">${escHtml(el)}</span>`;
     }).join('');
     return `<div class="${lineClass}" data-li="${i}">${elemsHtml}</div>`;
@@ -184,7 +190,7 @@ function selectByte(i: number): void {
   const prog = programs[activeIdx];
   if (prog) {
     basicPanel.querySelector('.basic-line.sel')?.classList.remove('sel');
-    basicPanel.querySelector('.elem.sel')?.classList.remove('sel');
+    basicPanel.querySelector('.elem.sel')?.classList.remove('sel', 'elem-err', 'elem-warn');
     const li = prog.lines.findIndex(l => i >= l.firstByte && i <= l.lastByte);
     if (li >= 0) {
       const line = prog.lines[li];
@@ -197,7 +203,13 @@ function selectByte(i: number): void {
       lineEl?.scrollIntoView({ block: 'nearest' });
       const ei = elemIdxForByte(line, i);
       if (ei >= 0) {
-        lineEl?.querySelector<HTMLElement>(`[data-ei="${ei}"]`)?.classList.add('sel');
+        const elemEl = lineEl?.querySelector<HTMLElement>(`[data-ei="${ei}"]`);
+        if (elemEl) {
+          elemEl.classList.add('sel');
+          const b = prog.bytes[i];
+          if (b?.chkErr)       elemEl.classList.add('elem-err');
+          else if (b?.unclear) elemEl.classList.add('elem-warn');
+        }
       }
     }
   }
