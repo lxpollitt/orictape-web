@@ -1,60 +1,71 @@
-import './style.css'
-import typescriptLogo from './assets/typescript.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import { setupCounter } from './counter.ts'
+import './style.css';
+import type { WorkerResponse } from './worker';
+import type { Program } from './decoder';
 
-document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
-<section id="center">
-  <div class="hero">
-    <img src="${heroImg}" class="base" width="170" height="179">
-    <img src="${typescriptLogo}" class="framework" alt="TypeScript logo"/>
-    <img src=${viteLogo} class="vite" alt="Vite logo" />
-  </div>
-  <div>
-    <h1>Get started</h1>
-    <p>Edit <code>src/main.ts</code> and save to test <code>HMR</code></p>
-  </div>
-  <button id="counter" type="button" class="counter"></button>
-</section>
+const fileInput = document.getElementById('file-input') as HTMLInputElement;
+const status    = document.getElementById('status')     as HTMLParagraphElement;
+const output    = document.getElementById('output')     as HTMLDivElement;
 
-<div class="ticks"></div>
+// The worker runs the decode off the main thread so the UI never freezes.
+const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
 
-<section id="next-steps">
-  <div id="docs">
-    <svg class="icon" role="presentation" aria-hidden="true"><use href="/icons.svg#documentation-icon"></use></svg>
-    <h2>Documentation</h2>
-    <p>Your questions, answered</p>
-    <ul>
-      <li>
-        <a href="https://vite.dev/" target="_blank">
-          <img class="logo" src=${viteLogo} alt="" />
-          Explore Vite
-        </a>
-      </li>
-      <li>
-        <a href="https://www.typescriptlang.org" target="_blank">
-          <img class="button-icon" src="${typescriptLogo}" alt="">
-          Learn more
-        </a>
-      </li>
-    </ul>
-  </div>
-  <div id="social">
-    <svg class="icon" role="presentation" aria-hidden="true"><use href="/icons.svg#social-icon"></use></svg>
-    <h2>Connect with us</h2>
-    <p>Join the Vite community</p>
-    <ul>
-      <li><a href="https://github.com/vitejs/vite" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#github-icon"></use></svg>GitHub</a></li>
-      <li><a href="https://chat.vite.dev/" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#discord-icon"></use></svg>Discord</a></li>
-      <li><a href="https://x.com/vite_js" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#x-icon"></use></svg>X.com</a></li>
-      <li><a href="https://bsky.app/profile/vite.dev" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#bluesky-icon"></use></svg>Bluesky</a></li>
-    </ul>
-  </div>
-</section>
+worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
+  const data = e.data;
+  if (!data.ok) {
+    status.textContent = '';
+    output.innerHTML = `<p class="error">Error: ${escHtml(data.error)}</p>`;
+    return;
+  }
+  const { programs, sampleCount } = data;
+  status.textContent =
+    `Decoded ${programs.length} program${programs.length !== 1 ? 's' : ''} ` +
+    `from ${(sampleCount / 44100).toFixed(1)}s of audio.`;
+  renderPrograms(programs);
+};
 
-<div class="ticks"></div>
-<section id="spacer"></section>
-`
+worker.onerror = (e) => {
+  status.textContent = '';
+  output.innerHTML = `<p class="error">Worker error: ${escHtml(e.message)}</p>`;
+};
 
-setupCounter(document.querySelector<HTMLButtonElement>('#counter')!)
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files?.[0];
+  if (!file) return;
+
+  status.textContent = 'Loading…';
+  output.innerHTML = '';
+
+  // Read the file, then hand the ArrayBuffer to the worker.
+  // We do NOT transfer it (we keep a copy) so the main thread can
+  // access the raw samples later for the waveform view.
+  const buffer = await file.arrayBuffer();
+  status.textContent = 'Decoding… (large files may take several seconds)';
+  worker.postMessage({ buffer } satisfies { buffer: ArrayBuffer });
+});
+
+function renderPrograms(programs: Program[]): void {
+  if (programs.length === 0) {
+    output.innerHTML = '<p class="hint">No programs found. Is this an Oric cassette recording?</p>';
+    return;
+  }
+  let html = '';
+  for (const prog of programs) {
+    const hasErrors = prog.lines.some(l => l.lenErr);
+    html += `<section>`;
+    html += `<h2>${escHtml(prog.name || '(unnamed)')}`;
+    if (hasErrors) html += ` <span class="badge-err">errors</span>`;
+    html += `</h2><pre>`;
+    for (const line of prog.lines) {
+      const text = escHtml(line.v);
+      html += line.lenErr
+        ? `<span class="line-err" title="Line length mismatch">${text}</span>\n`
+        : `${text}\n`;
+    }
+    html += `</pre></section>`;
+  }
+  output.innerHTML = html;
+}
+
+function escHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}

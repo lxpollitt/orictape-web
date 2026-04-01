@@ -2,12 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>orictape-web</title>
+    <title>Orictape</title>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <header>
+        <h1>ORICTAPE</h1>
+        <input type="file" id="file-input" accept=".wav" />
+        <p id="status">Load a WAV file to begin.</p>
+      </header>
+      <div id="output"></div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
