@@ -11,7 +11,8 @@ export class WaveformView {
 
   private samples:    Int16Array | null = null;
   private prog:       Program | null    = null;
-  private bitIsError: Uint8Array | null = null; // per-bit: 1 if part of a chkErr byte
+  private bitIsError:    Uint8Array | null = null; // per-bit: 1 if part of a chkErr byte (waveform colouring)
+  private bitIsParityErr: Uint8Array | null = null; // per-bit: 1 only for the parity bit of a chkErr byte (label colouring)
 
   private viewStart = 0;
   private spp       = 10;   // samples per pixel (zoom level)
@@ -37,17 +38,21 @@ export class WaveformView {
     this.prog    = prog;
     this.selByte = null;
 
-    // Pre-compute a per-bit error flag from byte checksum errors.
+    // Pre-compute per-bit flags from byte checksum errors.
     const { bitCount } = prog.stream;
-    const bitIsError = new Uint8Array(bitCount);
+    const bitIsError    = new Uint8Array(bitCount);
+    const bitIsParityErr = new Uint8Array(bitCount);
     for (const byte of prog.bytes) {
       if (byte.chkErr) {
         for (let b = byte.firstBit; b <= byte.lastBit && b < bitCount; b++) {
           bitIsError[b] = 1;
         }
+        // Mark only the parity bit for label-level highlighting.
+        if (byte.lastBit < bitCount) bitIsParityErr[byte.lastBit] = 1;
       }
     }
-    this.bitIsError = bitIsError;
+    this.bitIsError     = bitIsError;
+    this.bitIsParityErr = bitIsParityErr;
 
     // Default view: show the whole stream condensed into the canvas width.
     const len = prog.stream.lastSample - prog.stream.firstSample;
@@ -81,13 +86,15 @@ export class WaveformView {
       return;
     }
 
-    const stream = prog.stream;
-    const w      = canvas.width;
-    const h      = canvas.height;
-    const midY   = h / 2;
-    const scaleY = (h * 0.45) / 32768;
-    const spp    = this.spp;
-    const vs     = this.viewStart;
+    const stream  = prog.stream;
+    const w       = canvas.width;
+    const h       = canvas.height;
+    const LABEL_H = 20;
+    const waveH   = h - LABEL_H;
+    const midY    = waveH / 2;
+    const scaleY  = (waveH * 0.45) / 32768;
+    const spp     = this.spp;
+    const vs      = this.viewStart;
 
     // Background
     ctx.fillStyle = '#1a1a1a';
@@ -101,7 +108,7 @@ export class WaveformView {
     ctx.lineTo(w, midY);
     ctx.stroke();
 
-    // Selected-byte highlight band
+    // Selected-byte highlight band (spans full canvas height including label strip)
     if (this.selByte !== null) {
       const b = prog.bytes[this.selByte];
       if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
@@ -113,8 +120,10 @@ export class WaveformView {
     }
 
     // Advance bit pointer to the first bit that could be visible.
+    // Save the starting index so the label pass can reuse it.
     let bi = 0;
     while (bi < stream.bitCount && stream.bitLastSample[bi] < vs) bi++;
+    const biStart = bi;
 
     // Draw waveform left-to-right, batching canvas strokes by colour.
     let curColor = '';
@@ -159,6 +168,43 @@ export class WaveformView {
       ctx.lineTo(x + 0.5, y2);
     }
     if (curColor) ctx.stroke();
+
+    // ── Label strip ───────────────────────────────────────────────────────────
+    ctx.strokeStyle = '#2a2a2a';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, waveH);
+    ctx.lineTo(w, waveH);
+    ctx.stroke();
+
+    // Bit labels fade in as spp drops below BIT_FADE_START toward BIT_FADE_FULL.
+    const BIT_FADE_START = 4;  // spp at which labels begin to appear
+    const BIT_FADE_FULL  = 2;  // spp at which labels are fully opaque
+    const bitAlpha = Math.min(1, Math.max(0,
+      (BIT_FADE_START - spp) / (BIT_FADE_START - BIT_FADE_FULL)));
+
+    if (bitAlpha > 0) {
+      ctx.font          = '13px ui-monospace, Cascadia Code, Consolas, monospace';
+      ctx.textAlign     = 'center';
+      ctx.textBaseline  = 'middle';
+      ctx.globalAlpha   = bitAlpha;
+      const labelY = waveH + LABEL_H / 2;
+
+      for (let lbi = biStart; lbi < stream.bitCount; lbi++) {
+        const x0 = (stream.bitFirstSample[lbi] - vs) / spp;
+        if (x0 > w) break;
+        const x1  = (stream.bitLastSample[lbi] - vs) / spp;
+        const cx  = (x0 + x1) / 2;
+        if (cx < 0) continue;
+        const col = this.bitIsParityErr![lbi] ? RED
+                  : stream.bitUnclear[lbi]    ? YELLOW
+                  : GREEN;
+        ctx.fillStyle = col;
+        ctx.fillText(stream.bitV[lbi] === 1 ? '1' : '0', cx, labelY);
+      }
+
+      ctx.globalAlpha = 1;
+    }
   }
 
   private attachEvents(): void {
