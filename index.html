@@ -12,7 +12,18 @@
         <input type="file" id="file-input" accept=".wav" />
         <p id="status">Load a WAV file to begin.</p>
       </header>
-      <div id="output"></div>
+      <nav id="prog-tabs"></nav>
+      <main id="panels">
+        <div id="waveform-panel">
+          <canvas id="waveform-canvas"></canvas>
+        </div>
+        <div id="hex-panel">
+          <div id="hex-view"></div>
+        </div>
+        <div id="basic-panel">
+          <div id="basic-view"></div>
+        </div>
+      </main>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
