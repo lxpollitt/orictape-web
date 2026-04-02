@@ -76,17 +76,16 @@ header h1 {
 .prog-tab:hover  { border-color: var(--border); }
 .prog-tab.active { color: var(--green); border-color: var(--green); }
 
-/* ── Three-panel layout ─────────────────────────────────────────────────────── */
+/* ── Panel layout ───────────────────────────────────────────────────────────── */
 #panels {
   display: grid;
-  grid-template-rows: 140px 1fr;
-  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 140px 120px 1fr;
+  grid-template-columns: 1fr;
   overflow: hidden;
   min-height: 0;
 }
 
 #waveform-panel {
-  grid-column: 1 / -1;
   border-bottom: 1px solid var(--border);
   overflow: hidden;
 }
@@ -98,17 +97,88 @@ header h1 {
 }
 
 #hex-panel {
-  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   overflow: auto;
   padding: 6px;
 }
 
+/* Tape mode: basic-view is the scrollable content container. */
 #basic-panel {
-  overflow: auto;
-  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-#basic-view { min-width: max-content; }
+#basic-view {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 10px;
+  min-height: 0;
+}
+
+/* Merged mode: basic-view holds the merge layout which manages its own scroll. */
+#basic-view.merge-active {
+  overflow: hidden;
+  padding: 0;
+  min-width: 0;
+}
+
+/* ── Three-column merge view ────────────────────────────────────────────────── */
+.merge-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header row sits inside .merge-rows so it scrolls horizontally with the columns.
+   position:sticky keeps it pinned to the top of the visible area on vertical scroll. */
+.merge-row-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  cursor: default;
+}
+
+/* The label span inside each header .merge-col carries the visual styling.
+   The parent .merge-col provides the width (ch units at 13px body font). */
+.merge-col-head {
+  display: block;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-col-head-result { opacity: 1.0; }
+
+.merge-rows {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.merge-row          { display: flex; cursor: pointer; }
+.merge-row:hover    { background: #202020; }
+.merge-row.sel      { background: #1e3a1e; }
+
+/* Each column is 1/3 of the available width but never narrower than 40 chars. */
+.merge-col          { flex: 1; min-width: 40ch; overflow-x: hidden; }
+.merge-col + .merge-col   { border-left: 1px solid var(--border); }
+.merge-col-result         { background: rgba(255,255,255,0.015); }
+
+/* Lines inside merge columns always wrap at 40 chars — matching the Oric-1 display. */
+.merge-col .basic-line          { white-space: pre-wrap; max-width: 39ch; word-break: break-all; cursor: default; }
+.merge-col .basic-line:hover    { background: transparent; }
+
+/* Source lines whose tape was not chosen for the merged output. */
+.merge-col .basic-line.not-merged { opacity: 0.3; }
 
 /* ── Hex view ───────────────────────────────────────────────────────────────── */
 .hex-grid { line-height: 2; }

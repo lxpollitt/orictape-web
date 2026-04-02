@@ -270,11 +270,12 @@ function renderTabs(): void {
 // ── Per-tape rendering (unchanged logic) ──────────────────────────────────────
 function renderAll(): void {
   renderTabs();
+  basicPanel.classList.toggle('merge-active', viewMode === 'merged');
 
   if (viewMode === 'merged') {
     const merged = mergedProgs[activeProgIdx] ?? null;
     if (!merged) { clearPanels(); return; }
-    renderMergedBasic(merged);
+    renderMergeView(merged);
     renderMergedHex(merged);
     // Show waveform from primary (tape 0) for now.
     const primProg    = tapes[0]?.programs[activeProgIdx];
@@ -386,38 +387,92 @@ function mergeProgs(): ReadonlyArray<Program | undefined> {
   return tapes.map(t => t.programs[activeProgIdx]);
 }
 
-function renderMergedBasic(merged: MergedProgram): void {
+/**
+ * Render a single BASIC line as an HTML string.
+ * `extraClass` is appended to the basic-line div's class list (e.g. 'not-merged').
+ */
+function renderBasicLineHtml(prog: Program, lineIdx: number, extraClass = ''): string {
+  const line      = prog.lines[lineIdx];
+  const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
+  const hasChkErr  = line.lenErr || lineBytes.some(b => b?.chkErr);
+  const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
+  const cls = [
+    'basic-line',
+    ...(hasChkErr  ? ['err']  : []),
+    ...(hasUnclear ? ['warn'] : []),
+    ...(extraClass ? [extraClass] : []),
+  ].join(' ');
+  const elems = line.elements.map((el, ei) => {
+    const errCls = elemErrorClass(prog, line.firstByte, ei);
+    return `<span class="elem${errCls ? ' ' + errCls : ''}">${escHtml(el)}</span>`;
+  }).join('');
+  return `<div class="${cls}">${elems}</div>`;
+}
+
+/**
+ * Render the three-column merge view (tape 0 | merged | tape 1) into basicPanel.
+ *
+ * Uses a single per-row flex layout so the DOM itself keeps columns aligned —
+ * no JS scroll synchronisation required.  Lines inside each column wrap at
+ * exactly 40 characters (matching the Oric-1 LIST display) via CSS.
+ */
+function renderMergeView(merged: MergedProgram): void {
   if (!merged.lines.length) {
     basicPanel.innerHTML = '<p class="hint">No BASIC content decoded.</p>';
     return;
   }
 
-  const progs = mergeProgs();
+  const progs    = mergeProgs();
+  const col0Name = tapes[0] ? shortName(tapes[0].filename) : 'Tape 1';
+  const col1Name = tapes[1] ? shortName(tapes[1].filename) : 'Tape 2';
 
-  basicPanel.innerHTML = merged.lines.map((line, i) => {
-    const src      = bestSource(line, progs);
-    const prog     = progs[src.tapeIdx];
-    const content  = prog?.lines[src.lineIdx].v ?? `(line ${line.lineNum})`;
-    const hasLenErr = prog?.lines[src.lineIdx].lenErr ?? false;
+  const rowsHtml = merged.lines.map((line, i) => {
+    const src    = bestSource(line, progs);
+    const rowSel = i === selMergeLine ? ' sel' : '';
 
-    const dots = Array.from({ length: merged.tapeCount }, (_, t) => {
-      const has   = line.sources.some(s => s.tapeIdx === t);
-      const color = TAPE_COLORS[t % TAPE_COLORS.length];
-      const cls   = has ? 'src-dot' : 'src-dot src-dot-absent';
-      return `<span class="${cls}" style="color:${color}">●</span>`;
-    }).join('');
+    // Left column — tape 0
+    const src0  = line.sources.find(s => s.tapeIdx === 0);
+    const prog0 = progs[0];
+    const col0 = src0 && prog0
+      ? renderBasicLineHtml(prog0, src0.lineIdx,
+          line.status === 'conflict' && src.tapeIdx !== 0 ? 'not-merged' : '')
+      : '';
 
-    const cls = [
-      'basic-line',
-      ...(hasLenErr                     ? ['err']             : []),
-      ...(line.status === 'conflict'    ? ['merged-conflict'] : []),
-      ...(line.status === 'single'      ? ['merged-single']   : []),
-      ...(line.status === 'partial'     ? ['merged-partial']  : []),
-      ...(i === selMergeLine            ? ['sel']             : []),
-    ].join(' ');
+    // Middle column — best-source merged line
+    const bestProg = progs[src.tapeIdx];
+    const colMid = bestProg
+      ? renderBasicLineHtml(bestProg, src.lineIdx)
+      : `<div class="basic-line">(line ${line.lineNum})</div>`;
 
-    return `<div class="${cls}" data-mli="${i}"><span class="src-dots">${dots}</span>${escHtml(content)}</div>`;
+    // Right column — tape 1
+    const src1  = line.sources.find(s => s.tapeIdx === 1);
+    const prog1 = progs[1];
+    const col1 = src1 && prog1
+      ? renderBasicLineHtml(prog1, src1.lineIdx,
+          line.status === 'conflict' && src.tapeIdx !== 1 ? 'not-merged' : '')
+      : '';
+
+    return `<div class="merge-row${rowSel}" data-mli="${i}">` +
+      `<div class="merge-col">${col0}</div>` +
+      `<div class="merge-col merge-col-result">${colMid}</div>` +
+      `<div class="merge-col">${col1}</div>` +
+      `</div>`;
   }).join('');
+
+  // The header row lives inside .merge-rows so it scrolls horizontally with the
+  // columns. Each cell is a full .merge-col (13px font → correct ch units for
+  // min-width) containing a .merge-col-head span that applies the 11px styling.
+  const headerHtml =
+    `<div class="merge-row-head">` +
+      `<div class="merge-col"><span class="merge-col-head">${escHtml(col0Name)}</span></div>` +
+      `<div class="merge-col merge-col-result"><span class="merge-col-head merge-col-head-result">Merged</span></div>` +
+      `<div class="merge-col"><span class="merge-col-head">${escHtml(col1Name)}</span></div>` +
+    `</div>`;
+
+  basicPanel.innerHTML =
+    `<div class="merge-view">` +
+    `<div class="merge-rows">${headerHtml}${rowsHtml}</div>` +
+    `</div>`;
 
   if (selMergeLine !== null) {
     basicPanel.querySelector<HTMLElement>(`[data-mli="${selMergeLine}"]`)
@@ -476,8 +531,9 @@ basicPanel.addEventListener('click', (e) => {
     const el = (e.target as Element).closest<HTMLElement>('[data-mli]');
     if (!el) return;
     selMergeLine = +el.dataset.mli!;
-    basicPanel.querySelector('.basic-line.sel')?.classList.remove('sel');
+    basicPanel.querySelector('.merge-row.sel')?.classList.remove('sel');
     el.classList.add('sel');
+    el.scrollIntoView({ block: 'nearest' });
     const merged = mergedProgs[activeProgIdx];
     if (merged) renderMergedHex(merged);
     updateStatusBar();
