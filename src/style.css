@@ -51,6 +51,19 @@ header h1 {
   color: var(--yellow);
 }
 
+#save-tap {
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  color: var(--green);
+  cursor: pointer;
+  white-space: nowrap;
+}
+#save-tap:hover { background: rgba(78, 201, 78, 0.12); }
+
 /* ── Program tabs ───────────────────────────────────────────────────────────── */
 #prog-tabs {
   display: flex;

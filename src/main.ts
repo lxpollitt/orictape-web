@@ -7,6 +7,7 @@ import {
   alignPrograms, bestSource,
   type MergedProgram, type LineStatus,
 } from './merger';
+import { encodeMergedTap, downloadTap } from './encoder';
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const fileInput  = document.getElementById('file-input')       as HTMLInputElement;
@@ -16,6 +17,7 @@ const hexPanel   = document.getElementById('hex-view')         as HTMLElement;
 const basicPanel = document.getElementById('basic-view')       as HTMLElement;
 const waveCanvas = document.getElementById('waveform-canvas')  as HTMLCanvasElement;
 const statusBar  = document.getElementById('statusbar')        as HTMLElement;
+const saveTapBtn = document.getElementById('save-tap')         as HTMLButtonElement;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 interface TapeData {
@@ -271,9 +273,11 @@ function renderTabs(): void {
 function renderAll(): void {
   renderTabs();
   basicPanel.classList.toggle('merge-active', viewMode === 'merged');
+  saveTapBtn.hidden = true;
 
   if (viewMode === 'merged') {
     const merged = mergedProgs[activeProgIdx] ?? null;
+    saveTapBtn.hidden = !merged;
     if (!merged) { clearPanels(); return; }
     renderMergeView(merged);
     renderMergedHex(merged);
@@ -520,6 +524,16 @@ function renderMergedHex(merged: MergedProgram): void {
 }
 
 // ── Selection (event delegation) ──────────────────────────────────────────────
+saveTapBtn.addEventListener('click', () => {
+  const merged = mergedProgs[activeProgIdx];
+  if (!merged) return;
+  const progs    = mergeProgs();
+  const progName = tapes.map(t => t.programs[activeProgIdx]?.name).find(n => n) ?? 'MERGED';
+  const filename = `${progName || 'merged'}.tap`;
+  const bytes    = encodeMergedTap(merged, progs, progName);
+  downloadTap(bytes, filename);
+});
+
 hexPanel.addEventListener('click', (e) => {
   if (viewMode !== 'tape') return;
   const el = (e.target as Element).closest<HTMLElement>('[data-i]');
