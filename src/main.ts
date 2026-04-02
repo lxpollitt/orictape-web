@@ -321,6 +321,23 @@ function elemIdxForByte(line: { firstByte: number; lastByte: number }, byteIdx: 
   return -1;
 }
 
+/**
+ * Return the CSS error class for element `ei` of a BASIC line based on the
+ * byte(s) it corresponds to — independent of whether the element is selected.
+ * Element 0 = line-number field (2 bytes at offsets +2,+3 from firstByte).
+ * Element ei ≥ 1 = single content byte at offset ei+3 from firstByte.
+ */
+function elemErrorClass(prog: Program, firstByte: number, ei: number): string {
+  const offsets = ei === 0 ? [2, 3] : [ei + 3];
+  let chkErr = false, unclear = false;
+  for (const off of offsets) {
+    const b = prog.bytes[firstByte + off];
+    if (b?.chkErr)       chkErr   = true;
+    else if (b?.unclear) unclear  = true;
+  }
+  return chkErr ? 'elem-err' : unclear ? 'elem-warn' : '';
+}
+
 function renderBasic(prog: Program): void {
   if (!prog.lines.length) {
     basicPanel.innerHTML = '<p class="hint">No BASIC content decoded.</p>';
@@ -333,21 +350,25 @@ function renderBasic(prog: Program): void {
   const selElem = selLine >= 0 ? elemIdxForByte(prog.lines[selLine], selByte!) : -1;
 
   basicPanel.innerHTML = prog.lines.map((line, i) => {
+    // Classify the line: 'err' if lenErr or any chkErr byte; 'warn' if only
+    // unclear bytes (no hard errors).  Background tints are applied via CSS.
+    const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
+    const hasChkErr = line.lenErr || lineBytes.some(b => b?.chkErr);
+    const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
     const lineClass = [
       'basic-line',
-      ...(line.lenErr   ? ['err'] : []),
+      ...(hasChkErr  ? ['err']  : []),
+      ...(hasUnclear ? ['warn'] : []),
       ...(i === selLine ? ['sel'] : []),
     ].join(' ');
+
     const elemsHtml = line.elements.map((el, ei) => {
-      let cls = 'elem';
-      if (i === selLine && ei === selElem) {
-        cls += ' sel';
-        const b = prog.bytes[selByte!];
-        if (b?.chkErr)       cls += ' elem-err';
-        else if (b?.unclear) cls += ' elem-warn';
-      }
-      return `<span class="${cls}" data-ei="${ei}">${escHtml(el)}</span>`;
+      // Error class is always applied so errors are visible without selecting.
+      const errCls = elemErrorClass(prog, line.firstByte, ei);
+      const selCls = (i === selLine && ei === selElem) ? ' sel' : '';
+      return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
     }).join('');
+
     return `<div class="${lineClass}" data-li="${i}">${elemsHtml}</div>`;
   }).join('');
 
@@ -488,7 +509,8 @@ function selectByte(i: number): void {
   const prog = programs[activeProgIdx];
   if (prog) {
     basicPanel.querySelector('.basic-line.sel')?.classList.remove('sel');
-    basicPanel.querySelector('.elem.sel')?.classList.remove('sel', 'elem-err', 'elem-warn');
+    // elem-err/elem-warn are render-time state set by renderBasic; only 'sel' is transient.
+    basicPanel.querySelector('.elem.sel')?.classList.remove('sel');
     const li = prog.lines.findIndex(l => i >= l.firstByte && i <= l.lastByte);
     if (li >= 0) {
       const line = prog.lines[li];
@@ -500,13 +522,7 @@ function selectByte(i: number): void {
       lineEl?.scrollIntoView({ block: 'nearest' });
       const ei = elemIdxForByte(line, i);
       if (ei >= 0) {
-        const elemEl = lineEl?.querySelector<HTMLElement>(`[data-ei="${ei}"]`);
-        if (elemEl) {
-          elemEl.classList.add('sel');
-          const b = prog.bytes[i];
-          if (b?.chkErr)       elemEl.classList.add('elem-err');
-          else if (b?.unclear) elemEl.classList.add('elem-warn');
-        }
+        lineEl?.querySelector<HTMLElement>(`[data-ei="${ei}"]`)?.classList.add('sel');
       }
     }
   }
