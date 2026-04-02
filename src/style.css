@@ -165,6 +165,56 @@ header h1 {
 .sb-warn { color: var(--yellow); }
 .sb-err  { color: var(--red); }
 
+/* ── Tape labels & merged tab ───────────────────────────────────────────────── */
+.tape-label {
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.5;
+  white-space: nowrap;
+  user-select: none;
+}
+.tape-label-sep {
+  border-left: 1px solid var(--border);
+  margin-left: 6px;
+  padding-left: 8px;
+}
+
+.merged-tab { border-style: dashed !important; }
+
+.badge {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  vertical-align: middle;
+}
+.badge-err  { background: #2a1414; color: var(--red); }
+.badge-warn { background: #2a2014; color: var(--yellow); }
+
+/* ── Merged BASIC view ──────────────────────────────────────────────────────── */
+.src-dots {
+  display: inline-flex;
+  gap: 1px;
+  margin-right: 6px;
+  font-size: 10px;
+  vertical-align: middle;
+  line-height: 1;
+}
+.src-dot-absent { opacity: 0.2; }
+
+.basic-line.merged-conflict { color: var(--yellow); }
+.basic-line.merged-single   { opacity: 0.75; }
+.basic-line.merged-partial  { color: #88aaff; }
+
+/* ── Merged hex view ────────────────────────────────────────────────────────── */
+.hex-source-label {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
 /* ── Misc ───────────────────────────────────────────────────────────────────── */
 .hint {
   padding: 10px;
