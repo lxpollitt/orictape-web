@@ -51,6 +51,19 @@ header h1 {
   color: var(--yellow);
 }
 
+#file-label {
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  color: var(--green);
+  cursor: pointer;
+  white-space: nowrap;
+}
+#file-label:hover { background: rgba(78, 201, 78, 0.12); }
+
 #build-tap {
   padding: 3px 10px;
   font: inherit;
