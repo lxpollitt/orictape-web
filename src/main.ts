@@ -5,7 +5,7 @@ import type { WorkerResponse } from './worker';
 import type { Program } from './decoder';
 import {
   alignPrograms, bestSource,
-  type MergedProgram, type LineStatus,
+  type MergedProgram,
 } from './merger';
 import { linesFromProgram, linesFromMerged, encodeTapFile, downloadTap, type TapBlock } from './encoder';
 
@@ -291,10 +291,12 @@ function renderTabs(): void {
 
       let badge = '';
       if (merged) {
-        if (merged.conflicts > 0)
-          badge = ` <span class="badge badge-err">${merged.conflicts} conflict${merged.conflicts !== 1 ? 's' : ''}</span>`;
-        else if (merged.singles > 0 || merged.partial > 0)
-          badge = ` <span class="badge badge-warn">${merged.singles + merged.partial} unverified</span>`;
+        if (merged.issues > 0)
+          badge += ` <span class="badge badge-err">${merged.issues} issue${merged.issues !== 1 ? 's' : ''}</span>`;
+        if (merged.recovered > 0)
+          badge += ` <span class="badge badge-ok">${merged.recovered} recovered</span>`;
+        if (merged.unverified > 0 && merged.issues === 0)
+          badge += ` <span class="badge badge-warn">${merged.unverified} unverified</span>`;
       }
       btn.innerHTML = `<span class="prog-num">${mi + 1}</span>Merged` + badge;
       progTabs.appendChild(btn);
@@ -479,11 +481,13 @@ function renderMergeView(merged: MergedProgram): void {
           line.status === 'conflict' && src.tapeIdx !== 0 ? 'not-merged' : '')
       : '';
 
-    // Middle column — best-source merged line
+    // Middle column — best-source merged line.
+    // Force error colouring for 'issue' lines even when the chosen source looks
+    // clean (e.g. two byte-perfect sources that disagree — one must be wrong).
     const bestProg = progs[src.tapeIdx];
     const colMid = bestProg
-      ? renderBasicLineHtml(bestProg, src.lineIdx)
-      : `<div class="basic-line">(line ${line.lineNum})</div>`;
+      ? renderBasicLineHtml(bestProg, src.lineIdx, line.quality === 'issue' ? 'err' : '')
+      : `<div class="basic-line err">(line ${line.lineNum})</div>`;
 
     // Right column — tape 1
     const src1  = line.sources.find(s => s.tapeIdx === 1);
@@ -923,24 +927,32 @@ function updateMergedStatusBar(): void {
   if (selMergeLine === null) {
     // Summary view.
     const parts: string[] = [`${merged.total} lines`];
-    if (merged.consensus > 0)
-      parts.push(`<span style="color:var(--green)">${merged.consensus} consensus</span>`);
-    if (merged.conflicts > 0)
-      parts.push(`<span class="sb-err">${merged.conflicts} conflict${merged.conflicts !== 1 ? 's' : ''}</span>`);
-    if (merged.singles + merged.partial > 0)
-      parts.push(`<span class="sb-warn">${merged.singles + merged.partial} single-source</span>`);
+    if (merged.clean > 0)
+      parts.push(`<span style="color:var(--green)">${merged.clean} clean</span>`);
+    if (merged.recovered > 0)
+      parts.push(`<span style="color:var(--green)">${merged.recovered} recovered</span>`);
+    if (merged.issues > 0)
+      parts.push(`<span class="sb-err">${merged.issues} issue${merged.issues !== 1 ? 's' : ''}</span>`);
+    if (merged.unverified > 0)
+      parts.push(`<span class="sb-warn">${merged.unverified} unverified</span>`);
     statusBar.innerHTML = parts.join(dot);
     return;
   }
 
   const line = merged.lines[selMergeLine];
-  const STATUS_LABEL: Record<LineStatus, string> = {
-    consensus: `<span style="color:var(--green)">Consensus</span>`,
-    conflict:  `<span class="sb-err">Conflict · ${line.sources.length} tapes differ</span>`,
-    partial:   `<span class="sb-warn">Partial · ${line.sources.length}/${merged.tapeCount} tapes</span>`,
-    single:    `<span class="sb-warn">Single source · tape ${(line.sources[0]?.tapeIdx ?? 0) + 1}</span>`,
+
+  // Per-line quality label with structural detail.
+  const QUALITY_LABEL: Record<string, string> = {
+    clean:      `<span style="color:var(--green)">Clean</span>`,
+    recovered:  `<span style="color:var(--green)">Recovered · clean source chosen over corrupt</span>`,
+    issue:      line.status === 'consensus'
+                  ? `<span class="sb-err">Issue · sources agree but contain errors</span>`
+                  : `<span class="sb-err">Issue · ${line.sources.length} sources conflict</span>`,
+    unverified: line.status === 'single'
+                  ? `<span class="sb-warn">Unverified · single source (tape ${(line.sources[0]?.tapeIdx ?? 0) + 1})</span>`
+                  : `<span class="sb-warn">Unverified · ${line.sources.length}/${merged.tapeCount} tapes</span>`,
   };
-  const segs = [`BASIC line ${line.lineNum}`, STATUS_LABEL[line.status]];
+  const segs = [`BASIC line ${line.lineNum}`, QUALITY_LABEL[line.quality]];
   statusBar.innerHTML = segs.join(dot) + pipe + `Line ${selMergeLine + 1}`;
 }
 

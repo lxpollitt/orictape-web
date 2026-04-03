@@ -350,6 +350,7 @@ header h1 {
 }
 .badge-err  { background: #2a1414; color: var(--red); }
 .badge-warn { background: #2a2014; color: var(--yellow); }
+.badge-ok   { background: #142a14; color: #6ab96a; }
 
 /* ── Merged BASIC view ──────────────────────────────────────────────────────── */
 .src-dots {

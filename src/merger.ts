@@ -22,9 +22,23 @@ export type LineStatus =
   | 'partial'     // some (but not all) tapes have this line
   | 'single';     // exactly one tape has this line
 
+/**
+ * Quality of the merged output line — independent of structural status.
+ *
+ *  clean      — all sources agree and every source is byte-perfect
+ *  issue      — merged output is uncertain: either sources disagree (with no
+ *               clear winner), all copies are corrupt, or they agree on data
+ *               that contains errors / unclear bytes
+ *  recovered  — a conflict existed but a clean source beat a corrupt one;
+ *               the chosen output is byte-perfect
+ *  unverified — only one tape (or a subset) has this line; cannot cross-check
+ */
+export type LineQuality = 'clean' | 'issue' | 'recovered' | 'unverified';
+
 export interface AlignedLine {
   lineNum:     number;
   status:      LineStatus;
+  quality:     LineQuality;
   sources:     LineSource[];
   /** Populated lazily by mergeLineBytes() (Phase 2 — currently always null). */
   mergedBytes: MergedByte[] | null;
@@ -47,12 +61,12 @@ export interface MergedProgram {
   /** Total number of tape slots (some may be undefined/absent). */
   tapeCount:  number;
   lines:      AlignedLine[];
-  // Summary counts for badges / status bar
+  // Summary counts for badges / status bar (based on LineQuality)
   total:      number;
-  consensus:  number;
-  conflicts:  number;
-  partial:    number;
-  singles:    number;
+  clean:      number;   // all sources agree and all are byte-perfect
+  issues:     number;   // uncertain output — needs human attention
+  recovered:  number;   // conflicts resolved by preferring a clean source
+  unverified: number;   // single-source or partial lines
 }
 
 // ── Primary algorithm: line-level alignment ───────────────────────────────────
@@ -91,24 +105,26 @@ export function alignPrograms(
     }
   }
 
-  // Step 3 — sort and classify.
+  // Step 3 — sort, classify, and assess quality.
   const sortedNums = [...lineMap.keys()].sort((a, b) => a - b);
   const lines: AlignedLine[] = sortedNums.map(lineNum => {
     const sources = lineMap.get(lineNum)!;
+    const status  = classifyLine(sources, programs, tapeCount);
     return {
       lineNum,
-      status:      classifyLine(sources, programs, tapeCount),
+      status,
+      quality:     computeLineQuality(status, sources, programs),
       sources,
       mergedBytes: null,
     };
   });
 
-  const consensus = lines.filter(l => l.status === 'consensus').length;
-  const conflicts = lines.filter(l => l.status === 'conflict').length;
-  const partial   = lines.filter(l => l.status === 'partial').length;
-  const singles   = lines.filter(l => l.status === 'single').length;
+  const clean      = lines.filter(l => l.quality === 'clean').length;
+  const issues     = lines.filter(l => l.quality === 'issue').length;
+  const recovered  = lines.filter(l => l.quality === 'recovered').length;
+  const unverified = lines.filter(l => l.quality === 'unverified').length;
 
-  return { tapeCount, lines, total: lines.length, consensus, conflicts, partial, singles };
+  return { tapeCount, lines, total: lines.length, clean, issues, recovered, unverified };
 }
 
 /**
@@ -148,6 +164,66 @@ export function mergeLineBytes(
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Returns true only if every byte in the line is free of checksum errors,
+ * unclear bits, and length mismatches.  Both errors AND warnings count as
+ * not-clean so that "agree on corrupt data" is correctly flagged as an issue.
+ */
+function isLineClean(prog: Program, lineIdx: number): boolean {
+  const line = prog.lines[lineIdx];
+  if (line.lenErr) return false;
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    const b = prog.bytes[i];
+    if (b?.chkErr || b?.unclear) return false;
+  }
+  return true;
+}
+
+/**
+ * Derive a LineQuality value from the structural status and the byte-level
+ * health of each source.
+ *
+ * consensus + all clean      → clean
+ * consensus + any not-clean  → issue  (agreed-on errors may still be wrong)
+ * conflict  + all clean      → issue  (genuinely ambiguous; 50/50 chance wrong)
+ * conflict  + all corrupt    → issue  (best of bad options)
+ * conflict  + mixed          → recovered  (clean source chosen over corrupt)
+ * partial / single           → unverified
+ */
+function computeLineQuality(
+  status:   LineStatus,
+  sources:  LineSource[],
+  programs: ReadonlyArray<Program | undefined>,
+): LineQuality {
+  if (status === 'single' || status === 'partial') {
+    const allClean = sources.every(s => {
+      const prog = programs[s.tapeIdx];
+      return prog ? isLineClean(prog, s.lineIdx) : false;
+    });
+    if (!allClean) return 'issue';
+    // With only one tape loaded there is nothing to recover from — genuinely unverified.
+    // With multiple tapes the line was absent from some recordings (dropout/corruption)
+    // and has been salvaged from the tapes that do have it — treat as recovered.
+    const presentTapes = programs.filter(p => p !== undefined).length;
+    return presentTapes > 1 ? 'recovered' : 'unverified';
+  }
+
+  const cleanCount = sources.filter(s => {
+    const prog = programs[s.tapeIdx];
+    return prog ? isLineClean(prog, s.lineIdx) : false;
+  }).length;
+
+  if (status === 'consensus') {
+    if (cleanCount === sources.length) return 'clean';     // all agree, all byte-perfect
+    if (cleanCount > 0)               return 'recovered';  // clean copy confirms agreed content
+    return 'issue';                                        // all copies corrupt, no confirmation
+  }
+
+  // conflict
+  if (cleanCount === 0 || cleanCount === sources.length) return 'issue';
+  return 'recovered'; // some clean, some corrupt — merger can pick the clean one
+}
 
 interface FilteredLine {
   tapeIdx: number;
