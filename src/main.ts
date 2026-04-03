@@ -253,7 +253,8 @@ function renderTabs(): void {
       btn.dataset.ti = String(ti);
       btn.dataset.pi = String(pi);
       const hasErrors = prog.lines.some(l => l.lenErr);
-      btn.innerHTML   = escHtml(prog.name || `Prog ${pi + 1}`) +
+      btn.innerHTML   = `<span class="prog-num">${pi + 1}</span>` +
+        escHtml(prog.name || `Prog ${pi + 1}`) +
         (hasErrors ? ' <span class="badge badge-err">errors</span>' : '');
       progTabs.appendChild(btn);
     });
@@ -279,8 +280,7 @@ function renderTabs(): void {
         else if (merged.singles > 0 || merged.partial > 0)
           badge = ` <span class="badge badge-warn">${merged.singles + merged.partial} unverified</span>`;
       }
-      const label = mergedProgs.length > 1 ? `Prog ${mi + 1}` : 'View';
-      btn.innerHTML = label + badge;
+      btn.innerHTML = `<span class="prog-num">${mi + 1}</span>Merged` + badge;
       progTabs.appendChild(btn);
     });
   }
@@ -584,6 +584,7 @@ function renderTapBuilder(): void {
       const btn    = inQ ? '' : `<button class="tap-btn" data-add-kind="tape" data-add-ti="${ti}" data-add-pi="${pi}">→</button>`;
       availHtml +=
         `<div class="tap-item${dimmed}">` +
+        `<span class="prog-num">${pi + 1}</span>` +
         `<span class="tap-item-name">${escHtml(prog.name || `Prog ${pi + 1}`)}</span>` +
         btn +
         `</div>`;
@@ -597,11 +598,11 @@ function renderTapBuilder(): void {
       const key    = entryKey('merged', 0, mi);
       const inQ    = queued.has(key);
       const dimmed = inQ ? ' tap-item-dimmed' : '';
-      const label  = mergedProgs.filter(m => m).length > 1 ? `Merged prog ${mi + 1}` : 'Merged';
       const btn    = inQ ? '' : `<button class="tap-btn" data-add-kind="merged" data-add-ti="0" data-add-pi="${mi}">→</button>`;
       availHtml +=
         `<div class="tap-item${dimmed}">` +
-        `<span class="tap-item-name">${escHtml(label)}</span>` +
+        `<span class="prog-num">${mi + 1}</span>` +
+        `<span class="tap-item-name">Merged</span>` +
         btn +
         `</div>`;
     });

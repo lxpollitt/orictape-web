@@ -280,6 +280,22 @@ header h1 {
 
 .merged-tab { border-style: dashed !important; }
 
+.prog-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-right: 5px;
+  font-size: 10px;
+  line-height: 1;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  opacity: 0.45;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
 .badge {
   display: inline-block;
   padding: 0 4px;
