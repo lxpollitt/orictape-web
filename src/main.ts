@@ -17,6 +17,9 @@ const hexPanel   = document.getElementById('hex-view')         as HTMLElement;
 const basicPanel = document.getElementById('basic-view')       as HTMLElement;
 const waveCanvas = document.getElementById('waveform-canvas')  as HTMLCanvasElement;
 const statusBar  = document.getElementById('statusbar')        as HTMLElement;
+const basicTypeEl  = document.getElementById('basic-type')      as HTMLElement;
+const wrapLabelEl  = document.getElementById('wrap-label')      as HTMLElement;
+const wrapToggle   = document.getElementById('wrap-toggle')     as HTMLInputElement;
 const buildTapBtn  = document.getElementById('build-tap')       as HTMLButtonElement;
 const tapModal     = document.getElementById('tap-modal')       as HTMLElement;
 const tapAvailEl   = document.getElementById('tap-avail')       as HTMLElement;
@@ -39,6 +42,7 @@ let viewMode:     'tape' | 'merged'       = 'tape';
 let mergedProgs:  (MergedProgram | null)[] = [];
 let selByte:      number | null            = null;
 let selMergeLine: number | null            = null;
+let wrapMode      = true;
 
 // ── TAP builder state ─────────────────────────────────────────────────────────
 interface TapQueueEntry {
@@ -57,6 +61,18 @@ let programs:    Program[]         = [];
 let leftSamples: Int16Array | null = null;
 
 const waveform = new WaveformView(waveCanvas);
+
+// Apply initial wrap state and keep in sync with the checkbox.
+const appEl = document.getElementById('app')!;
+appEl.classList.toggle('basic-wrap', wrapMode);
+wrapToggle.checked = wrapMode;
+wrapToggle.addEventListener('change', () => {
+  wrapMode = wrapToggle.checked;
+  appEl.classList.toggle('basic-wrap', wrapMode);
+  // When toggling in merged mode, the CSS class change alters line rendering;
+  // wait one frame for the browser to apply the new styles before measuring.
+  if (viewMode === 'merged') requestAnimationFrame(applyMergeColumnWidths);
+});
 
 function activateTape(ti: number, pi: number): void {
   activeTapeIdx = ti;
@@ -295,6 +311,8 @@ function renderAll(): void {
 
   if (viewMode === 'merged') {
     const merged = mergedProgs[activeProgIdx] ?? null;
+    basicTypeEl.textContent = 'BASIC program (merged)';
+    wrapLabelEl.hidden = !merged;
     if (!merged) { clearPanels(); return; }
     renderMergeView(merged);
     renderMergedHex(merged);
@@ -307,6 +325,8 @@ function renderAll(): void {
   }
 
   const prog = programs[activeProgIdx];
+  basicTypeEl.textContent = prog ? 'BASIC program found' : '';
+  wrapLabelEl.hidden = !prog;
   if (!prog) { clearPanels(); return; }
   renderHex(prog);
   renderBasic(prog);
@@ -495,9 +515,67 @@ function renderMergeView(merged: MergedProgram): void {
     `<div class="merge-rows">${headerHtml}${rowsHtml}</div>` +
     `</div>`;
 
+  applyMergeColumnWidths();
+
+  // Attach directly to the scroll container so currentTarget is unambiguous.
+  // Each renderMergeView() replaces the DOM so the old listener is GC'd with
+  // the old element; the fresh .merge-rows gets a fresh listener.
+  basicPanel.querySelector<HTMLElement>('.merge-rows')
+    ?.addEventListener('wheel', (e: WheelEvent) => {
+      if (e.deltaX === 0) return;
+      const el = e.currentTarget as HTMLElement;
+      const atLeft  = el.scrollLeft <= 0                               && e.deltaX < 0;
+      const atRight = el.scrollLeft + el.clientWidth >= el.scrollWidth && e.deltaX > 0;
+      if (atLeft || atRight) e.preventDefault();
+    }, { passive: false });
+
   if (selMergeLine !== null) {
     basicPanel.querySelector<HTMLElement>(`[data-mli="${selMergeLine}"]`)
       ?.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+/**
+ * In no-wrap mode, measure each column's true content width (via scrollWidth,
+ * which includes hidden overflow) and lock it with an inline style so the three
+ * columns are exactly as wide as their widest line rather than clipping at 1/3
+ * of the container.  In wrap mode, clear any previously applied inline widths
+ * so the flex layout resumes normally.
+ */
+function applyMergeColumnWidths(): void {
+  const rows = Array.from(
+    basicPanel.querySelectorAll<HTMLElement>('.merge-row, .merge-row-head'),
+  );
+  if (!rows.length) return;
+
+  if (wrapMode) {
+    // Restore flex layout — clear any JS-set widths.
+    for (const row of rows) {
+      row.querySelectorAll<HTMLElement>('.merge-col').forEach(col => {
+        col.style.flex  = '';
+        col.style.width = '';
+      });
+    }
+    return;
+  }
+
+  // Measure the maximum content width for each column position (0, 1, 2).
+  // scrollWidth captures overflow even when overflow-x: hidden.
+  const maxW = [0, 0, 0];
+  for (const row of rows) {
+    row.querySelectorAll<HTMLElement>('.merge-col').forEach((col, i) => {
+      if (i < 3) maxW[i] = Math.max(maxW[i], col.scrollWidth);
+    });
+  }
+
+  // Apply fixed widths and opt each column out of flex grow/shrink.
+  for (const row of rows) {
+    row.querySelectorAll<HTMLElement>('.merge-col').forEach((col, i) => {
+      if (i < 3) {
+        col.style.flex  = 'none';
+        col.style.width = `${maxW[i]}px`;
+      }
+    });
   }
 }
 
@@ -709,6 +787,23 @@ hexPanel.addEventListener('click', (e) => {
   const el = (e.target as Element).closest<HTMLElement>('[data-i]');
   if (el) selectByte(+el.dataset.i!);
 });
+
+// Prevent Safari's swipe-back/forward navigation gesture from firing when the
+// user reaches the horizontal scroll boundary of the BASIC panel.  We intercept
+// wheel events and call preventDefault() only when the nearest scrollable
+// ancestor is already at its left/right limit in the direction of travel.
+// { passive: false } is required — passive listeners cannot call preventDefault().
+// Prevent Safari's swipe-back/forward navigation when reaching horizontal
+// scroll boundaries.  We attach directly to each scroll container so
+// currentTarget is unambiguous.  In tape mode basicPanel IS the scroll
+// container; in merged mode .merge-rows is (listener added after each render).
+basicPanel.addEventListener('wheel', (e: WheelEvent) => {
+  if (e.deltaX === 0 || viewMode !== 'tape') return;
+  const el = basicPanel;
+  const atLeft  = el.scrollLeft <= 0                               && e.deltaX < 0;
+  const atRight = el.scrollLeft + el.clientWidth >= el.scrollWidth && e.deltaX > 0;
+  if (atLeft || atRight) e.preventDefault();
+}, { passive: false });
 
 basicPanel.addEventListener('click', (e) => {
   if (viewMode === 'merged') {

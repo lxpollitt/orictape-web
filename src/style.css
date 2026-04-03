@@ -135,6 +135,35 @@ header h1 {
   overflow: hidden;
 }
 
+#basic-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 10px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+#basic-type {
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.6;
+}
+
+#wrap-label[hidden] { display: none; }
+#wrap-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.6;
+  cursor: pointer;
+}
+#wrap-label:hover { opacity: 1; }
+
 #basic-view {
   flex: 1;
   overflow: auto;
@@ -199,9 +228,25 @@ header h1 {
 .merge-col + .merge-col   { border-left: 1px solid var(--border); }
 .merge-col-result         { background: rgba(255,255,255,0.015); }
 
-/* Lines inside merge columns always wrap at 40 chars — matching the Oric-1 display. */
-.merge-col .basic-line          { white-space: pre-wrap; max-width: 39ch; word-break: break-all; cursor: default; }
+/* When wrap mode is active, all BASIC lines wrap at ~38 chars (Oric-1 LIST width). */
+.basic-wrap .basic-line         { white-space: pre-wrap; max-width: 39ch; word-break: break-all; }
+/* When wrap is off, preserve whitespace (like pre-wrap) but don't wrap lines. */
+#app:not(.basic-wrap) .basic-line { white-space: pre; }
+
+/* In no-wrap tape mode, lay lines out in a single max-content grid column so
+   every line shares the same width (the widest line's width).  This means
+   selection/error background shading extends uniformly across all lines
+   regardless of their individual length, even when scrolled right.
+   The :not(.merge-active) guard keeps this out of the merged view, which
+   manages its own column layout via applyMergeColumnWidths(). */
+#app:not(.basic-wrap) #basic-view:not(.merge-active) {
+  display: grid;
+  grid-template-columns: max-content;
+}
+.merge-col .basic-line          { cursor: default; }
 .merge-col .basic-line:hover    { background: transparent; }
+
+/* No-wrap column widths are applied via JS (see applyMergeColumnWidths in main.ts). */
 
 /* Source lines whose tape was not chosen for the merged output. */
 .merge-col .basic-line.not-merged { opacity: 0.3; }
