@@ -7,7 +7,7 @@ import {
   alignPrograms, bestSource,
   type MergedProgram, type LineStatus,
 } from './merger';
-import { encodeMergedTap, downloadTap } from './encoder';
+import { linesFromProgram, linesFromMerged, encodeTapFile, downloadTap, type TapBlock } from './encoder';
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const fileInput  = document.getElementById('file-input')       as HTMLInputElement;
@@ -17,7 +17,13 @@ const hexPanel   = document.getElementById('hex-view')         as HTMLElement;
 const basicPanel = document.getElementById('basic-view')       as HTMLElement;
 const waveCanvas = document.getElementById('waveform-canvas')  as HTMLCanvasElement;
 const statusBar  = document.getElementById('statusbar')        as HTMLElement;
-const saveTapBtn = document.getElementById('save-tap')         as HTMLButtonElement;
+const buildTapBtn  = document.getElementById('build-tap')       as HTMLButtonElement;
+const tapModal     = document.getElementById('tap-modal')       as HTMLElement;
+const tapAvailEl   = document.getElementById('tap-avail')       as HTMLElement;
+const tapQueueEl   = document.getElementById('tap-queue')       as HTMLElement;
+const tapAutoEl    = document.getElementById('tap-auto')        as HTMLElement;
+const tapCancelBtn = document.getElementById('tap-cancel')      as HTMLButtonElement;
+const tapDlBtn     = document.getElementById('tap-download')    as HTMLButtonElement;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 interface TapeData {
@@ -33,6 +39,17 @@ let viewMode:     'tape' | 'merged'       = 'tape';
 let mergedProgs:  (MergedProgram | null)[] = [];
 let selByte:      number | null            = null;
 let selMergeLine: number | null            = null;
+
+// ── TAP builder state ─────────────────────────────────────────────────────────
+interface TapQueueEntry {
+  /** 'tape' for individual programs; 'merged' for merged output. */
+  kind:     'tape' | 'merged';
+  tapeIdx:  number;   // index into tapes[] (meaningful when kind === 'tape')
+  progIdx:  number;   // program ordinal within tape (or merged index)
+  autorun:  boolean;
+}
+
+let tapQueue: TapQueueEntry[] = [];
 
 // Convenience mirrors of the active tape — updated by activateTape().
 // All existing per-tape rendering code reads these without change.
@@ -273,11 +290,11 @@ function renderTabs(): void {
 function renderAll(): void {
   renderTabs();
   basicPanel.classList.toggle('merge-active', viewMode === 'merged');
-  saveTapBtn.hidden = true;
+  const anyProgs = tapes.some(t => t.programs.length > 0);
+  buildTapBtn.hidden = !anyProgs;
 
   if (viewMode === 'merged') {
     const merged = mergedProgs[activeProgIdx] ?? null;
-    saveTapBtn.hidden = !merged;
     if (!merged) { clearPanels(); return; }
     renderMergeView(merged);
     renderMergedHex(merged);
@@ -523,16 +540,168 @@ function renderMergedHex(merged: MergedProgram): void {
   hexPanel.innerHTML = html + '</div>';
 }
 
-// ── Selection (event delegation) ──────────────────────────────────────────────
-saveTapBtn.addEventListener('click', () => {
-  const merged = mergedProgs[activeProgIdx];
-  if (!merged) return;
-  const progs    = mergeProgs();
-  const progName = tapes.map(t => t.programs[activeProgIdx]?.name).find(n => n) ?? 'MERGED';
-  const filename = `${progName || 'merged'}.tap`;
-  const bytes    = encodeMergedTap(merged, progs, progName);
-  downloadTap(bytes, filename);
+// ── TAP builder modal ─────────────────────────────────────────────────────────
+
+buildTapBtn.addEventListener('click', openTapBuilder);
+tapCancelBtn.addEventListener('click', closeTapBuilder);
+tapModal.addEventListener('click', (e) => {
+  if (e.target === tapModal) closeTapBuilder();
 });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !tapModal.hidden) closeTapBuilder();
+});
+
+function openTapBuilder(): void {
+  tapQueue = [];
+  renderTapBuilder();
+  tapModal.hidden = false;
+}
+
+function closeTapBuilder(): void {
+  tapModal.hidden = true;
+}
+
+/**
+ * Return a stable key string for a queue entry to track which items are queued.
+ */
+function entryKey(kind: 'tape' | 'merged', tapeIdx: number, progIdx: number): string {
+  return `${kind}:${tapeIdx}:${progIdx}`;
+}
+
+function renderTapBuilder(): void {
+  // Build a set of queued keys for fast lookup.
+  const queued = new Set(tapQueue.map(e => entryKey(e.kind, e.tapeIdx, e.progIdx)));
+
+  // ── Available column ────────────────────────────────────────────────────────
+  let availHtml = '';
+
+  tapes.forEach((tape, ti) => {
+    availHtml += `<div class="tap-group-head">${escHtml(shortName(tape.filename))}</div>`;
+    tape.programs.forEach((prog, pi) => {
+      const key    = entryKey('tape', ti, pi);
+      const inQ    = queued.has(key);
+      const dimmed = inQ ? ' tap-item-dimmed' : '';
+      const btn    = inQ ? '' : `<button class="tap-btn" data-add-kind="tape" data-add-ti="${ti}" data-add-pi="${pi}">→</button>`;
+      availHtml +=
+        `<div class="tap-item${dimmed}">` +
+        `<span class="tap-item-name">${escHtml(prog.name || `Prog ${pi + 1}`)}</span>` +
+        btn +
+        `</div>`;
+    });
+  });
+
+  if (mergedProgs.some(m => m !== null)) {
+    availHtml += `<div class="tap-group-head">Merged</div>`;
+    mergedProgs.forEach((merged, mi) => {
+      if (!merged) return;
+      const key    = entryKey('merged', 0, mi);
+      const inQ    = queued.has(key);
+      const dimmed = inQ ? ' tap-item-dimmed' : '';
+      const label  = mergedProgs.filter(m => m).length > 1 ? `Merged prog ${mi + 1}` : 'Merged';
+      const btn    = inQ ? '' : `<button class="tap-btn" data-add-kind="merged" data-add-ti="0" data-add-pi="${mi}">→</button>`;
+      availHtml +=
+        `<div class="tap-item${dimmed}">` +
+        `<span class="tap-item-name">${escHtml(label)}</span>` +
+        btn +
+        `</div>`;
+    });
+  }
+
+  tapAvailEl.innerHTML = availHtml;
+
+  // ── Save-order and auto-run columns ─────────────────────────────────────────
+  let queueHtml = '';
+  let autoHtml  = '';
+
+  tapQueue.forEach((entry, qi) => {
+    let name: string;
+    let sub: string;
+    if (entry.kind === 'tape') {
+      const prog = tapes[entry.tapeIdx]?.programs[entry.progIdx];
+      name = prog?.name || `Prog ${entry.progIdx + 1}`;
+      sub  = `Tape ${entry.tapeIdx + 1}`;
+    } else {
+      name = mergedProgs.filter(m => m).length > 1
+        ? `Merged prog ${entry.progIdx + 1}`
+        : 'Merged';
+      sub  = 'Merged';
+    }
+    queueHtml +=
+      `<div class="tap-item">` +
+      `<span class="tap-item-name">${escHtml(name)}</span>` +
+      `<span class="tap-item-sub">${escHtml(sub)}</span>` +
+      `<button class="tap-btn" data-remove-qi="${qi}">←</button>` +
+      `</div>`;
+    autoHtml +=
+      `<div class="tap-auto-row">` +
+      `<input type="checkbox" data-auto-qi="${qi}"${entry.autorun ? ' checked' : ''}>` +
+      `</div>`;
+  });
+
+  tapQueueEl.innerHTML = queueHtml;
+  tapAutoEl.innerHTML  = autoHtml;
+
+  tapDlBtn.disabled = tapQueue.length === 0;
+}
+
+// Event delegation for the modal body.
+tapAvailEl.addEventListener('click', (e) => {
+  const btn = (e.target as Element).closest<HTMLElement>('[data-add-kind]');
+  if (!btn) return;
+  const kind    = btn.dataset.addKind as 'tape' | 'merged';
+  const tapeIdx = +(btn.dataset.addTi ?? '0');
+  const progIdx = +(btn.dataset.addPi ?? '0');
+  // Don't add duplicates.
+  if (tapQueue.some(q => q.kind === kind && q.tapeIdx === tapeIdx && q.progIdx === progIdx)) return;
+  tapQueue.push({ kind, tapeIdx, progIdx, autorun: false });
+  renderTapBuilder();
+});
+
+tapQueueEl.addEventListener('click', (e) => {
+  const btn = (e.target as Element).closest<HTMLElement>('[data-remove-qi]');
+  if (!btn) return;
+  const qi = +(btn.dataset.removeQi ?? '0');
+  tapQueue.splice(qi, 1);
+  renderTapBuilder();
+});
+
+tapAutoEl.addEventListener('change', (e) => {
+  const cb = (e.target as Element).closest<HTMLInputElement>('[data-auto-qi]');
+  if (!cb) return;
+  const qi = +(cb.dataset.autoQi ?? '0');
+  if (tapQueue[qi]) tapQueue[qi].autorun = cb.checked;
+});
+
+tapDlBtn.addEventListener('click', doDownloadTap);
+
+function doDownloadTap(): void {
+  if (tapQueue.length === 0) return;
+
+  const blocks: TapBlock[] = [];
+  for (const entry of tapQueue) {
+    if (entry.kind === 'tape') {
+      const prog = tapes[entry.tapeIdx]?.programs[entry.progIdx];
+      if (!prog) continue;
+      blocks.push({ name: prog.name || 'PROG', lines: linesFromProgram(prog), autorun: entry.autorun });
+    } else {
+      const merged = mergedProgs[entry.progIdx];
+      if (!merged) continue;
+      const progs = tapes.map(t => t.programs[entry.progIdx]);
+      const name  = tapes.map(t => t.programs[entry.progIdx]?.name).find(n => n) ?? 'MERGED';
+      blocks.push({ name, lines: linesFromMerged(merged, progs), autorun: entry.autorun });
+    }
+  }
+
+  if (blocks.length === 0) return;
+
+  // Derive filename from first block's name.
+  const filename = `${blocks[0].name || 'tape'}.tap`;
+  const bytes    = encodeTapFile(blocks);
+  downloadTap(bytes, filename);
+  closeTapBuilder();
+}
+
+// ── Selection (event delegation) ──────────────────────────────────────────────
 
 hexPanel.addEventListener('click', (e) => {
   if (viewMode !== 'tape') return;

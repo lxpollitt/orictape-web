@@ -10,7 +10,7 @@
       <header>
         <h1>ORICTAPE</h1>
         <input type="file" id="file-input" accept=".wav" multiple />
-        <button id="save-tap" hidden>Save .tap</button>
+        <button id="build-tap" hidden>Build TAP…</button>
         <p id="status">Load a WAV file to begin.</p>
       </header>
       <nav id="prog-tabs"></nav>
@@ -26,6 +26,28 @@
         </div>
       </main>
     <footer id="statusbar"></footer>
+    </div>
+    <div id="tap-modal" class="tap-modal-overlay" hidden>
+      <div class="tap-modal-box">
+        <div class="tap-modal-body">
+          <div class="tap-col tap-col-avail">
+            <div class="tap-col-header">Available</div>
+            <div class="tap-col-scroll" id="tap-avail"></div>
+          </div>
+          <div class="tap-col tap-col-queue">
+            <div class="tap-col-header">Save order</div>
+            <div class="tap-col-scroll" id="tap-queue"></div>
+          </div>
+          <div class="tap-col tap-col-auto">
+            <div class="tap-col-header">Auto-run</div>
+            <div class="tap-col-scroll" id="tap-auto"></div>
+          </div>
+        </div>
+        <div class="tap-modal-footer">
+          <button id="tap-cancel">Cancel</button>
+          <button id="tap-download" disabled>Download .tap</button>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
