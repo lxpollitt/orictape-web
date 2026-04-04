@@ -353,7 +353,6 @@ function renderHex(prog: Program): void {
     if (i >= lineFirst && i <= lineLast) cls.push('hb-line');
     if (i === selByte)                   cls.push('hb-sel');
     html += `<span class="${cls.join(' ')}" data-i="${i}">${b.v.toString(16).padStart(2, '0')}</span>`;
-    if ((i + 1) % 16 === 0) html += '<br>';
   });
   hexPanel.innerHTML = html + '</div>';
 }
@@ -608,7 +607,7 @@ function renderMergedHex(merged: MergedProgram): void {
   let html = `<div class="hex-grid">` +
     `<span class="hex-source-label" style="color:${tapeColor}">` +
     `Tape ${src.tapeIdx + 1} · BASIC line ${line.lineNum}` +
-    `</span><br>`;
+    `</span>`;
 
   for (let i = firstB; i <= lastB; i++) {
     const b   = prog.bytes[i];
@@ -617,7 +616,6 @@ function renderMergedHex(merged: MergedProgram): void {
       ...(b.unclear ? ['hb-unclear'] : []),
     ].join(' ');
     html += `<span class="${cls}">${b.v.toString(16).padStart(2, '0')}</span>`;
-    if (((i - firstB + 1) % 16) === 0) html += '<br>';
   }
   hexPanel.innerHTML = html + '</div>';
 }

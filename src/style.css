@@ -252,11 +252,17 @@ header h1 {
 .merge-col .basic-line.not-merged { opacity: 0.3; }
 
 /* ── Hex view ───────────────────────────────────────────────────────────────── */
-.hex-grid { line-height: 2; }
+.hex-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+}
+
+.hex-source-label { width: 100%; margin-bottom: 2px; }
 
 .hb {
-  display: inline-block;
   width: 2.4ch;
+  line-height: 2;
   text-align: center;
   border-radius: 2px;
   cursor: pointer;
