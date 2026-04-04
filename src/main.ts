@@ -934,16 +934,18 @@ function navigateHex(key: string, shift: boolean, prog: Program): void {
     return;
   }
 
-  // Shift+Left/Right — scan linearly for next error/warning byte.
+  // Alt+Left/Right — scan linearly for next error/warning byte.
   if (key === 'ArrowLeft' || key === 'ArrowRight') {
     const step = key === 'ArrowLeft' ? -1 : 1;
     for (let i = cur + step; i >= 0 && i < n; i += step) {
       if (isErrByte(prog.bytes[i])) { selectByte(i); return; }
     }
+    // No error found — go to the start or end of the file as end-of-search feedback.
+    selectByte(step < 0 ? 0 : n - 1);
     return;
   }
 
-  // Shift+Up/Down — jump to the first error byte of the next/prev row that
+  // Alt+Up/Down — jump to the first error byte of the next/prev row that
   // contains an error.  Column position is intentionally not preserved in this
   // first iteration but the row-walking structure makes it easy to add later.
   const bpr  = hexBytesPerRow();
@@ -957,6 +959,8 @@ function navigateHex(key: string, shift: boolean, prog: Program): void {
     }
     row += step;
   }
+  // No error row found — go to the start or end of the file as end-of-search feedback.
+  selectByte(step < 0 ? 0 : n - 1);
 }
 
 function navigateBasic(key: string, shift: boolean, prog: Program): void {
@@ -1078,10 +1082,13 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
       if (!landed) selectByte(byteForElem(line, 0));
       return;
     }
+    // No error line found — go to the first/last element as end-of-search feedback.
+    const edge = step < 0 ? lines[0] : lines[lines.length - 1];
+    selectByte(byteForElem(edge, step < 0 ? 0 : edge.elements.length - 1));
     return;
   }
 
-  // Shift+Left/Right — scan visible elements for the next/prev error, crossing
+  // Alt+Left/Right — scan visible elements for the next/prev error, crossing
   // line boundaries when needed.
   if (li < 0 || selByte === null) return;
   const step = key === 'ArrowLeft' ? -1 : 1;
@@ -1106,6 +1113,9 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
       if (prog.bytes[b] && isErrByte(prog.bytes[b])) { selectByte(b); return; }
     }
   }
+  // No error element found — go to the first/last element as end-of-search feedback.
+  const edge = step < 0 ? lines[0] : lines[lines.length - 1];
+  selectByte(byteForElem(edge, step < 0 ? 0 : edge.elements.length - 1));
 }
 
 const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
