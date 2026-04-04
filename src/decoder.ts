@@ -72,10 +72,6 @@ export interface Program {
   name: string;
 }
 
-const SHORT_THRESHOLD = 20;
-const LONG_THRESHOLD = 24;
-const NO_SIGNAL_THRESHOLD = 46;
-
 export const KEYWORDS: string[] = [
   'END', 'EDIT', 'STORE', 'RECALL', 'TRON', 'TROFF', 'POP', 'PLOT',
   'PULL', 'LORES', 'DOKE', 'REPEAT', 'UNTIL', 'FOR', 'LLIST', 'LPRINT', 'NEXT', 'DATA',
@@ -90,11 +86,11 @@ export const KEYWORDS: string[] = [
   'TRUE', 'FALSE', 'KEY$', 'SCRN', 'POINT', 'LEFT$', 'RIGHT$', 'MID$',
 ];
 
-export function readBitStreams(samples: Int16Array): BitStream[] {
+export function readBitStreams(samples: Int16Array, sampleRate = 44100): BitStream[] {
   const streams: BitStream[] = [];
   let startSample = 0;
   while (true) {
-    const { stream, samplesRead } = readBitStream(samples, startSample);
+    const { stream, samplesRead } = readBitStream(samples, startSample, sampleRate);
     if (samplesRead === 0) break;
     streams.push(stream);
     startSample += samplesRead;
@@ -102,7 +98,15 @@ export function readBitStreams(samples: Int16Array): BitStream[] {
   return streams;
 }
 
-function readBitStream(samples: Int16Array, startSample: number): { stream: BitStream; samplesRead: number } {
+function readBitStream(samples: Int16Array, startSample: number, sampleRate: number): { stream: BitStream; samplesRead: number } {
+  // All thresholds and windows are expressed in samples and scale linearly with
+  // sample rate.  The base values are calibrated for 44100 Hz.
+  const SHORT_THRESHOLD     = Math.round(20 * sampleRate / 44100); // short cycle  → bit 1
+  const LONG_THRESHOLD      = Math.round(24 * sampleRate / 44100); // long  cycle  → bit 0
+  const NO_SIGNAL_THRESHOLD = Math.round(46 * sampleRate / 44100); // gap / silence
+  const SEARCH_WINDOW       = Math.round(20 * sampleRate / 44100); // peak-search half-window
+  const MIN_SYNC_BITS       = Math.round(8820 * sampleRate / 44100); // 0.2 s minimum sync run
+
   // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
   // (every cycle is the shortest possible). We'll slice to actual size at the end.
   const maxBits = Math.ceil((samples.length - startSample) / SHORT_THRESHOLD) + 1;
@@ -123,10 +127,10 @@ function readBitStream(samples: Int16Array, startSample: number): { stream: BitS
   let streamMinVal = 0, streamMaxVal = 0;
 
   const readCycle = (): boolean => {
-    // Find next minimum within a 20-sample window after the current max.
+    // Find next minimum within a SEARCH_WINDOW after the current max.
     minVal = 32767;
     let swi = 0;
-    const minEnd = Math.min(maxIndex + 20, samples.length);
+    const minEnd = Math.min(maxIndex + SEARCH_WINDOW, samples.length);
     for (let i = maxIndex + 1; i < minEnd; i++) {
       if (samples[i] < minVal) { minVal = samples[i]; swi = i - maxIndex - 1; }
     }
@@ -142,10 +146,10 @@ function readBitStream(samples: Int16Array, startSample: number): { stream: BitS
     belowIndex = maxIndex + 1 + swi;
     lengthBelow = belowIndex - aboveIndex;
 
-    // Find next maximum within a 20-sample window after the current min.
+    // Find next maximum within a SEARCH_WINDOW after the current min.
     maxVal = -32768;
     swi = 0;
-    const maxEnd = Math.min(minIndex + 20, samples.length);
+    const maxEnd = Math.min(minIndex + SEARCH_WINDOW, samples.length);
     for (let i = minIndex + 1; i < maxEnd; i++) {
       if (samples[i] > maxVal) { maxVal = samples[i]; swi = i - minIndex - 1; }
     }
@@ -185,8 +189,8 @@ function readBitStream(samples: Int16Array, startSample: number): { stream: BitS
     return false;
   };
 
-  // Keep searching until we find a continuous run of at least 0.2s (8820 bits at 44100 Hz).
-  while (maxIndex < samples.length && bitCount < 8820) {
+  // Keep searching until we find a continuous run of at least 0.2 s (MIN_SYNC_BITS).
+  while (maxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
     bitCount = 0;  // reset without reallocating
     streamFirstSample = aboveIndex;
     while (maxIndex < samples.length) {

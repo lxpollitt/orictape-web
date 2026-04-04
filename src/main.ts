@@ -31,9 +31,10 @@ const tapDlBtn     = document.getElementById('tap-download')    as HTMLButtonEle
 
 // ── State ─────────────────────────────────────────────────────────────────────
 interface TapeData {
-  filename: string;
-  samples:  Int16Array;
-  programs: Program[];
+  filename:   string;
+  samples:    Int16Array;
+  sampleRate: number;
+  programs:   Program[];
 }
 
 let tapes:        TapeData[]              = [];
@@ -120,13 +121,14 @@ fileInput.addEventListener('change', async () => {
     catch (err) { showError(`Failed to read ${file.name}: ${err}`); return; }
 
     let samples: Int16Array;
-    try { samples = parseWavFile(buffer).left; }
+    let sampleRate: number;
+    try { ({ left: samples, sampleRate } = parseWavFile(buffer)); }
     catch (err) { showError(`${file.name}: ${err}`); return; }
 
     const result = await decodeInWorker(buffer);
     if (!result.ok) { showError(`${file.name}: ${result.error}`); return; }
 
-    tapes.push({ filename: file.name, samples, programs: result.programs });
+    tapes.push({ filename: file.name, samples, sampleRate, programs: result.programs });
   }
 
   // Compute line-level merged views for each program ordinal (cheap).
@@ -138,7 +140,7 @@ fileInput.addEventListener('change', async () => {
 
   const totalProgs = tapes.reduce((n, t) => n + t.programs.length, 0);
   const dur = tapes.length
-    ? (Math.max(...tapes.map(t => t.samples.length)) / 44100).toFixed(1)
+    ? (Math.max(...tapes.map(t => t.samples.length / t.sampleRate))).toFixed(1)
     : '0';
   statusEl.textContent = tapes.length > 1
     ? `Loaded ${tapes.length} tapes · ${totalProgs} programs · ${dur}s max audio`

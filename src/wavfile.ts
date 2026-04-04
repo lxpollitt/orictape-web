@@ -7,54 +7,78 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 
 export interface WavData {
-  left: Int16Array;
-  right: Int16Array;
+  left:        Int16Array;
+  right:       Int16Array;
+  sampleRate:  number;
   sampleCount: number;
+}
+
+/** Read a 4-character chunk ID at the given byte offset. */
+function chunkIdAt(view: DataView, off: number): string {
+  return String.fromCharCode(
+    view.getUint8(off), view.getUint8(off + 1),
+    view.getUint8(off + 2), view.getUint8(off + 3),
+  );
 }
 
 export function parseWavFile(buffer: ArrayBuffer): WavData {
   const view = new DataView(buffer);
 
-  const sig = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
-  if (sig !== 'RIFF') throw new Error('Not a RIFF file');
+  if (chunkIdAt(view, 0) !== 'RIFF') throw new Error('Not a RIFF file');
+  if (chunkIdAt(view, 8) !== 'WAVE') throw new Error('Not a WAVE file');
 
-  const waveSig = String.fromCharCode(view.getUint8(8), view.getUint8(9), view.getUint8(10), view.getUint8(11));
-  if (waveSig !== 'WAVE') throw new Error('Not a WAVE file');
+  // ── Scan sub-chunks for 'fmt ' and 'data' ──────────────────────────────────
+  // Some recording software (Audacity, Pro Tools, etc.) inserts JUNK or bext
+  // chunks before 'fmt ', so we must not assume a fixed layout.
+  let fmtOffset = -1;
+  let dataOffset = -1;
+  let dataSize   = 0;
 
-  const tag = view.getUint16(20, true);
-  const channels = view.getUint16(22, true);
-  const freq = view.getUint32(24, true);
-  const bitsPerSample = view.getUint16(34, true);
-
-  if (tag !== 1 || channels !== 2 || freq !== 44100 || bitsPerSample !== 16) {
-    throw new Error('Only 44.1kHz 16-bit stereo WAV files are supported');
+  let off = 12; // first sub-chunk starts right after "WAVE"
+  while (off < buffer.byteLength - 8) {
+    const id   = chunkIdAt(view, off);
+    const size = view.getUint32(off + 4, true);
+    if (id === 'fmt ') fmtOffset = off + 8;
+    if (id === 'data') { dataOffset = off + 8; dataSize = size; }
+    if (fmtOffset >= 0 && dataOffset >= 0) break; // found both
+    off += 8 + size;
   }
 
-  // Locate the data chunk (it may not be at a fixed offset)
-  const fmtSize = view.getUint32(16, true);
-  let offset = 12 + 8 + fmtSize; // skip WAVE sig, fmt header, fmt body
+  if (fmtOffset < 0) throw new Error('No fmt chunk found in WAV file');
+  if (dataOffset < 0) throw new Error('No data chunk found in WAV file');
 
-  while (offset < buffer.byteLength - 8) {
-    const chunkId = String.fromCharCode(
-      view.getUint8(offset),
-      view.getUint8(offset + 1),
-      view.getUint8(offset + 2),
-      view.getUint8(offset + 3),
-    );
-    const chunkSize = view.getUint32(offset + 4, true);
-    if (chunkId === 'data') {
-      const dataStart = offset + 8;
-      const sampleCount = chunkSize / 4; // 2 bytes per sample * 2 channels
-      const left = new Int16Array(sampleCount);
-      const right = new Int16Array(sampleCount);
-      for (let i = 0; i < sampleCount; i++) {
-        left[i] = view.getInt16(dataStart + i * 4, true);
-        right[i] = view.getInt16(dataStart + i * 4 + 2, true);
-      }
-      return { left, right, sampleCount };
-    }
-    offset += 8 + chunkSize;
+  // ── Parse fmt chunk fields ─────────────────────────────────────────────────
+  const tag           = view.getUint16(fmtOffset,      true);
+  const channels      = view.getUint16(fmtOffset + 2,  true);
+  const sampleRate    = view.getUint32(fmtOffset + 4,  true);
+  const bitsPerSample = view.getUint16(fmtOffset + 14, true);
+
+  if (tag !== 1)
+    throw new Error('Only PCM WAV files are supported (not compressed)');
+  if (channels < 1 || channels > 2)
+    throw new Error(`Unsupported channel count: ${channels} (expected 1 or 2)`);
+  if (bitsPerSample !== 8 && bitsPerSample !== 16)
+    throw new Error(`Unsupported bit depth: ${bitsPerSample} (expected 8 or 16)`);
+  if (sampleRate < 44100)
+    throw new Error(`Sample rate ${sampleRate} Hz is too low — please convert to at least 44100 Hz`);
+
+  // ── Decode sample data ─────────────────────────────────────────────────────
+  const bytesPerSample = bitsPerSample >> 3;
+  const frameSize      = channels * bytesPerSample;
+  const sampleCount    = Math.floor(dataSize / frameSize);
+  const left           = new Int16Array(sampleCount);
+  const right          = new Int16Array(sampleCount);
+
+  for (let i = 0; i < sampleCount; i++) {
+    const base = dataOffset + i * frameSize;
+    // 8-bit PCM is unsigned (0–255); convert to signed 16-bit range.
+    const read = bitsPerSample === 8
+      ? (o: number) => (view.getUint8(base + o) - 128) * 256
+      : (o: number) => view.getInt16(base + o, true);
+
+    left[i]  = read(0);
+    right[i] = channels === 2 ? read(bytesPerSample) : left[i];
   }
 
-  throw new Error('No data chunk found in WAV file');
+  return { left, right, sampleRate, sampleCount };
 }

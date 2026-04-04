@@ -21,8 +21,8 @@ export type WorkerResponse = WorkerResult | WorkerError;
 
 self.onmessage = (e: MessageEvent<WorkerRequest>) => {
   try {
-    const { left, sampleCount } = parseWavFile(e.data.buffer);
-    const streams = readBitStreams(left);
+    const { left, sampleRate, sampleCount } = parseWavFile(e.data.buffer);
+    const streams = readBitStreams(left, sampleRate);
     const programs = readPrograms(streams);
     const response: WorkerResult = { ok: true, programs, sampleCount };
     self.postMessage(response);
