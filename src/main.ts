@@ -1116,10 +1116,10 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (!prog) return;
   if (focusedPanel === 'hex') {
     e.preventDefault();
-    navigateHex(e.key, e.shiftKey, prog);
+    navigateHex(e.key, e.altKey, prog);
   } else if (focusedPanel === 'basic') {
     e.preventDefault();
-    navigateBasic(e.key, e.shiftKey, prog);
+    navigateBasic(e.key, e.altKey, prog);
   }
 });
 
