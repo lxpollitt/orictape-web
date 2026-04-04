@@ -2,7 +2,7 @@ import './style.css';
 import { parseWavFile } from './wavfile';
 import { WaveformView } from './waveform';
 import type { WorkerResponse } from './worker';
-import type { Program } from './decoder';
+import type { Program, LineInfo, ByteInfo } from './decoder';
 import {
   alignPrograms, bestSource,
   type MergedProgram,
@@ -13,8 +13,9 @@ import { linesFromProgram, linesFromMerged, encodeTapFile, downloadTap, type Tap
 const fileInput  = document.getElementById('file-input')       as HTMLInputElement;
 const statusEl   = document.getElementById('status')           as HTMLParagraphElement;
 const progTabs   = document.getElementById('prog-tabs')        as HTMLElement;
-const hexPanel   = document.getElementById('hex-view')         as HTMLElement;
-const basicPanel = document.getElementById('basic-view')       as HTMLElement;
+const hexPanelOuter = document.getElementById('hex-panel')     as HTMLElement;
+const hexPanel      = document.getElementById('hex-view')      as HTMLElement;
+const basicPanel    = document.getElementById('basic-view')    as HTMLElement;
 const waveCanvas = document.getElementById('waveform-canvas')  as HTMLCanvasElement;
 const statusBar  = document.getElementById('statusbar')        as HTMLElement;
 const basicTypeEl  = document.getElementById('basic-type')      as HTMLElement;
@@ -43,6 +44,8 @@ let mergedProgs:  (MergedProgram | null)[] = [];
 let selByte:      number | null            = null;
 let selMergeLine: number | null            = null;
 let wrapMode      = true;
+/** Which panel most recently received focus — drives keyboard navigation. */
+let focusedPanel: 'hex' | 'basic' | null  = null;
 
 // ── TAP builder state ─────────────────────────────────────────────────────────
 interface TapQueueEntry {
@@ -784,8 +787,10 @@ function doDownloadTap(): void {
 
 // ── Selection (event delegation) ──────────────────────────────────────────────
 
+hexPanelOuter.addEventListener('focus', () => { focusedPanel = 'hex'; });
 hexPanel.addEventListener('click', (e) => {
   if (viewMode !== 'tape') return;
+  focusedPanel = 'hex';
   const el = (e.target as Element).closest<HTMLElement>('[data-i]');
   if (el) selectByte(+el.dataset.i!);
 });
@@ -807,7 +812,9 @@ basicPanel.addEventListener('wheel', (e: WheelEvent) => {
   if (atLeft || atRight) e.preventDefault();
 }, { passive: false });
 
+basicPanel.addEventListener('focus', () => { focusedPanel = 'basic'; });
 basicPanel.addEventListener('click', (e) => {
+  focusedPanel = 'basic';
   if (viewMode === 'merged') {
     const el = (e.target as Element).closest<HTMLElement>('[data-mli]');
     if (!el) return;
@@ -867,6 +874,254 @@ function selectByte(i: number): void {
   waveform.selectByte(i);
   updateStatusBar();
 }
+
+// ── Keyboard navigation ───────────────────────────────────────────────────────
+
+/** Byte index for element ei on a BASIC line.
+ *  ei === 0 → line-number field (2 bytes; maps to firstByte+2).
+ *  ei  >= 1 → single content byte at firstByte+ei+3. */
+function byteForElem(line: LineInfo, ei: number): number {
+  return line.firstByte + (ei === 0 ? 2 : ei + 3);
+}
+
+/** Visible element index for byteIdx within a BASIC line.
+ *  Returns -1 for non-visible bytes (link-pointer pair and terminator). */
+function elemForByte(line: LineInfo, byteIdx: number): number {
+  const off = byteIdx - line.firstByte;
+  if (off === 2 || off === 3) return 0;
+  const ei = off - 3;
+  return (off >= 4 && ei <= line.elements.length - 1) ? ei : -1;
+}
+
+function isErrByte(b: ByteInfo): boolean {
+  return b.chkErr || b.unclear;
+}
+
+function lineHasError(prog: Program, li: number): boolean {
+  const line = prog.lines[li];
+  if (line.lenErr) return true;
+  for (let b = line.firstByte; b <= line.lastByte; b++) {
+    const byte = prog.bytes[b];
+    if (byte && isErrByte(byte)) return true;
+  }
+  return false;
+}
+
+/** Number of bytes per visual row in the current hex grid, measured from DOM.
+ *  Uses hexPanel (#hex-view) rather than hexPanelOuter (#hex-panel) so that
+ *  the 6px left+right padding on #hex-panel is naturally excluded. */
+function hexBytesPerRow(): number {
+  const firstHb = hexPanel.querySelector<HTMLElement>('.hb');
+  if (!firstHb) return 16;
+  const cellW = firstHb.getBoundingClientRect().width;
+  if (cellW <= 0) return 16;
+  return Math.max(1, Math.floor(hexPanel.clientWidth / cellW));
+}
+
+function navigateHex(key: string, shift: boolean, prog: Program): void {
+  const n   = prog.bytes.length;
+  const cur = selByte ?? prog.lines[0]?.firstByte ?? 0;
+
+  if (!shift) {
+    const bpr = hexBytesPerRow();
+    const next: Record<string, number> = {
+      ArrowLeft:  Math.max(0,     cur - 1),
+      ArrowRight: Math.min(n - 1, cur + 1),
+      ArrowUp:    Math.max(0,     cur - bpr),
+      ArrowDown:  Math.min(n - 1, cur + bpr),
+    };
+    selectByte(next[key] ?? cur);
+    return;
+  }
+
+  // Shift+Left/Right — scan linearly for next error/warning byte.
+  if (key === 'ArrowLeft' || key === 'ArrowRight') {
+    const step = key === 'ArrowLeft' ? -1 : 1;
+    for (let i = cur + step; i >= 0 && i < n; i += step) {
+      if (isErrByte(prog.bytes[i])) { selectByte(i); return; }
+    }
+    return;
+  }
+
+  // Shift+Up/Down — jump to the first error byte of the next/prev row that
+  // contains an error.  Column position is intentionally not preserved in this
+  // first iteration but the row-walking structure makes it easy to add later.
+  const bpr  = hexBytesPerRow();
+  const step = key === 'ArrowUp' ? -1 : 1;
+  let row = Math.floor(cur / bpr) + step;
+  while (row >= 0 && row * bpr < n) {
+    const rowStart = row * bpr;
+    const rowEnd   = Math.min(rowStart + bpr - 1, n - 1);
+    for (let b = rowStart; b <= rowEnd; b++) {
+      if (isErrByte(prog.bytes[b])) { selectByte(b); return; }
+    }
+    row += step;
+  }
+}
+
+function navigateBasic(key: string, shift: boolean, prog: Program): void {
+  const lines = prog.lines;
+  if (!lines.length) return;
+
+  const li = selByte !== null
+    ? lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte)
+    : -1;
+
+  if (!shift) {
+    switch (key) {
+      case 'ArrowUp':
+      case 'ArrowDown': {
+        const up = key === 'ArrowUp';
+        // Visual navigation: find the nearest row above/below by measuring DOM
+        // positions.  This works correctly whether wrap is ON (a BASIC line may
+        // span several visual rows) or OFF (each BASIC line is one visual row).
+        const allElems = Array.from(
+          basicPanel.querySelectorAll<HTMLElement>('[data-li] [data-ei]'),
+        );
+        if (!allElems.length) break;
+
+        // Reference point: selected elem span if available, else selected line.
+        const refEl: HTMLElement | null =
+          basicPanel.querySelector<HTMLElement>('.elem.sel') ??
+          basicPanel.querySelector<HTMLElement>('.basic-line.sel');
+
+        if (!refEl) {
+          // No selection yet — jump to very first/last element.
+          const target = up ? allElems[allElems.length - 1] : allElems[0];
+          const lEl = target.closest<HTMLElement>('[data-li]')!;
+          selectByte(byteForElem(prog.lines[+lEl.dataset.li!], +target.dataset.ei!));
+          break;
+        }
+
+        const refRect = refEl.getBoundingClientRect();
+        // Read all rects up-front to avoid interleaved layout reflows.
+        const elemRects = allElems.map(el => el.getBoundingClientRect());
+
+        // Pass 1: find the top-coordinate of the nearest visual row above/below.
+        let targetRowTop = up ? -Infinity : Infinity;
+        for (const r of elemRects) {
+          if (up  && r.bottom <= refRect.top    + 0.5 && r.top > targetRowTop) targetRowTop = r.top;
+          if (!up && r.top   >= refRect.bottom  - 0.5 && r.top < targetRowTop) targetRowTop = r.top;
+        }
+        if (!isFinite(targetRowTop)) break; // already at first/last visual row
+
+        // Pass 2: among elements on that row, pick the one closest in x.
+        let bestEl: HTMLElement | null = null;
+        let bestDist = Infinity;
+        for (let i = 0; i < allElems.length; i++) {
+          if (Math.abs(elemRects[i].top - targetRowTop) < 3) {
+            const dist = Math.abs(elemRects[i].left - refRect.left);
+            if (dist < bestDist) { bestDist = dist; bestEl = allElems[i]; }
+          }
+        }
+        if (!bestEl) break;
+
+        const lEl = bestEl.closest<HTMLElement>('[data-li]')!;
+        selectByte(byteForElem(prog.lines[+lEl.dataset.li!], +bestEl.dataset.ei!));
+        break;
+      }
+      case 'ArrowLeft': {
+        if (li < 0) { selectByte(byteForElem(lines[0], 0)); break; }
+        const line = lines[li];
+        let ei = elemForByte(line, selByte!);
+        if (ei < 0) ei = 0; // snap to start of line if on a non-visible byte
+        if (ei > 0) {
+          selectByte(byteForElem(line, ei - 1));
+        } else if (li > 0) {
+          // Cross line boundary — land on the last visible element of the prev line.
+          const prev = lines[li - 1];
+          selectByte(byteForElem(prev, prev.elements.length - 1));
+        }
+        break;
+      }
+      case 'ArrowRight': {
+        if (li < 0) { selectByte(byteForElem(lines[0], 0)); break; }
+        const line = lines[li];
+        let ei = elemForByte(line, selByte!);
+        if (ei < 0) ei = line.elements.length - 1; // snap to end if on a non-visible byte
+        if (ei < line.elements.length - 1) {
+          selectByte(byteForElem(line, ei + 1));
+        } else if (li < lines.length - 1) {
+          // Cross line boundary — land on the first visible element of the next line.
+          selectByte(byteForElem(lines[li + 1], 0));
+        }
+        break;
+      }
+    }
+    return;
+  }
+
+  // Shift+Up/Down — jump to the next/prev BASIC line that contains any error,
+  // landing on the first error element in that line (consistent regardless of
+  // direction, so the result is always predictable).
+  if (key === 'ArrowUp' || key === 'ArrowDown') {
+    const step  = key === 'ArrowUp' ? -1 : 1;
+    const start = li < 0 ? (step < 0 ? lines.length : -1) : li;
+    for (let i = start + step; i >= 0 && i < lines.length; i += step) {
+      if (!lineHasError(prog, i)) continue;
+      const line = lines[i];
+      // Prefer the first element that has a visibly-highlighted error byte (the
+      // corruption site).  Only fall back to element 0 when the error is purely
+      // at the line level (lenErr / checksum mismatch with no bad element bytes),
+      // since in that case there is no more specific location to point at.
+      let landed = false;
+      for (let ei = 0; ei < line.elements.length; ei++) {
+        const b = byteForElem(line, ei);
+        // Element 0 covers two bytes (line-number field); check both.
+        const check = ei === 0 ? [b, b + 1] : [b];
+        if (check.some(idx => { const by = prog.bytes[idx]; return by && isErrByte(by); })) {
+          selectByte(b);
+          landed = true;
+          break;
+        }
+      }
+      if (!landed) selectByte(byteForElem(line, 0));
+      return;
+    }
+    return;
+  }
+
+  // Shift+Left/Right — scan visible elements for the next/prev error, crossing
+  // line boundaries when needed.
+  if (li < 0 || selByte === null) return;
+  const step = key === 'ArrowLeft' ? -1 : 1;
+
+  // Current line: start from element adjacent to current position.
+  const curLine = lines[li];
+  const curEi   = elemForByte(curLine, selByte);
+  const curStart = curEi < 0
+    ? (step < 0 ? curLine.elements.length - 1 : 0)
+    : curEi + step;
+  for (let ei = curStart; ei >= 0 && ei < curLine.elements.length; ei += step) {
+    const b = byteForElem(curLine, ei);
+    if (prog.bytes[b] && isErrByte(prog.bytes[b])) { selectByte(b); return; }
+  }
+
+  // Remaining lines.
+  for (let lj = li + step; lj >= 0 && lj < lines.length; lj += step) {
+    const l     = lines[lj];
+    const start = step < 0 ? l.elements.length - 1 : 0;
+    for (let ei = start; ei >= 0 && ei < l.elements.length; ei += step) {
+      const b = byteForElem(l, ei);
+      if (prog.bytes[b] && isErrByte(prog.bytes[b])) { selectByte(b); return; }
+    }
+  }
+}
+
+const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
+
+document.addEventListener('keydown', (e: KeyboardEvent) => {
+  if (!NAV_KEYS.has(e.key) || viewMode !== 'tape') return;
+  const prog = programs[activeProgIdx];
+  if (!prog) return;
+  if (focusedPanel === 'hex') {
+    e.preventDefault();
+    navigateHex(e.key, e.shiftKey, prog);
+  } else if (focusedPanel === 'basic') {
+    e.preventDefault();
+    navigateBasic(e.key, e.shiftKey, prog);
+  }
+});
 
 // ── Status bar ────────────────────────────────────────────────────────────────
 function updateStatusBar(): void {
