@@ -340,7 +340,9 @@ function renderAll(): void {
 }
 
 function renderHex(prog: Program): void {
-  const firstContent = prog.lines[0]?.firstByte ?? prog.bytes.length;
+  const firstContent = prog.lines[0]?.firstByte                          ?? prog.bytes.length;
+  const lastLine     = prog.lines[prog.lines.length - 1];
+  const lastContent  = lastLine ? lastLine.lastByte + 1 : 0;
   const selLine = selByte !== null
     ? prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte)
     : -1;
@@ -350,7 +352,7 @@ function renderHex(prog: Program): void {
   let html = '<div class="hex-grid">';
   prog.bytes.forEach((b, i) => {
     const cls: string[] = ['hb'];
-    if (i < firstContent)                cls.push('hb-pre');
+    if (i < firstContent || i >= lastContent) cls.push('hb-pre');
     if (b.chkErr)                        cls.push('hb-err');
     else if (b.unclear)                  cls.push('hb-unclear');
     if (i >= lineFirst && i <= lineLast) cls.push('hb-line');
