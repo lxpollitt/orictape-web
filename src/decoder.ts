@@ -291,7 +291,7 @@ function readProgramBytes(stream: BitStream): Program {
   }
 }
 
-function readProgramLines(prog: Program): void {
+export function readProgramLines(prog: Program): void {
   let nextByte = 0;
   let ok = true;
 

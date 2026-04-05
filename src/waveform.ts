@@ -22,6 +22,9 @@ export class WaveformView {
   private dragX     = 0;
   private dragView  = 0;
 
+  /** True when a TAP file is active — shows "No waveform" label. */
+  private noWaveform = false;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.ctx    = canvas.getContext('2d')!;
@@ -33,10 +36,20 @@ export class WaveformView {
     }).observe(canvas);
   }
 
+  /** Clear waveform data and show a "No waveform" placeholder (used for TAP files). */
+  clearData(): void {
+    this.samples     = null;
+    this.prog        = null;
+    this.selByte     = null;
+    this.noWaveform  = true;
+    this.draw();
+  }
+
   setData(samples: Int16Array, prog: Program): void {
-    this.samples = samples;
-    this.prog    = prog;
-    this.selByte = null;
+    this.samples     = samples;
+    this.prog        = prog;
+    this.selByte     = null;
+    this.noWaveform  = false;
 
     // Pre-compute per-bit flags from byte checksum errors.
     const { bitCount } = prog.stream;
@@ -83,6 +96,13 @@ export class WaveformView {
     const { canvas, ctx, samples, prog } = this;
     if (!samples || !prog) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (this.noWaveform) {
+        ctx.fillStyle    = '#4a4a4a';
+        ctx.font         = '12px ui-monospace, monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('No waveform', canvas.width / 2, canvas.height / 2);
+      }
       return;
     }
 

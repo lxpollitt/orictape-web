@@ -8,6 +8,7 @@ import {
   type MergedProgram,
 } from './merger';
 import { linesFromProgram, linesFromMerged, encodeTapFile, downloadTap, type TapBlock } from './encoder';
+import { parseTapFile } from './tapfile';
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const fileInput  = document.getElementById('file-input')       as HTMLInputElement;
@@ -40,6 +41,8 @@ interface TapeData {
   samples:    Int16Array;
   sampleRate: number;
   programs:   Program[];
+  /** True when loaded from a .tap file — no waveform data. */
+  fromTap:    boolean;
 }
 
 /** Identifies one specific program from one tape. */
@@ -138,25 +141,49 @@ fileInput.addEventListener('change', async () => {
     try { buffer = await file.arrayBuffer(); }
     catch (err) { showError(`Failed to read ${file.name}: ${err}`); return; }
 
-    let samples: Int16Array;
-    let sampleRate: number;
-    try { ({ left: samples, sampleRate } = parseWavFile(buffer)); }
-    catch (err) { showError(`${file.name}: ${err}`); return; }
+    const isTap = file.name.toLowerCase().endsWith('.tap');
 
-    const result = await decodeInWorker(buffer);
-    if (!result.ok) { showError(`${file.name}: ${result.error}`); return; }
+    if (isTap) {
+      let programs: Program[];
+      try { programs = parseTapFile(buffer); }
+      catch (err) { showError(`${file.name}: ${err}`); return; }
+      tapes.push({
+        filename: file.name,
+        samples:  new Int16Array(0),
+        sampleRate: 44100,
+        programs,
+        fromTap:  true,
+      });
+    } else {
+      let samples: Int16Array;
+      let sampleRate: number;
+      try { ({ left: samples, sampleRate } = parseWavFile(buffer)); }
+      catch (err) { showError(`${file.name}: ${err}`); return; }
 
-    tapes.push({ filename: file.name, samples, sampleRate, programs: result.programs });
+      const result = await decodeInWorker(buffer);
+      if (!result.ok) { showError(`${file.name}: ${result.error}`); return; }
+
+      tapes.push({ filename: file.name, samples, sampleRate, programs: result.programs, fromTap: false });
+    }
   }
 
   const totalProgs = tapes.reduce((n, t) => n + t.programs.length, 0);
   mergeBtnEl.hidden = totalProgs < 2;
-  const dur = tapes.length
-    ? (Math.max(...tapes.map(t => t.samples.length / t.sampleRate))).toFixed(1)
-    : '0';
-  statusEl.textContent = tapes.length > 1
-    ? `Loaded ${tapes.length} tapes · ${totalProgs} programs · ${dur}s max audio`
-    : `Decoded ${totalProgs} program${totalProgs !== 1 ? 's' : ''} from ${dur}s of audio.`;
+  const wavTapes = tapes.filter(t => !t.fromTap);
+  const tapTapes = tapes.filter(t => t.fromTap);
+  const dur = wavTapes.length
+    ? (Math.max(...wavTapes.map(t => t.samples.length / t.sampleRate))).toFixed(1)
+    : null;
+
+  if (tapes.length > 1) {
+    const parts = [`Loaded ${tapes.length} sources · ${totalProgs} programs`];
+    if (dur !== null) parts.push(`${dur}s max audio`);
+    statusEl.textContent = parts.join(' · ');
+  } else if (tapTapes.length === 1) {
+    statusEl.textContent = `Loaded ${totalProgs} program${totalProgs !== 1 ? 's' : ''} from TAP file.`;
+  } else {
+    statusEl.textContent = `Decoded ${totalProgs} program${totalProgs !== 1 ? 's' : ''} from ${dur}s of audio.`;
+  }
 
   activateTape(0, 0);
   selByte = null;
@@ -253,7 +280,7 @@ progTabs.addEventListener('click', (e) => {
   if (viewMode === 'tape' && selByte !== null) {
     hexPanel.querySelector<HTMLElement>(`[data-i="${selByte}"]`)
       ?.scrollIntoView({ block: 'nearest' });
-    if (leftSamples) waveform.selectByte(selByte);
+    if (leftSamples && !tapes[activeTapeIdx]?.fromTap) waveform.selectByte(selByte);
   }
 });
 
@@ -333,11 +360,15 @@ function renderAll(): void {
     if (!merged) { clearPanels(); return; }
     renderMergeView(merged);
     renderMergedHex(merged);
-    // Show waveform from the first merge source.
+    // Show waveform from the first merge source (if it's a WAV tape).
     const primSrc     = userMerge!.sources[0];
-    const primProg    = tapes[primSrc.tapeIdx]?.programs[primSrc.progIdx];
-    const primSamples = tapes[primSrc.tapeIdx]?.samples ?? null;
-    if (primProg && primSamples) waveform.setData(primSamples, primProg);
+    const primTape    = tapes[primSrc.tapeIdx];
+    const primProg    = primTape?.programs[primSrc.progIdx];
+    if (primProg && primTape && !primTape.fromTap) {
+      waveform.setData(primTape.samples, primProg);
+    } else {
+      waveform.clearData();
+    }
     updateStatusBar();
     return;
   }
@@ -348,7 +379,12 @@ function renderAll(): void {
   if (!prog) { clearPanels(); return; }
   renderHex(prog);
   renderBasic(prog);
-  if (leftSamples) waveform.setData(leftSamples, prog);
+  const activeTape = tapes[activeTapeIdx];
+  if (prog && activeTape && !activeTape.fromTap && leftSamples) {
+    waveform.setData(leftSamples, prog);
+  } else {
+    waveform.clearData();
+  }
   updateStatusBar();
 }
 
