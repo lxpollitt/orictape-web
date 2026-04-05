@@ -21,6 +21,11 @@ const statusBar  = document.getElementById('statusbar')        as HTMLElement;
 const basicTypeEl  = document.getElementById('basic-type')      as HTMLElement;
 const wrapLabelEl  = document.getElementById('wrap-label')      as HTMLElement;
 const wrapToggle   = document.getElementById('wrap-toggle')     as HTMLInputElement;
+const mergeBtnEl   = document.getElementById('merge-btn')       as HTMLButtonElement;
+const mergeModal   = document.getElementById('merge-modal')     as HTMLElement;
+const mergePickerEl = document.getElementById('merge-picker')   as HTMLElement;
+const mergeCancelBtn = document.getElementById('merge-cancel')  as HTMLButtonElement;
+const mergeOkBtn   = document.getElementById('merge-ok')        as HTMLButtonElement;
 const buildTapBtn  = document.getElementById('build-tap')       as HTMLButtonElement;
 const tapModal     = document.getElementById('tap-modal')       as HTMLElement;
 const tapAvailEl   = document.getElementById('tap-avail')       as HTMLElement;
@@ -37,11 +42,23 @@ interface TapeData {
   programs:   Program[];
 }
 
+/** Identifies one specific program from one tape. */
+interface MergeSource {
+  tapeIdx: number;
+  progIdx: number;
+}
+
+/** A single user-requested merge between exactly two programs. */
+interface UserMerge {
+  sources: [MergeSource, MergeSource];
+  result:  MergedProgram;
+}
+
 let tapes:        TapeData[]              = [];
 let activeTapeIdx = 0;
 let activeProgIdx = 0;
 let viewMode:     'tape' | 'merged'       = 'tape';
-let mergedProgs:  (MergedProgram | null)[] = [];
+let userMerges:   UserMerge[]             = [];
 let selByte:      number | null            = null;
 let selMergeLine: number | null            = null;
 let wrapMode      = true;
@@ -102,11 +119,12 @@ fileInput.addEventListener('change', async () => {
   if (!files || files.length === 0) return;
 
   // Reset all state.
-  tapes        = [];
-  mergedProgs  = [];
-  selByte      = null;
-  selMergeLine = null;
-  viewMode     = 'tape';
+  tapes           = [];
+  userMerges      = [];
+  selByte         = null;
+  selMergeLine    = null;
+  viewMode        = 'tape';
+  mergeBtnEl.hidden = true;
   clearPanels();
   updateStatusBar();
 
@@ -131,14 +149,8 @@ fileInput.addEventListener('change', async () => {
     tapes.push({ filename: file.name, samples, sampleRate, programs: result.programs });
   }
 
-  // Compute line-level merged views for each program ordinal (cheap).
-  const maxProgs = tapes.length ? Math.max(...tapes.map(t => t.programs.length)) : 0;
-  mergedProgs = new Array(maxProgs).fill(null);
-  if (tapes.length >= 2) {
-    for (let pi = 0; pi < maxProgs; pi++) computeMerged(pi);
-  }
-
   const totalProgs = tapes.reduce((n, t) => n + t.programs.length, 0);
+  mergeBtnEl.hidden = totalProgs < 2;
   const dur = tapes.length
     ? (Math.max(...tapes.map(t => t.samples.length / t.sampleRate))).toFixed(1)
     : '0';
@@ -150,14 +162,6 @@ fileInput.addEventListener('change', async () => {
   selByte = null;
   renderAll();
 });
-
-function computeMerged(progOrdinal: number): void {
-  const progs = tapes.map(t => t.programs[progOrdinal]); // undefined if tape lacks it
-  const validCount = progs.filter(Boolean).length;
-  if (validCount >= 2) {
-    mergedProgs[progOrdinal] = alignPrograms(progs);
-  }
-}
 
 // ── Tab rendering & navigation ────────────────────────────────────────────────
 
@@ -202,7 +206,7 @@ progTabs.addEventListener('click', (e) => {
       // Tape → Merged: translate the selected byte to a merged line index
       // via the BASIC line number.
       const fromProg = tapes[fromTapeIdx]?.programs[fromProgIdx];
-      const merged   = mergedProgs[activeProgIdx];
+      const merged   = userMerges[activeProgIdx]?.result;
       if (fromProg && merged) {
         const lineNum = lineNumForByte(fromProg, fromSelByte);
         if (lineNum !== null) {
@@ -226,7 +230,7 @@ progTabs.addEventListener('click', (e) => {
 
     if (fromMode === 'merged' && fromMergeLine !== null) {
       // Merged → Tape: use the merged line's line number as the target.
-      targetLineNum = mergedProgs[fromProgIdx]?.lines[fromMergeLine]?.lineNum ?? null;
+      targetLineNum = userMerges[fromProgIdx]?.result.lines[fromMergeLine]?.lineNum ?? null;
     } else if (fromMode === 'tape' && fromSelByte !== null && toPi === fromProgIdx) {
       // Tape → Tape (same program ordinal): carry the line number across.
       const fromProg = tapes[fromTapeIdx]?.programs[fromProgIdx];
@@ -281,29 +285,34 @@ function renderTabs(): void {
     });
   });
 
-  // Merged tabs — one per program ordinal when ≥ 2 tapes are loaded.
-  if (tapes.length >= 2) {
+  // User-defined merged tabs.
+  if (userMerges.length > 0) {
     const mergedLabel = document.createElement('span');
     mergedLabel.className = 'tape-label tape-label-sep';
     mergedLabel.textContent = 'Merged';
     progTabs.appendChild(mergedLabel);
 
-    mergedProgs.forEach((merged, mi) => {
+    userMerges.forEach((merge, mi) => {
       const isActive = viewMode === 'merged' && mi === activeProgIdx;
       const btn      = document.createElement('button');
       btn.className  = `prog-tab merged-tab${isActive ? ' active' : ''}`;
       btn.dataset.mi = String(mi);
 
+      const merged = merge.result;
       let badge = '';
-      if (merged) {
-        if (merged.issues > 0)
-          badge += ` <span class="badge badge-err">${merged.issues} issue${merged.issues !== 1 ? 's' : ''}</span>`;
-        if (merged.recovered > 0)
-          badge += ` <span class="badge badge-ok">${merged.recovered} recovered</span>`;
-        if (merged.unverified > 0 && merged.issues === 0)
-          badge += ` <span class="badge badge-warn">${merged.unverified} unverified</span>`;
-      }
-      btn.innerHTML = `<span class="prog-num">${mi + 1}</span>Merged` + badge;
+      if (merged.issues > 0)
+        badge += ` <span class="badge badge-err">${merged.issues} issue${merged.issues !== 1 ? 's' : ''}</span>`;
+      if (merged.recovered > 0)
+        badge += ` <span class="badge badge-ok">${merged.recovered} recovered</span>`;
+      if (merged.unverified > 0 && merged.issues === 0)
+        badge += ` <span class="badge badge-warn">${merged.unverified} unverified</span>`;
+
+      const s0 = merge.sources[0];
+      const s1 = merge.sources[1];
+      btn.innerHTML =
+        `<span class="prog-num">${s0.progIdx + 1}</span>` +
+        `<span class="prog-num">${s1.progIdx + 1}</span>Merged` +
+        badge;
       progTabs.appendChild(btn);
     });
   }
@@ -317,15 +326,17 @@ function renderAll(): void {
   buildTapBtn.hidden = !anyProgs;
 
   if (viewMode === 'merged') {
-    const merged = mergedProgs[activeProgIdx] ?? null;
+    const userMerge = userMerges[activeProgIdx] ?? null;
+    const merged    = userMerge?.result ?? null;
     basicTypeEl.textContent = 'BASIC program (merged)';
     wrapLabelEl.hidden = !merged;
     if (!merged) { clearPanels(); return; }
     renderMergeView(merged);
     renderMergedHex(merged);
-    // Show waveform from primary (tape 0) for now.
-    const primProg    = tapes[0]?.programs[activeProgIdx];
-    const primSamples = tapes[0]?.samples ?? null;
+    // Show waveform from the first merge source.
+    const primSrc     = userMerge!.sources[0];
+    const primProg    = tapes[primSrc.tapeIdx]?.programs[primSrc.progIdx];
+    const primSamples = tapes[primSrc.tapeIdx]?.samples ?? null;
     if (primProg && primSamples) waveform.setData(primSamples, primProg);
     updateStatusBar();
     return;
@@ -433,7 +444,14 @@ function renderBasic(prog: Program): void {
 const TAPE_COLORS = ['#4a9eff', '#c97aff', '#4affb0', '#ffa04a', '#ff6b6b', '#ffd93d'];
 
 function mergeProgs(): ReadonlyArray<Program | undefined> {
-  return tapes.map(t => t.programs[activeProgIdx]);
+  const merge = userMerges[activeProgIdx];
+  if (!merge) return [];
+  const result: (Program | undefined)[] = [];
+  for (const src of merge.sources) {
+    while (result.length <= src.tapeIdx) result.push(undefined);
+    result[src.tapeIdx] = tapes[src.tapeIdx]?.programs[src.progIdx];
+  }
+  return result;
 }
 
 /**
@@ -472,19 +490,22 @@ function renderMergeView(merged: MergedProgram): void {
   }
 
   const progs    = mergeProgs();
-  const col0Name = tapes[0] ? shortName(tapes[0].filename) : 'Tape 1';
-  const col1Name = tapes[1] ? shortName(tapes[1].filename) : 'Tape 2';
+  const merge    = userMerges[activeProgIdx]!;
+  const ti0      = merge.sources[0].tapeIdx;
+  const ti1      = merge.sources[1].tapeIdx;
+  const col0Name = tapes[ti0] ? shortName(tapes[ti0].filename) : `Tape ${ti0 + 1}`;
+  const col1Name = tapes[ti1] ? shortName(tapes[ti1].filename) : `Tape ${ti1 + 1}`;
 
   const rowsHtml = merged.lines.map((line, i) => {
     const src    = bestSource(line, progs);
     const rowSel = i === selMergeLine ? ' sel' : '';
 
-    // Left column — tape 0
-    const src0  = line.sources.find(s => s.tapeIdx === 0);
-    const prog0 = progs[0];
-    const col0 = src0 && prog0
-      ? renderBasicLineHtml(prog0, src0.lineIdx,
-          line.status === 'conflict' && src.tapeIdx !== 0 ? 'not-merged' : '')
+    // Left column — source 0 tape
+    const srcLeft  = line.sources.find(s => s.tapeIdx === ti0);
+    const progLeft = progs[ti0];
+    const col0 = srcLeft && progLeft
+      ? renderBasicLineHtml(progLeft, srcLeft.lineIdx,
+          line.status === 'conflict' && src.tapeIdx !== ti0 ? 'not-merged' : '')
       : '';
 
     // Middle column — best-source merged line.
@@ -495,12 +516,12 @@ function renderMergeView(merged: MergedProgram): void {
       ? renderBasicLineHtml(bestProg, src.lineIdx, line.quality === 'issue' ? 'err' : '')
       : `<div class="basic-line err">(line ${line.lineNum})</div>`;
 
-    // Right column — tape 1
-    const src1  = line.sources.find(s => s.tapeIdx === 1);
-    const prog1 = progs[1];
-    const col1 = src1 && prog1
-      ? renderBasicLineHtml(prog1, src1.lineIdx,
-          line.status === 'conflict' && src.tapeIdx !== 1 ? 'not-merged' : '')
+    // Right column — source 1 tape
+    const srcRight  = line.sources.find(s => s.tapeIdx === ti1);
+    const progRight = progs[ti1];
+    const col1 = srcRight && progRight
+      ? renderBasicLineHtml(progRight, srcRight.lineIdx,
+          line.status === 'conflict' && src.tapeIdx !== ti1 ? 'not-merged' : '')
       : '';
 
     return `<div class="merge-row${rowSel}" data-mli="${i}">` +
@@ -678,18 +699,21 @@ function renderTapBuilder(): void {
     });
   });
 
-  if (mergedProgs.some(m => m !== null)) {
+  if (userMerges.length > 0) {
     availHtml += `<div class="tap-group-head">Merged</div>`;
-    mergedProgs.forEach((merged, mi) => {
-      if (!merged) return;
+    userMerges.forEach((merge, mi) => {
       const key    = entryKey('merged', 0, mi);
       const inQ    = queued.has(key);
       const dimmed = inQ ? ' tap-item-dimmed' : '';
       const btn    = inQ ? '' : `<button class="tap-btn" data-add-kind="merged" data-add-ti="0" data-add-pi="${mi}">→</button>`;
+      const s0 = merge.sources[0];
+      const s1 = merge.sources[1];
+      const label =
+        `<span class="prog-num">${s0.progIdx + 1}</span>` +
+        `<span class="prog-num">${s1.progIdx + 1}</span>Merged`;
       availHtml +=
         `<div class="tap-item${dimmed}">` +
-        `<span class="prog-num">${mi + 1}</span>` +
-        `<span class="tap-item-name">Merged</span>` +
+        label +
         btn +
         `</div>`;
     });
@@ -709,9 +733,14 @@ function renderTapBuilder(): void {
       name = prog?.name || `Prog ${entry.progIdx + 1}`;
       sub  = `Tape ${entry.tapeIdx + 1}`;
     } else {
-      name = mergedProgs.filter(m => m).length > 1
-        ? `Merged prog ${entry.progIdx + 1}`
-        : 'Merged';
+      const um = userMerges[entry.progIdx];
+      if (um) {
+        const s0 = um.sources[0];
+        const s1 = um.sources[1];
+        name = `[${s0.progIdx + 1}][${s1.progIdx + 1}] Merged`;
+      } else {
+        name = 'Merged';
+      }
       sub  = 'Merged';
     }
     queueHtml +=
@@ -772,10 +801,16 @@ function doDownloadTap(): void {
       if (!prog) continue;
       blocks.push({ name: prog.name || 'PROG', lines: linesFromProgram(prog), autorun: entry.autorun });
     } else {
-      const merged = mergedProgs[entry.progIdx];
-      if (!merged) continue;
-      const progs = tapes.map(t => t.programs[entry.progIdx]);
-      const name  = tapes.map(t => t.programs[entry.progIdx]?.name).find(n => n) ?? 'MERGED';
+      const um = userMerges[entry.progIdx];
+      if (!um) continue;
+      const merged = um.result;
+      // Build progs array indexed by tapeIdx from the merge sources.
+      const progs: (Program | undefined)[] = [];
+      for (const src of um.sources) {
+        while (progs.length <= src.tapeIdx) progs.push(undefined);
+        progs[src.tapeIdx] = tapes[src.tapeIdx]?.programs[src.progIdx];
+      }
+      const name = progs.find(p => p?.name)?.name ?? 'MERGED';
       blocks.push({ name, lines: linesFromMerged(merged, progs), autorun: entry.autorun });
     }
   }
@@ -788,6 +823,86 @@ function doDownloadTap(): void {
   downloadTap(bytes, filename);
   closeTapBuilder();
 }
+
+// ── Merge modal ───────────────────────────────────────────────────────────────
+
+/** Items selected in the merge picker; at most 2. */
+let mergePickerSelected: MergeSource[] = [];
+
+mergeBtnEl.addEventListener('click', openMergeModal);
+mergeCancelBtn.addEventListener('click', closeMergeModal);
+mergeModal.addEventListener('click', (e) => {
+  if (e.target === mergeModal) closeMergeModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !mergeModal.hidden) closeMergeModal();
+});
+
+function openMergeModal(): void {
+  mergePickerSelected = [];
+  renderMergePicker();
+  mergeModal.hidden = false;
+}
+
+function closeMergeModal(): void {
+  mergeModal.hidden = true;
+}
+
+function renderMergePicker(): void {
+  const selKeys = new Set(mergePickerSelected.map(s => `${s.tapeIdx}:${s.progIdx}`));
+  let html = '';
+
+  tapes.forEach((tape, ti) => {
+    html += `<div class="tap-group-head">${escHtml(shortName(tape.filename))}</div>`;
+    tape.programs.forEach((prog, pi) => {
+      const key     = `${ti}:${pi}`;
+      const checked = selKeys.has(key);
+      html +=
+        `<div class="merge-pick-item${checked ? ' merge-pick-sel' : ''}" ` +
+        `data-pick-ti="${ti}" data-pick-pi="${pi}">` +
+        `<span class="prog-num">${pi + 1}</span>` +
+        `<span class="tap-item-name">${escHtml(prog.name || `Prog ${pi + 1}`)}</span>` +
+        `</div>`;
+    });
+  });
+
+  mergePickerEl.innerHTML = html;
+  mergeOkBtn.disabled = mergePickerSelected.length !== 2;
+}
+
+mergePickerEl.addEventListener('click', (e) => {
+  const item = (e.target as Element).closest<HTMLElement>('[data-pick-ti]');
+  if (!item) return;
+  const ti  = +(item.dataset.pickTi ?? '0');
+  const pi  = +(item.dataset.pickPi ?? '0');
+  const idx = mergePickerSelected.findIndex(s => s.tapeIdx === ti && s.progIdx === pi);
+  if (idx >= 0) {
+    mergePickerSelected.splice(idx, 1); // deselect
+  } else if (mergePickerSelected.length < 2) {
+    mergePickerSelected.push({ tapeIdx: ti, progIdx: pi });
+  }
+  renderMergePicker();
+});
+
+mergeOkBtn.addEventListener('click', () => {
+  if (mergePickerSelected.length !== 2) return;
+  const sources: [MergeSource, MergeSource] = [mergePickerSelected[0], mergePickerSelected[1]];
+  // Build progs array indexed by tapeIdx.
+  const progs: (Program | undefined)[] = [];
+  for (const src of sources) {
+    while (progs.length <= src.tapeIdx) progs.push(undefined);
+    progs[src.tapeIdx] = tapes[src.tapeIdx]?.programs[src.progIdx];
+  }
+  const result = alignPrograms(progs);
+  userMerges.push({ sources, result });
+
+  closeMergeModal();
+  // Navigate to the new merged tab.
+  viewMode      = 'merged';
+  activeProgIdx = userMerges.length - 1;
+  selMergeLine  = null;
+  renderAll();
+});
 
 // ── Selection (event delegation) ──────────────────────────────────────────────
 
@@ -826,7 +941,7 @@ basicPanel.addEventListener('click', (e) => {
     basicPanel.querySelector('.merge-row.sel')?.classList.remove('sel');
     el.classList.add('sel');
     el.scrollIntoView({ block: 'nearest' });
-    const merged = mergedProgs[activeProgIdx];
+    const merged = userMerges[activeProgIdx]?.result;
     if (merged) renderMergedHex(merged);
     updateStatusBar();
     return;
@@ -1185,7 +1300,7 @@ function updateStatusBar(): void {
 }
 
 function updateMergedStatusBar(): void {
-  const merged = mergedProgs[activeProgIdx];
+  const merged = userMerges[activeProgIdx]?.result;
   if (!merged) { statusBar.innerHTML = '<span class="sb-dim">No merged data available.</span>'; return; }
 
   const dot  = ' <span class="sb-dim">·</span> ';

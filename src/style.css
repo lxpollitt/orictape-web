@@ -64,7 +64,7 @@ header h1 {
 }
 #file-label:hover { background: rgba(78, 201, 78, 0.12); }
 
-#build-tap {
+#merge-btn, #build-tap {
   padding: 3px 10px;
   font: inherit;
   font-size: 12px;
@@ -75,7 +75,7 @@ header h1 {
   cursor: pointer;
   white-space: nowrap;
 }
-#build-tap:hover { background: rgba(78, 201, 78, 0.12); }
+#merge-btn:hover, #build-tap:hover { background: rgba(78, 201, 78, 0.12); }
 
 /* ── Program tabs ───────────────────────────────────────────────────────────── */
 #prog-tabs {
@@ -527,6 +527,57 @@ header h1 {
   color: var(--green);
 }
 #tap-download:not(:disabled):hover { background: rgba(78,201,78,0.12); }
+
+/* ── Merge modal ─────────────────────────────────────────────────────────────── */
+.merge-modal-box {
+  width: min(400px, 92vw);
+  height: min(420px, 85vh);
+}
+
+.merge-modal-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.merge-modal-hint {
+  padding: 8px 12px 4px;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+#merge-picker {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Program rows in the merge picker */
+.merge-pick-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  min-height: 28px;
+  user-select: none;
+}
+.merge-pick-item:hover { background: #202020; }
+.merge-pick-item.merge-pick-sel {
+  background: rgba(78,201,78,0.12);
+  outline: 1px solid var(--green);
+  outline-offset: -1px;
+}
+
+#merge-ok {
+  border-color: var(--green);
+  color: var(--green);
+}
+#merge-ok:not(:disabled):hover { background: rgba(78,201,78,0.12); }
 
 /* ── Misc ───────────────────────────────────────────────────────────────────── */
 .hint {
