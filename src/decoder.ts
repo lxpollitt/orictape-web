@@ -73,6 +73,12 @@ export interface Program {
   bytes: ByteInfo[];
   lines: LineInfo[];
   name: string;
+  /** Set when the BASIC end-of-program null pointer (0x00 0x00) was
+   *  encountered before the address range declared in the tape header was
+   *  exhausted.  Condition 1 already handles the normal case where the null
+   *  pointer sits right at endAddr–2, so this flag fires only when the
+   *  pointer appears unexpectedly early. */
+  earlyTermination?: boolean;
 }
 
 export const KEYWORDS: string[] = [
@@ -366,7 +372,16 @@ export function readProgramLines(prog: Program): void {
     // Read the raw pointer first; a zero value signals end-of-program.
     // The correctionOffset is applied afterwards, matching the Go original.
     const rawLineStart = getByte() + 256 * getByte();
-    if (rawLineStart === 0 || !ok) break;
+    if (!ok) break;
+    if (rawLineStart === 0) {
+      // Condition 1 (nextByte > endIdx − 2) handles the normal end-of-program:
+      // if only 2 bytes remained they were the expected 0x00 0x00 marker and
+      // we would have broken before reaching here.  A null pointer at this
+      // point therefore means the BASIC linked list ended earlier than the
+      // header's declared address range.
+      prog.earlyTermination = true;
+      break;
+    }
     const nextLineStart = rawLineStart - correctionOffset;
 
     const elements: string[] = [];

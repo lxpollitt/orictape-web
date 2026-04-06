@@ -313,7 +313,8 @@ function renderTabs(): void {
       const hasErrors = prog.lines.some(l => l.lenErr);
       btn.innerHTML   = `<span class="prog-num">${pi + 1}</span>` +
         escHtml(prog.name || `Prog ${pi + 1}`) +
-        (hasErrors ? ' <span class="badge badge-err">errors</span>' : '');
+        (hasErrors ? ' <span class="badge badge-err">errors</span>' : '') +
+        (prog.earlyTermination ? ' <span class="badge badge-warn">early end</span>' : '');
       progTabs.appendChild(btn);
     });
   });
@@ -1726,6 +1727,10 @@ function updateStatusBar(): void {
       }
     }
     sections.push(lineSegs.join(dot));
+  }
+
+  if (prog.earlyTermination) {
+    sections.push('<span class="sb-err">Program ended early · null pointer before header end address</span>');
   }
 
   statusBar.innerHTML = sections.join(pipe);
