@@ -547,8 +547,10 @@ function renderMergeView(merged: MergedProgram): void {
   const ti1      = 1;   // slot index for right column
   const ati0     = merge.sources[0].tapeIdx;   // actual tape index (for display only)
   const ati1     = merge.sources[1].tapeIdx;
-  const col0Name = tapes[ati0] ? shortName(tapes[ati0].filename) : `Tape ${ati0 + 1}`;
-  const col1Name = tapes[ati1] ? shortName(tapes[ati1].filename) : `Tape ${ati1 + 1}`;
+  const base0     = tapes[ati0] ? shortName(tapes[ati0].filename) : `Tape ${ati0 + 1}`;
+  const base1     = tapes[ati1] ? shortName(tapes[ati1].filename) : `Tape ${ati1 + 1}`;
+  const progName0 = tapes[ati0]?.programs[merge.sources[0].progIdx]?.name ?? '';
+  const progName1 = tapes[ati1]?.programs[merge.sources[1].progIdx]?.name ?? '';
 
   const rowsHtml = merged.lines.map((line, i) => {
     const src    = bestSource(line, progs);
@@ -598,9 +600,9 @@ function renderMergeView(merged: MergedProgram): void {
   // min-width) containing a .merge-col-head span that applies the 11px styling.
   const headerHtml =
     `<div class="merge-row-head">` +
-      `<div class="merge-col"><span class="merge-col-head">${escHtml(col0Name)}</span></div>` +
+      `<div class="merge-col"><span class="merge-col-head">${escHtml(base0)}<span class="prog-num">${merge.sources[0].progIdx + 1}</span>${escHtml(progName0)}</span></div>` +
       `<div class="merge-col merge-col-result"><span class="merge-col-head merge-col-head-result">Merged</span></div>` +
-      `<div class="merge-col"><span class="merge-col-head">${escHtml(col1Name)}</span></div>` +
+      `<div class="merge-col"><span class="merge-col-head">${escHtml(base1)}<span class="prog-num">${merge.sources[1].progIdx + 1}</span>${escHtml(progName1)}</span></div>` +
     `</div>`;
 
   basicPanel.innerHTML =

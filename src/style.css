@@ -235,7 +235,9 @@ header h1 {
 /* The label span inside each header .merge-col carries the visual styling.
    The parent .merge-col provides the width (ch units at 13px body font). */
 .merge-col-head {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   padding: 3px 10px;
   font-size: 11px;
   color: var(--text);
