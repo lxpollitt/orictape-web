@@ -34,6 +34,12 @@ const tapQueueEl   = document.getElementById('tap-queue')       as HTMLElement;
 const tapAutoEl    = document.getElementById('tap-auto')        as HTMLElement;
 const tapCancelBtn = document.getElementById('tap-cancel')      as HTMLButtonElement;
 const tapDlBtn     = document.getElementById('tap-download')    as HTMLButtonElement;
+const searchBar    = document.getElementById('search-bar')      as HTMLElement;
+const searchInput  = document.getElementById('search-input')    as HTMLInputElement;
+const searchCount  = document.getElementById('search-count')    as HTMLElement;
+const searchPrev   = document.getElementById('search-prev')     as HTMLButtonElement;
+const searchNext   = document.getElementById('search-next')     as HTMLButtonElement;
+const searchClose  = document.getElementById('search-close')    as HTMLButtonElement;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 interface TapeData {
@@ -66,6 +72,8 @@ let selByte:      number | null            = null;
 let selMergeLine: number | null            = null;
 let selMergeCol:  0 | 1 | 2 | null        = null;
 let selMergeElem: number | null            = null;
+let searchMatches:  number[]               = [];   // line indices of current matches
+let searchMatchIdx: number                 = -1;   // index into searchMatches
 let wrapMode      = true;
 /** Which panel most recently received focus — drives keyboard navigation. */
 let focusedPanel: 'hex' | 'basic' | null  = null;
@@ -129,6 +137,7 @@ fileInput.addEventListener('change', async () => {
   selByte         = null;
   selMergeLine    = null;
   selMergeCol     = null;
+  resetSearch();
   selMergeElem    = null;
   viewMode        = 'tape';
   mergeBtnEl.hidden = true;
@@ -279,6 +288,7 @@ progTabs.addEventListener('click', (e) => {
     }
   }
 
+  resetSearch();
   renderAll();
 
   // renderBasic/renderMergedBasic already call scrollIntoView for the BASIC
@@ -447,6 +457,103 @@ function elemErrorClass(prog: Program, firstByte: number, ei: number): string {
   return chkErr ? 'elem-err' : unclear ? 'elem-warn' : '';
 }
 
+// ── BASIC search ─────────────────────────────────────────────────────────────
+
+function openSearch(): void {
+  if (viewMode !== 'tape') return;
+  searchBar.hidden = false;
+  searchInput.focus();
+  searchInput.select();
+  runSearch(searchInput.value);
+}
+
+function closeSearch(): void {
+  searchBar.hidden = true;
+  resetSearch();
+  const prog = programs[activeProgIdx];
+  if (prog) renderBasic(prog);
+}
+
+/** Reset search state without triggering a re-render (call before renderAll). */
+function resetSearch(): void {
+  searchMatches  = [];
+  searchMatchIdx = -1;
+  searchInput.value        = '';
+  searchCount.textContent  = '';
+  searchCount.className    = '';
+  searchInput.classList.remove('no-match');
+}
+
+function runSearch(query: string): void {
+  const prog = programs[activeProgIdx];
+  if (!prog) return;
+
+  if (!query) {
+    searchMatches  = [];
+    searchMatchIdx = -1;
+  } else {
+    const q = query.toLowerCase();
+    searchMatches  = prog.lines.reduce<number[]>((acc, line, i) => {
+      if (line.v.toLowerCase().includes(q)) acc.push(i);
+      return acc;
+    }, []);
+    searchMatchIdx = searchMatches.length > 0 ? 0 : -1;
+  }
+
+  updateSearchCount();
+  renderBasic(prog);
+  scrollToSearchMatch();
+}
+
+function navigateSearch(dir: 1 | -1): void {
+  if (!searchMatches.length) return;
+  searchMatchIdx = (searchMatchIdx + dir + searchMatches.length) % searchMatches.length;
+  updateSearchCount();
+  const prog = programs[activeProgIdx];
+  if (prog) renderBasic(prog);
+  scrollToSearchMatch();
+}
+
+function scrollToSearchMatch(): void {
+  if (searchMatchIdx < 0 || !searchMatches.length) return;
+  const lineIdx = searchMatches[searchMatchIdx];
+  basicPanel.querySelector<HTMLElement>(`[data-li="${lineIdx}"]`)
+    ?.scrollIntoView({ block: 'nearest' });
+}
+
+function updateSearchCount(): void {
+  const hasQuery = searchInput.value.length > 0;
+  if (!hasQuery) {
+    searchCount.textContent = '';
+    searchCount.className   = '';
+    searchInput.classList.remove('no-match');
+  } else if (!searchMatches.length) {
+    searchCount.textContent = 'No matches';
+    searchCount.className   = 'no-match';
+    searchInput.classList.add('no-match');
+  } else {
+    searchCount.textContent = `${searchMatchIdx + 1} / ${searchMatches.length}`;
+    searchCount.className   = '';
+    searchInput.classList.remove('no-match');
+  }
+}
+
+// Search button / input event wiring.
+searchInput.addEventListener('input', () => runSearch(searchInput.value));
+searchNext .addEventListener('click', () => navigateSearch(1));
+searchPrev .addEventListener('click', () => navigateSearch(-1));
+searchClose.addEventListener('click', () => closeSearch());
+searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    navigateSearch(e.shiftKey ? -1 : 1);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeSearch();
+    basicPanel.focus();
+  }
+});
+
 function renderBasic(prog: Program): void {
   if (!prog.lines.length) {
     basicPanel.innerHTML = '<p class="hint">No BASIC content decoded.</p>';
@@ -458,17 +565,22 @@ function renderBasic(prog: Program): void {
     : -1;
   const selElem = selLine >= 0 ? elemIdxForByte(prog.lines[selLine], selByte!) : -1;
 
+  const matchSet = new Set(searchMatches);
   basicPanel.innerHTML = prog.lines.map((line, i) => {
     // Classify the line: 'err' if lenErr or any chkErr byte; 'warn' if only
     // unclear bytes (no hard errors).  Background tints are applied via CSS.
     const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
     const hasChkErr = line.lenErr || line.earlyEnd || lineBytes.some(b => b?.chkErr);
     const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
+    const isMatch   = matchSet.has(i);
+    const isCurrent = isMatch && searchMatchIdx >= 0 && searchMatches[searchMatchIdx] === i;
     const lineClass = [
       'basic-line',
       ...(hasChkErr  ? ['err']  : []),
       ...(hasUnclear ? ['warn'] : []),
-      ...(i === selLine ? ['sel'] : []),
+      ...(i === selLine       ? ['sel']                  : []),
+      ...(isMatch             ? ['search-match']         : []),
+      ...(isCurrent           ? ['search-match-current'] : []),
     ].join(' ');
 
     const elemsHtml = line.elements.map((el, ei) => {
@@ -1572,6 +1684,16 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
 const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 
 document.addEventListener('keydown', (e: KeyboardEvent) => {
+  // Cmd/Ctrl+F: open search bar (tape view only).
+  if (e.key === 'f' && (e.metaKey || e.ctrlKey)) {
+    if (viewMode === 'tape' && programs[activeProgIdx]) {
+      e.preventDefault();
+      openSearch();
+    }
+    return;
+  }
+  // Don't let nav keys fire while the search input has focus.
+  if (document.activeElement === searchInput) return;
   if (!NAV_KEYS.has(e.key)) return;
   if (viewMode === 'merged') {
     if (focusedPanel === 'basic') { e.preventDefault(); navigateMerge(e.key, e.altKey); }
