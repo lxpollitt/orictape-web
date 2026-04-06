@@ -1653,7 +1653,7 @@ function describeProgRegion(prog: Program, byteIdx: number): string {
     const staLo  = b[h0 + 7]?.v ?? 0;
     const endAddr = (endHi << 8) | endLo;
     const staAddr = (staHi << 8) | staLo;
-    const dataLen = endAddr - staAddr + 1;
+    const dataLen = endAddr - staAddr; // endAddr is exclusive
     const hex4    = (n: number) => '$' + n.toString(16).toUpperCase().padStart(4, '0');
 
     switch (ho) {

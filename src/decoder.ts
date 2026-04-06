@@ -307,9 +307,12 @@ function readProgramBytes(stream: BitStream): Program {
 export function readProgramLines(prog: Program): void {
   let nextByte = 0;
   let ok = true;
+  // Hard fence: getByte() will not read past this stream index.
+  // Initialised to unlimited; capped to the header's address range once known.
+  let endIdx = Number.MAX_SAFE_INTEGER;
 
   const getByte = (): number => {
-    if (nextByte < prog.bytes.length) {
+    if (nextByte < prog.bytes.length && nextByte <= endIdx) {
       ok = true;
       return prog.bytes[nextByte++].v;
     }
@@ -334,6 +337,7 @@ export function readProgramLines(prog: Program): void {
 
   // Start address from header (bytes 6–7, big-endian).  Used to anchor the
   // chain of next-line pointer addresses to real Oric memory addresses.
+  const endAddr   = (header[4] << 8) | header[5];
   const startAddr = (header[6] << 8) | header[7];
 
   // Null-terminated program name.
@@ -341,11 +345,24 @@ export function readProgramLines(prog: Program): void {
     prog.name += String.fromCharCode(b);
   }
 
+  // Cap getByte to the address range declared in the header.
+  // endAddr is exclusive (the first byte past the saved data), so the last
+  // valid stream index is firstContentIdx + (endAddr - startAddr) - 1.
+  const firstContentIdx = nextByte;
+  endIdx = firstContentIdx + (endAddr - startAddr) - 1;
+
   // Program lines.
   let correctionOffset = 0;
   let lineMemAddr = startAddr; // memory address of the line we are about to push
   while (true) {
     const lineStart = nextByte;
+
+    // Condition 1: only attempt a new line if there are at least 3 bytes
+    // remaining (2 for the next-line pointer + 1 beyond).  When exactly 2
+    // bytes remain they can only be the end-of-program marker (0x00 0x00 or
+    // whatever the ROM left in memory), not a real line — stop cleanly.
+    if (nextByte > endIdx - 2) break;
+
     // Read the raw pointer first; a zero value signals end-of-program.
     // The correctionOffset is applied afterwards, matching the Go original.
     const rawLineStart = getByte() + 256 * getByte();
