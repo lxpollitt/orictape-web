@@ -90,7 +90,7 @@ function encodeTapBlock(block: TapBlock): number[] {
   // Each line: 2 (next ptr) + 2 (line num) + tokens.length + 1 (0x00)
   const lineSizes      = lines.map(l => 4 + l.tokens.length + 1);
   const totalBasicSize = lineSizes.reduce((a, b) => a + b, 0) + 2; // +2 for 0x00 0x00
-  const END_ADDR       = START_ADDR + totalBasicSize - 1;
+  const END_ADDR       = START_ADDR + totalBasicSize; // exclusive: first byte past the data
 
   const out: number[] = [];
 
