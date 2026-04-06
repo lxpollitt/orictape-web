@@ -64,6 +64,8 @@ let viewMode:     'tape' | 'merged'       = 'tape';
 let userMerges:   UserMerge[]             = [];
 let selByte:      number | null            = null;
 let selMergeLine: number | null            = null;
+let selMergeCol:  0 | 1 | 2 | null        = null;
+let selMergeElem: number | null            = null;
 let wrapMode      = true;
 /** Which panel most recently received focus — drives keyboard navigation. */
 let focusedPanel: 'hex' | 'basic' | null  = null;
@@ -126,6 +128,8 @@ fileInput.addEventListener('change', async () => {
   userMerges      = [];
   selByte         = null;
   selMergeLine    = null;
+  selMergeCol     = null;
+  selMergeElem    = null;
   viewMode        = 'tape';
   mergeBtnEl.hidden = true;
   clearPanels();
@@ -223,6 +227,8 @@ progTabs.addEventListener('click', (e) => {
 
   selByte      = null;
   selMergeLine = null;
+  selMergeCol  = null;
+  selMergeElem = null;
 
   if (btn.dataset.mi !== undefined) {
     // ── → Merged tab ────────────────────────────────────────────────────────
@@ -494,7 +500,12 @@ function mergeProgs(): ReadonlyArray<Program | undefined> {
  * Render a single BASIC line as an HTML string.
  * `extraClass` is appended to the basic-line div's class list (e.g. 'not-merged').
  */
-function renderBasicLineHtml(prog: Program, lineIdx: number, extraClass = ''): string {
+function renderBasicLineHtml(
+  prog: Program,
+  lineIdx: number,
+  extraClass = '',
+  selElem: number | null = null,
+): string {
   const line      = prog.lines[lineIdx];
   const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
   const hasChkErr  = line.lenErr || lineBytes.some(b => b?.chkErr);
@@ -507,7 +518,8 @@ function renderBasicLineHtml(prog: Program, lineIdx: number, extraClass = ''): s
   ].join(' ');
   const elems = line.elements.map((el, ei) => {
     const errCls = elemErrorClass(prog, line.firstByte, ei);
-    return `<span class="elem${errCls ? ' ' + errCls : ''}">${escHtml(el)}</span>`;
+    const selCls = ei === selElem ? ' sel' : '';
+    return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
   }).join('');
   return `<div class="${cls}">${elems}</div>`;
 }
@@ -536,12 +548,19 @@ function renderMergeView(merged: MergedProgram): void {
     const src    = bestSource(line, progs);
     const rowSel = i === selMergeLine ? ' sel' : '';
 
+    // Determine which element (if any) is selected within each column.
+    const isSel = i === selMergeLine;
+    const sel0   = isSel && selMergeCol === 0 ? selMergeElem : null;
+    const selMid = isSel && selMergeCol === 1 ? selMergeElem : null;
+    const sel1   = isSel && selMergeCol === 2 ? selMergeElem : null;
+
     // Left column — source 0 tape
     const srcLeft  = line.sources.find(s => s.tapeIdx === ti0);
     const progLeft = progs[ti0];
     const col0 = srcLeft && progLeft
       ? renderBasicLineHtml(progLeft, srcLeft.lineIdx,
-          line.status === 'conflict' && src.tapeIdx !== ti0 ? 'not-merged' : '')
+          line.status === 'conflict' && src.tapeIdx !== ti0 ? 'not-merged' : '',
+          sel0)
       : '';
 
     // Middle column — best-source merged line.
@@ -549,7 +568,7 @@ function renderMergeView(merged: MergedProgram): void {
     // clean (e.g. two byte-perfect sources that disagree — one must be wrong).
     const bestProg = progs[src.tapeIdx];
     const colMid = bestProg
-      ? renderBasicLineHtml(bestProg, src.lineIdx, line.quality === 'issue' ? 'err' : '')
+      ? renderBasicLineHtml(bestProg, src.lineIdx, line.quality === 'issue' ? 'err' : '', selMid)
       : `<div class="basic-line err">(line ${line.lineNum})</div>`;
 
     // Right column — source 1 tape
@@ -557,13 +576,14 @@ function renderMergeView(merged: MergedProgram): void {
     const progRight = progs[ti1];
     const col1 = srcRight && progRight
       ? renderBasicLineHtml(progRight, srcRight.lineIdx,
-          line.status === 'conflict' && src.tapeIdx !== ti1 ? 'not-merged' : '')
+          line.status === 'conflict' && src.tapeIdx !== ti1 ? 'not-merged' : '',
+          sel1)
       : '';
 
     return `<div class="merge-row${rowSel}" data-mli="${i}">` +
-      `<div class="merge-col">${col0}</div>` +
-      `<div class="merge-col merge-col-result">${colMid}</div>` +
-      `<div class="merge-col">${col1}</div>` +
+      `<div class="merge-col" data-col="0">${col0}</div>` +
+      `<div class="merge-col merge-col-result" data-col="1">${colMid}</div>` +
+      `<div class="merge-col" data-col="2">${col1}</div>` +
       `</div>`;
   }).join('');
 
@@ -597,8 +617,11 @@ function renderMergeView(merged: MergedProgram): void {
     }, { passive: false });
 
   if (selMergeLine !== null) {
-    basicPanel.querySelector<HTMLElement>(`[data-mli="${selMergeLine}"]`)
-      ?.scrollIntoView({ block: 'nearest' });
+    const rowEl = basicPanel.querySelector<HTMLElement>(`[data-mli="${selMergeLine}"]`);
+    const selEl = selMergeCol !== null && selMergeElem !== null
+      ? rowEl?.querySelector<HTMLElement>(`[data-col="${selMergeCol}"] [data-ei="${selMergeElem}"]`)
+      : null;
+    (selEl ?? rowEl)?.scrollIntoView({ block: 'nearest' });
   }
 }
 
@@ -658,9 +681,20 @@ function renderMergedHex(merged: MergedProgram): void {
     return;
   }
 
-  const progs   = mergeProgs();
-  const src     = bestSource(line, progs);
-  const prog    = progs[src.tapeIdx];
+  const progs  = mergeProgs();
+  const um     = userMerges[activeProgIdx]!;
+  const ti0    = um.sources[0].tapeIdx;
+  const ti1    = um.sources[1].tapeIdx;
+
+  // Show bytes from the selected column's source; fall back to best source.
+  const best = bestSource(line, progs);
+  const src = selMergeCol === 0
+    ? (line.sources.find(s => s.tapeIdx === ti0) ?? best)
+    : selMergeCol === 2
+      ? (line.sources.find(s => s.tapeIdx === ti1) ?? best)
+      : best;
+
+  const prog = progs[src.tapeIdx];
   if (!prog) { hexPanel.innerHTML = ''; return; }
 
   const lineData = prog.lines[src.lineIdx];
@@ -971,15 +1005,26 @@ basicPanel.addEventListener('focus', () => { focusedPanel = 'basic'; });
 basicPanel.addEventListener('click', (e) => {
   focusedPanel = 'basic';
   if (viewMode === 'merged') {
-    const el = (e.target as Element).closest<HTMLElement>('[data-mli]');
-    if (!el) return;
-    selMergeLine = +el.dataset.mli!;
-    basicPanel.querySelector('.merge-row.sel')?.classList.remove('sel');
-    el.classList.add('sel');
-    el.scrollIntoView({ block: 'nearest' });
-    const merged = userMerges[activeProgIdx]?.result;
-    if (merged) renderMergedHex(merged);
-    updateStatusBar();
+    const rowEl  = (e.target as Element).closest<HTMLElement>('[data-mli]');
+    if (!rowEl) return;
+    const mli    = +rowEl.dataset.mli!;
+    const colEl  = (e.target as Element).closest<HTMLElement>('[data-col]');
+    const elemEl = (e.target as Element).closest<HTMLElement>('[data-ei]');
+    if (colEl && elemEl) {
+      selectMergeElem(mli, +colEl.dataset.col! as 0 | 1 | 2, +elemEl.dataset.ei!);
+    } else {
+      // Click on row but not on a specific element — select row only.
+      selMergeLine = mli;
+      selMergeCol  = null;
+      selMergeElem = null;
+      basicPanel.querySelector('.merge-row.sel')?.classList.remove('sel');
+      basicPanel.querySelector('.elem.sel')?.classList.remove('sel');
+      rowEl.classList.add('sel');
+      rowEl.scrollIntoView({ block: 'nearest' });
+      const merged = userMerges[activeProgIdx]?.result;
+      if (merged) renderMergedHex(merged);
+      updateStatusBar();
+    }
     return;
   }
 
@@ -1028,6 +1073,253 @@ function selectByte(i: number): void {
 
   waveform.selectByte(i);
   updateStatusBar();
+}
+
+/**
+ * Select a specific element in the merged basic view.
+ * Updates state, DOM selection classes, hex panel, and status bar.
+ */
+function selectMergeElem(mli: number, col: 0 | 1 | 2, ei: number): void {
+  selMergeLine = mli;
+  selMergeCol  = col;
+  selMergeElem = ei;
+
+  // Update row highlight.
+  basicPanel.querySelector('.merge-row.sel')?.classList.remove('sel');
+  const rowEl = basicPanel.querySelector<HTMLElement>(`[data-mli="${mli}"]`);
+  rowEl?.classList.add('sel');
+
+  // Update element highlight.
+  basicPanel.querySelector('.elem.sel')?.classList.remove('sel');
+  const elemEl = rowEl?.querySelector<HTMLElement>(`[data-col="${col}"] [data-ei="${ei}"]`);
+  elemEl?.classList.add('sel');
+  elemEl?.scrollIntoView({ block: 'nearest' });
+
+  // Update hex panel to show the selected column's source bytes.
+  const merged = userMerges[activeProgIdx]?.result;
+  if (merged) renderMergedHex(merged);
+
+  updateStatusBar();
+}
+
+// ── Merged-view navigation helpers ───────────────────────────────────────────
+
+/** Return the {prog, lineIdx} backing column col of merged row mli, or null.
+ *  col 0 = left tape, col 1 = best-source (middle), col 2 = right tape. */
+function mergeColSource(col: 0|1|2, mli: number): { prog: Program; lineIdx: number } | null {
+  const um = userMerges[activeProgIdx];
+  if (!um) return null;
+  const line = um.result.lines[mli];
+  if (!line) return null;
+  const progs = mergeProgs();
+  const ti0 = um.sources[0].tapeIdx;
+  const ti1 = um.sources[1].tapeIdx;
+  let src: { tapeIdx: number; lineIdx: number } | undefined;
+  if      (col === 0) src = line.sources.find(s => s.tapeIdx === ti0);
+  else if (col === 2) src = line.sources.find(s => s.tapeIdx === ti1);
+  else                src = bestSource(line, progs);
+  if (!src) return null;
+  const prog = progs[src.tapeIdx];
+  return prog ? { prog, lineIdx: src.lineIdx } : null;
+}
+
+/** True if element ei in column col of merged line mli has a visible error highlight. */
+function mergeColElemHasError(col: 0|1|2, mli: number, ei: number): boolean {
+  const s = mergeColSource(col, mli);
+  if (!s) return false;
+  return elemErrorClass(s.prog, s.prog.lines[s.lineIdx].firstByte, ei) !== '';
+}
+
+/**
+ * Keyboard navigation for the merged basic view.
+ * Stays locked to the currently-selected column (defaulting to the middle).
+ * Arrow keys move element by element / line by line.
+ * Alt+Arrow keys jump between elements or lines that have errors/issues.
+ */
+function navigateMerge(key: string, alt: boolean): void {
+  const um = userMerges[activeProgIdx];
+  if (!um || !um.result.lines.length) return;
+  const merged = um.result;
+  const nLines = merged.lines.length;
+
+  const col: 0|1|2 = selMergeCol ?? 1;  // default to middle column
+  const curMli     = selMergeLine ?? -1;
+  const curEi      = selMergeElem ?? -1;
+
+  if (!alt) {
+    switch (key) {
+      case 'ArrowUp':
+      case 'ArrowDown': {
+        // Visual navigation: query only elements within the locked column.
+        const up = key === 'ArrowUp';
+        const allElems = Array.from(
+          basicPanel.querySelectorAll<HTMLElement>(`[data-col="${col}"] [data-ei]`),
+        );
+        if (!allElems.length) break;
+
+        // Reference point: selected element span if any, else first elem of selected row.
+        const refEl: HTMLElement | null =
+          basicPanel.querySelector<HTMLElement>(`[data-col="${col}"] .elem.sel`) ??
+          (selMergeLine !== null
+            ? basicPanel.querySelector<HTMLElement>(
+                `[data-mli="${selMergeLine}"] [data-col="${col}"] [data-ei]`)
+            : null);
+
+        if (!refEl) {
+          const target = up ? allElems[allElems.length - 1] : allElems[0];
+          const rowEl  = target.closest<HTMLElement>('[data-mli]')!;
+          selectMergeElem(+rowEl.dataset.mli!, col, +target.dataset.ei!);
+          break;
+        }
+
+        const refRect   = refEl.getBoundingClientRect();
+        const elemRects = allElems.map(el => el.getBoundingClientRect());
+
+        // Pass 1: nearest visual row above/below.
+        let targetRowTop = up ? -Infinity : Infinity;
+        for (const r of elemRects) {
+          if (up  && r.bottom <= refRect.top    + 0.5 && r.top > targetRowTop) targetRowTop = r.top;
+          if (!up && r.top   >= refRect.bottom  - 0.5 && r.top < targetRowTop) targetRowTop = r.top;
+        }
+        if (!isFinite(targetRowTop)) break; // already at first/last visual row
+
+        // Pass 2: element closest in x on that row.
+        let bestEl: HTMLElement | null = null;
+        let bestDist = Infinity;
+        for (let i = 0; i < allElems.length; i++) {
+          if (Math.abs(elemRects[i].top - targetRowTop) < 3) {
+            const dist = Math.abs(elemRects[i].left - refRect.left);
+            if (dist < bestDist) { bestDist = dist; bestEl = allElems[i]; }
+          }
+        }
+        if (!bestEl) break;
+
+        const rowEl = bestEl.closest<HTMLElement>('[data-mli]')!;
+        selectMergeElem(+rowEl.dataset.mli!, col, +bestEl.dataset.ei!);
+        break;
+      }
+
+      case 'ArrowLeft': {
+        if (curMli < 0) {
+          const s = mergeColSource(col, 0);
+          if (s) selectMergeElem(0, col, 0);
+          break;
+        }
+        const src = mergeColSource(col, curMli);
+        if (!src) break;
+        if (curEi < 0) {
+          // No element selected yet — snap to start of line.
+          selectMergeElem(curMli, col, 0);
+          break;
+        }
+        if (curEi > 0) {
+          selectMergeElem(curMli, col, curEi - 1);
+        } else {
+          // Cross to the last element of the previous line in this column.
+          for (let mli = curMli - 1; mli >= 0; mli--) {
+            const ps = mergeColSource(col, mli);
+            if (ps) {
+              selectMergeElem(mli, col, ps.prog.lines[ps.lineIdx].elements.length - 1);
+              break;
+            }
+          }
+        }
+        break;
+      }
+
+      case 'ArrowRight': {
+        if (curMli < 0) {
+          const s = mergeColSource(col, 0);
+          if (s) selectMergeElem(0, col, 0);
+          break;
+        }
+        const src = mergeColSource(col, curMli);
+        if (!src) break;
+        if (curEi < 0) {
+          // No element selected yet — snap to start of line.
+          selectMergeElem(curMli, col, 0);
+          break;
+        }
+        const line = src.prog.lines[src.lineIdx];
+        if (curEi < line.elements.length - 1) {
+          selectMergeElem(curMli, col, curEi + 1);
+        } else {
+          // Cross to the first element of the next line in this column.
+          for (let mli = curMli + 1; mli < nLines; mli++) {
+            const ns = mergeColSource(col, mli);
+            if (ns) { selectMergeElem(mli, col, 0); break; }
+          }
+        }
+        break;
+      }
+    }
+    return;
+  }
+
+  // Alt+Up/Down — jump to the next/prev merged line with 'issue' quality,
+  // landing on the first error element (or element 0 if none visible).
+  if (key === 'ArrowUp' || key === 'ArrowDown') {
+    const step  = key === 'ArrowUp' ? -1 : 1;
+    const start = curMli < 0 ? (step < 0 ? nLines : -1) : curMli;
+    for (let mli = start + step; mli >= 0 && mli < nLines; mli += step) {
+      if (merged.lines[mli].quality !== 'issue') continue;
+      const src = mergeColSource(col, mli);
+      if (!src) continue; // skip issue lines where this column has no source
+      const landLine = src.prog.lines[src.lineIdx];
+      let landed = false;
+      for (let ei = 0; ei < landLine.elements.length; ei++) {
+        if (mergeColElemHasError(col, mli, ei)) {
+          selectMergeElem(mli, col, ei);
+          landed = true;
+          break;
+        }
+      }
+      if (!landed) selectMergeElem(mli, col, 0);
+      return;
+    }
+    // No issue line found — end-of-search feedback: jump to first/last line.
+    const edgeMli = step < 0 ? 0 : nLines - 1;
+    const edgeSrc = mergeColSource(col, edgeMli);
+    if (edgeSrc) {
+      const el = edgeSrc.prog.lines[edgeSrc.lineIdx];
+      selectMergeElem(edgeMli, col, step < 0 ? 0 : el.elements.length - 1);
+    }
+    return;
+  }
+
+  // Alt+Left/Right — scan elements for errors, crossing line boundaries.
+  if (curMli < 0) return;
+  const step = key === 'ArrowLeft' ? -1 : 1;
+
+  // Current line: start from element adjacent to current position.
+  const curSrc = mergeColSource(col, curMli);
+  if (curSrc) {
+    const curLine = curSrc.prog.lines[curSrc.lineIdx];
+    const eiStart = curEi < 0
+      ? (step < 0 ? curLine.elements.length - 1 : 0)
+      : curEi + step;
+    for (let ei = eiStart; ei >= 0 && ei < curLine.elements.length; ei += step) {
+      if (mergeColElemHasError(col, curMli, ei)) { selectMergeElem(curMli, col, ei); return; }
+    }
+  }
+
+  // Remaining lines.
+  for (let mli = curMli + step; mli >= 0 && mli < nLines; mli += step) {
+    const src = mergeColSource(col, mli);
+    if (!src) continue;
+    const line    = src.prog.lines[src.lineIdx];
+    const eiStart = step < 0 ? line.elements.length - 1 : 0;
+    for (let ei = eiStart; ei >= 0 && ei < line.elements.length; ei += step) {
+      if (mergeColElemHasError(col, mli, ei)) { selectMergeElem(mli, col, ei); return; }
+    }
+  }
+  // No error element found — end-of-search feedback: jump to first/last element.
+  const edgeMli = step < 0 ? 0 : nLines - 1;
+  const edgeSrc = mergeColSource(col, edgeMli);
+  if (edgeSrc) {
+    const el = edgeSrc.prog.lines[edgeSrc.lineIdx];
+    selectMergeElem(edgeMli, col, step < 0 ? 0 : el.elements.length - 1);
+  }
 }
 
 // ── Keyboard navigation ───────────────────────────────────────────────────────
@@ -1276,7 +1568,12 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
 const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 
 document.addEventListener('keydown', (e: KeyboardEvent) => {
-  if (!NAV_KEYS.has(e.key) || viewMode !== 'tape') return;
+  if (!NAV_KEYS.has(e.key)) return;
+  if (viewMode === 'merged') {
+    if (focusedPanel === 'basic') { e.preventDefault(); navigateMerge(e.key, e.altKey); }
+    return;
+  }
+  if (viewMode !== 'tape') return;
   const prog = programs[activeProgIdx];
   if (!prog) return;
   if (focusedPanel === 'hex') {
