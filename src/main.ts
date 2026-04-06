@@ -320,7 +320,7 @@ function renderTabs(): void {
       btn.className  = `prog-tab${isActive ? ' active' : ''}`;
       btn.dataset.ti = String(ti);
       btn.dataset.pi = String(pi);
-      const hasErrors = prog.lines.some(l => l.lenErr || l.earlyEnd);
+      const hasErrors = prog.lines.some(l => l.lenErr || l.earlyEnd || l.unknownKeyword);
       const infoText  = prog.lines.length > 0
         ? `${prog.lines.length} line${prog.lines.length !== 1 ? 's' : ''}`
         : `${prog.bytes.length} byte${prog.bytes.length !== 1 ? 's' : ''}`;
@@ -570,7 +570,7 @@ function renderBasic(prog: Program): void {
     // Classify the line: 'err' if lenErr or any chkErr byte; 'warn' if only
     // unclear bytes (no hard errors).  Background tints are applied via CSS.
     const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-    const hasChkErr = line.lenErr || line.earlyEnd || lineBytes.some(b => b?.chkErr);
+    const hasChkErr = line.lenErr || line.earlyEnd || line.unknownKeyword || lineBytes.some(b => b?.chkErr);
     const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
     const isMatch   = matchSet.has(i);
     const isCurrent = isMatch && searchMatchIdx >= 0 && searchMatches[searchMatchIdx] === i;
@@ -585,7 +585,7 @@ function renderBasic(prog: Program): void {
 
     const elemsHtml = line.elements.map((el, ei) => {
       // Error class is always applied so errors are visible without selecting.
-      const errCls = elemErrorClass(prog, line.firstByte, ei);
+      const errCls = el === '[UNKNOWN_KEYWORD]' ? 'elem-err' : elemErrorClass(prog, line.firstByte, ei);
       const selCls = (i === selLine && ei === selElem) ? ' sel' : '';
       return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
     }).join('');
@@ -633,7 +633,7 @@ function renderBasicLineHtml(
     ...(extraClass ? [extraClass] : []),
   ].join(' ');
   const elems = line.elements.map((el, ei) => {
-    const errCls = elemErrorClass(prog, line.firstByte, ei);
+    const errCls = el === '[UNKNOWN_KEYWORD]' ? 'elem-err' : elemErrorClass(prog, line.firstByte, ei);
     const selCls = ei === selElem ? ' sel' : '';
     return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
   }).join('');
@@ -1462,7 +1462,7 @@ function isErrByte(b: ByteInfo): boolean {
 
 function lineHasError(prog: Program, li: number): boolean {
   const line = prog.lines[li];
-  if (line.lenErr || line.earlyEnd) return true;
+  if (line.lenErr || line.earlyEnd || line.unknownKeyword) return true;
   for (let b = line.firstByte; b <= line.lastByte; b++) {
     const byte = prog.bytes[b];
     if (byte && isErrByte(byte)) return true;
@@ -1851,6 +1851,9 @@ function updateStatusBar(): void {
         const expected = line.expectedLastByte - line.firstByte + 1;
         const actual   = line.lastByte         - line.firstByte + 1;
         lineSegs.push(`<span class="sb-err">Line length error (expected ${expected} bytes, found ${actual})</span>`);
+      }
+      if (line.unknownKeyword) {
+        lineSegs.push(`<span class="sb-err">Unknown keyword byte</span>`);
       }
     }
     sections.push(lineSegs.join(dot));

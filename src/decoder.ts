@@ -39,6 +39,9 @@ export interface LineInfo {
    *  itself may be byte-clean; the flag marks the point where the program
    *  ended unexpectedly early. */
   earlyEnd?: boolean;
+  /** Set when the line contains at least one byte in the keyword range
+   *  (0x80–0xFF) that does not map to a known BASIC keyword. */
+  unknownKeyword?: boolean;
 }
 
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
@@ -399,6 +402,7 @@ export function readProgramLines(prog: Program): void {
     const lineNumStr = `${lineNum} `;
     elements.push(lineNumStr);
     let line = lineNumStr;
+    let unknownKeyword = false;
 
     while (true) {
       const b = getByte();
@@ -410,6 +414,7 @@ export function readProgramLines(prog: Program): void {
         element = KEYWORDS[b - 128];
       } else {
         element = '[UNKNOWN_KEYWORD]';
+        unknownKeyword = true;
       }
       elements.push(element);
       line += element;
@@ -422,6 +427,7 @@ export function readProgramLines(prog: Program): void {
       lastByte:  nextByte - 1,
       expectedLastByte: nextLineStart - 1,
       lenErr: nextLineStart !== nextByte,
+      unknownKeyword: unknownKeyword || undefined,
       memAddr: lineMemAddr,
     });
     correctionOffset += nextLineStart - nextByte;
