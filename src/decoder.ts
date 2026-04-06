@@ -34,6 +34,11 @@ export interface LineInfo {
   /** Oric memory address of this line's first byte, derived from the
    *  header start address and the chain of next-line pointers. */
   memAddr: number;
+  /** Set on the last parsed line when the BASIC end-of-program null pointer
+   *  was encountered before the header's declared end address.  The line
+   *  itself may be byte-clean; the flag marks the point where the program
+   *  ended unexpectedly early. */
+  earlyEnd?: boolean;
 }
 
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
@@ -374,12 +379,17 @@ export function readProgramLines(prog: Program): void {
     const rawLineStart = getByte() + 256 * getByte();
     if (!ok) break;
     if (rawLineStart === 0) {
-      // Condition 1 (nextByte > endIdx − 2) handles the normal end-of-program:
-      // if only 2 bytes remained they were the expected 0x00 0x00 marker and
-      // we would have broken before reaching here.  A null pointer at this
-      // point therefore means the BASIC linked list ended earlier than the
-      // header's declared address range.
-      prog.earlyTermination = true;
+      // Condition 1 handles the common end-of-program where only 2 bytes
+      // (the 0x00 0x00 marker) remain.  However, endAddr (exclusive) sometimes
+      // points one byte past the marker, leaving one extra byte in range when
+      // the pointer is read (nextByte === endIdx after consuming 2 bytes).
+      // That single trailing byte is not a genuine early end — only flag when
+      // two or more bytes remain after the null pointer.
+      if (nextByte < endIdx) {
+        prog.earlyTermination = true;
+        if (prog.lines.length > 0)
+          prog.lines[prog.lines.length - 1].earlyEnd = true;
+      }
       break;
     }
     const nextLineStart = rawLineStart - correctionOffset;

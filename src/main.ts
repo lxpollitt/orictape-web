@@ -310,13 +310,12 @@ function renderTabs(): void {
       btn.className  = `prog-tab${isActive ? ' active' : ''}`;
       btn.dataset.ti = String(ti);
       btn.dataset.pi = String(pi);
-      const hasErrors = prog.lines.some(l => l.lenErr);
+      const hasErrors = prog.lines.some(l => l.lenErr || l.earlyEnd);
       const infoText  = prog.lines.length > 0
         ? `${prog.lines.length} line${prog.lines.length !== 1 ? 's' : ''}`
         : `${prog.bytes.length} byte${prog.bytes.length !== 1 ? 's' : ''}`;
       const badgesHtml =
-        (hasErrors            ? '<span class="badge badge-err">errors</span>' : '') +
-        (prog.earlyTermination ? '<span class="badge badge-warn">early end</span>' : '');
+        (hasErrors ? '<span class="badge badge-err">errors</span>' : '');
       btn.innerHTML =
         `<div class="prog-tab-name"><span class="prog-num">${pi + 1}</span>${escHtml(prog.name || `Prog ${pi + 1}`)}</div>` +
         `<div class="prog-tab-info">${infoText}</div>` +
@@ -463,7 +462,7 @@ function renderBasic(prog: Program): void {
     // Classify the line: 'err' if lenErr or any chkErr byte; 'warn' if only
     // unclear bytes (no hard errors).  Background tints are applied via CSS.
     const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-    const hasChkErr = line.lenErr || lineBytes.some(b => b?.chkErr);
+    const hasChkErr = line.lenErr || line.earlyEnd || lineBytes.some(b => b?.chkErr);
     const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
     const lineClass = [
       'basic-line',
@@ -1353,7 +1352,7 @@ function isErrByte(b: ByteInfo): boolean {
 
 function lineHasError(prog: Program, li: number): boolean {
   const line = prog.lines[li];
-  if (line.lenErr) return true;
+  if (line.lenErr || line.earlyEnd) return true;
   for (let b = line.firstByte; b <= line.lastByte; b++) {
     const byte = prog.bytes[b];
     if (byte && isErrByte(byte)) return true;
@@ -1726,17 +1725,15 @@ function updateStatusBar(): void {
     } else {
       const line = prog.lines[li];
       lineSegs.push(`Line ${li + 1}`);
-      if (line.lenErr) {
+      if (line.earlyEnd) {
+        lineSegs.push(`<span class="sb-err">Unexpected end of program · null pointer before header end address</span>`);
+      } else if (line.lenErr) {
         const expected = line.expectedLastByte - line.firstByte + 1;
         const actual   = line.lastByte         - line.firstByte + 1;
         lineSegs.push(`<span class="sb-err">Line length error (expected ${expected} bytes, found ${actual})</span>`);
       }
     }
     sections.push(lineSegs.join(dot));
-  }
-
-  if (prog.earlyTermination) {
-    sections.push('<span class="sb-err">Program ended early · null pointer before header end address</span>');
   }
 
   statusBar.innerHTML = sections.join(pipe);
