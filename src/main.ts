@@ -494,12 +494,10 @@ const TAPE_COLORS = ['#4a9eff', '#c97aff', '#4affb0', '#ffa04a', '#ff6b6b', '#ff
 function mergeProgs(): ReadonlyArray<Program | undefined> {
   const merge = userMerges[activeProgIdx];
   if (!merge) return [];
-  const result: (Program | undefined)[] = [];
-  for (const src of merge.sources) {
-    while (result.length <= src.tapeIdx) result.push(undefined);
-    result[src.tapeIdx] = tapes[src.tapeIdx]?.programs[src.progIdx];
-  }
-  return result;
+  // Index by slot position (0, 1) rather than actual tapeIdx so that two
+  // programs from the same tape are kept separate.  LineSource.tapeIdx values
+  // produced by alignPrograms therefore mean "slot index", not "tape index".
+  return merge.sources.map(src => tapes[src.tapeIdx]?.programs[src.progIdx]);
 }
 
 /**
@@ -545,10 +543,12 @@ function renderMergeView(merged: MergedProgram): void {
 
   const progs    = mergeProgs();
   const merge    = userMerges[activeProgIdx]!;
-  const ti0      = merge.sources[0].tapeIdx;
-  const ti1      = merge.sources[1].tapeIdx;
-  const col0Name = tapes[ti0] ? shortName(tapes[ti0].filename) : `Tape ${ti0 + 1}`;
-  const col1Name = tapes[ti1] ? shortName(tapes[ti1].filename) : `Tape ${ti1 + 1}`;
+  const ti0      = 0;   // slot index for left column
+  const ti1      = 1;   // slot index for right column
+  const ati0     = merge.sources[0].tapeIdx;   // actual tape index (for display only)
+  const ati1     = merge.sources[1].tapeIdx;
+  const col0Name = tapes[ati0] ? shortName(tapes[ati0].filename) : `Tape ${ati0 + 1}`;
+  const col1Name = tapes[ati1] ? shortName(tapes[ati1].filename) : `Tape ${ati1 + 1}`;
 
   const rowsHtml = merged.lines.map((line, i) => {
     const src    = bestSource(line, progs);
@@ -689,8 +689,8 @@ function renderMergedHex(merged: MergedProgram): void {
 
   const progs  = mergeProgs();
   const um     = userMerges[activeProgIdx]!;
-  const ti0    = um.sources[0].tapeIdx;
-  const ti1    = um.sources[1].tapeIdx;
+  const ti0    = 0;   // slot index for left column
+  const ti1    = 1;   // slot index for right column
 
   // Show bytes from the selected column's source; fall back to best source.
   const best = bestSource(line, progs);
@@ -707,10 +707,12 @@ function renderMergedHex(merged: MergedProgram): void {
   const firstB   = lineData.firstByte;
   const lastB    = lineData.lastByte;
 
-  const tapeColor = TAPE_COLORS[src.tapeIdx % TAPE_COLORS.length];
+  // src.tapeIdx is a slot index; map to actual tape index for display.
+  const actualTi  = um.sources[src.tapeIdx]?.tapeIdx ?? src.tapeIdx;
+  const tapeColor = TAPE_COLORS[actualTi % TAPE_COLORS.length];
   let html = `<div class="hex-grid">` +
     `<span class="hex-source-label" style="color:${tapeColor}">` +
-    `Tape ${src.tapeIdx + 1} · BASIC line ${line.lineNum}` +
+    `Tape ${actualTi + 1} · BASIC line ${line.lineNum}` +
     `</span>`;
 
   for (let i = firstB; i <= lastB; i++) {
@@ -880,12 +882,8 @@ function doDownloadTap(): void {
       const um = userMerges[entry.progIdx];
       if (!um) continue;
       const merged = um.result;
-      // Build progs array indexed by tapeIdx from the merge sources.
-      const progs: (Program | undefined)[] = [];
-      for (const src of um.sources) {
-        while (progs.length <= src.tapeIdx) progs.push(undefined);
-        progs[src.tapeIdx] = tapes[src.tapeIdx]?.programs[src.progIdx];
-      }
+      // Build progs array by slot index (matches LineSource.tapeIdx).
+      const progs = um.sources.map(src => tapes[src.tapeIdx]?.programs[src.progIdx]);
       const name = progs.find(p => p?.name)?.name ?? 'MERGED';
       blocks.push({ name, lines: linesFromMerged(merged, progs), autorun: entry.autorun });
     }
@@ -963,12 +961,10 @@ mergePickerEl.addEventListener('click', (e) => {
 mergeOkBtn.addEventListener('click', () => {
   if (mergePickerSelected.length !== 2) return;
   const sources: [MergeSource, MergeSource] = [mergePickerSelected[0], mergePickerSelected[1]];
-  // Build progs array indexed by tapeIdx.
-  const progs: (Program | undefined)[] = [];
-  for (const src of sources) {
-    while (progs.length <= src.tapeIdx) progs.push(undefined);
-    progs[src.tapeIdx] = tapes[src.tapeIdx]?.programs[src.progIdx];
-  }
+  // Build progs array by slot index (0, 1) so that two programs from the same
+  // tape are kept as distinct entries.  LineSource.tapeIdx values in the result
+  // are slot indices, not actual tape indices.
+  const progs = sources.map(src => tapes[src.tapeIdx]?.programs[src.progIdx]);
   const result = alignPrograms(progs);
   userMerges.push({ sources, result });
 
@@ -1118,8 +1114,8 @@ function mergeColSource(col: 0|1|2, mli: number): { prog: Program; lineIdx: numb
   const line = um.result.lines[mli];
   if (!line) return null;
   const progs = mergeProgs();
-  const ti0 = um.sources[0].tapeIdx;
-  const ti1 = um.sources[1].tapeIdx;
+  const ti0 = 0;   // slot index for left column
+  const ti1 = 1;   // slot index for right column
   let src: { tapeIdx: number; lineIdx: number } | undefined;
   if      (col === 0) src = line.sources.find(s => s.tapeIdx === ti0);
   else if (col === 2) src = line.sources.find(s => s.tapeIdx === ti1);
@@ -1740,7 +1736,8 @@ function updateStatusBar(): void {
 }
 
 function updateMergedStatusBar(): void {
-  const merged = userMerges[activeProgIdx]?.result;
+  const um     = userMerges[activeProgIdx];
+  const merged = um?.result;
   if (!merged) { statusBar.innerHTML = '<span class="sb-dim">No merged data available.</span>'; return; }
 
   const dot  = ' <span class="sb-dim">·</span> ';
@@ -1775,7 +1772,7 @@ function updateMergedStatusBar(): void {
                       ? `<span class="sb-err">Issue · source contains errors, absent from other tape</span>`
                       : `<span class="sb-err">Issue · sources conflict</span>`,
     unverified: line.status === 'single'
-                  ? `<span class="sb-warn">Unverified · single source (tape ${(line.sources[0]?.tapeIdx ?? 0) + 1})</span>`
+                  ? `<span class="sb-warn">Unverified · single source (tape ${(um!.sources[line.sources[0]?.tapeIdx ?? 0]?.tapeIdx ?? 0) + 1})</span>`
                   : `<span class="sb-warn">Unverified · ${line.sources.length}/${merged.tapeCount} tapes</span>`,
   };
   const segs = [`BASIC line ${line.lineNum}`, QUALITY_LABEL[line.quality]];
