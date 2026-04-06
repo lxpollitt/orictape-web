@@ -1662,7 +1662,11 @@ function updateMergedStatusBar(): void {
     recovered:  `<span style="color:var(--green)">Recovered · clean source chosen over corrupt</span>`,
     issue:      line.status === 'consensus'
                   ? `<span class="sb-err">Issue · sources agree but contain errors</span>`
-                  : `<span class="sb-err">Issue · ${line.sources.length} sources conflict</span>`,
+                  : line.status === 'single'
+                    ? `<span class="sb-err">Issue · only source contains errors</span>`
+                    : line.status === 'partial'
+                      ? `<span class="sb-err">Issue · source contains errors, absent from other tape</span>`
+                      : `<span class="sb-err">Issue · sources conflict</span>`,
     unverified: line.status === 'single'
                   ? `<span class="sb-warn">Unverified · single source (tape ${(line.sources[0]?.tapeIdx ?? 0) + 1})</span>`
                   : `<span class="sb-warn">Unverified · ${line.sources.length}/${merged.tapeCount} tapes</span>`,
