@@ -95,6 +95,16 @@ export function readBitStreams(samples: Int16Array, sampleRate = 44100): BitStre
     streams.push(stream);
     startSample += samplesRead;
   }
+
+  // Adaptive amplitude filter: discard streams that look like noise rather than
+  // a real tape signal.  The noise floor of a typical ADC + tape player is
+  // 10–50× quieter than an actual recording, so we keep only streams whose
+  // peak-to-peak amplitude is at least 10% of the loudest stream found.
+  if (streams.length > 1) {
+    const peakAmplitude = Math.max(...streams.map(s => s.maxVal - s.minVal));
+    const threshold = peakAmplitude * 0.1;
+    return streams.filter(s => s.maxVal - s.minVal >= threshold);
+  }
   return streams;
 }
 
