@@ -31,6 +31,9 @@ export interface LineInfo {
   lastByte: number;
   expectedLastByte: number;
   lenErr: boolean;
+  /** Oric memory address of this line's first byte, derived from the
+   *  header start address and the chain of next-line pointers. */
+  memAddr: number;
 }
 
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
@@ -329,6 +332,10 @@ export function readProgramLines(prog: Program): void {
   for (let i = 0; i < 9; i++) header.push(getByte());
   if (header[2] !== 0) return;
 
+  // Start address from header (bytes 6–7, big-endian).  Used to anchor the
+  // chain of next-line pointer addresses to real Oric memory addresses.
+  const startAddr = (header[6] << 8) | header[7];
+
   // Null-terminated program name.
   for (let b = getByte(); b > 0; b = getByte()) {
     prog.name += String.fromCharCode(b);
@@ -336,6 +343,7 @@ export function readProgramLines(prog: Program): void {
 
   // Program lines.
   let correctionOffset = 0;
+  let lineMemAddr = startAddr; // memory address of the line we are about to push
   while (true) {
     const lineStart = nextByte;
     // Read the raw pointer first; a zero value signals end-of-program.
@@ -372,8 +380,11 @@ export function readProgramLines(prog: Program): void {
       lastByte:  nextByte - 1,
       expectedLastByte: nextLineStart - 1,
       lenErr: nextLineStart !== nextByte,
+      memAddr: lineMemAddr,
     });
     correctionOffset += nextLineStart - nextByte;
+    // rawLineStart is the memory address of the *next* line.
+    lineMemAddr = rawLineStart;
   }
 
   if (prog.lines.length > 0) {

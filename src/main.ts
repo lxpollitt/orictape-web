@@ -1586,6 +1586,101 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
 });
 
 // ── Status bar ────────────────────────────────────────────────────────────────
+
+/**
+ * For a byte that falls outside a BASIC line (preamble, header, or after the
+ * last line), return a human-readable description of what it represents.
+ *
+ * Layout of prog.bytes[], working backwards from prog.lines[0].firstByte (F):
+ *   F-1            : name null terminator
+ *   F-1-nameLen .. F-2 : name characters  (absent when name is empty)
+ *   F-1-nameLen-9 .. F-1-nameLen-1 : 9-byte header (header[0]…[8])
+ *   F-1-nameLen-10 : 0x24 sync marker
+ *   0 .. F-1-nameLen-11 : 0x16 sync bytes
+ */
+/**
+ * Return the Oric memory address of a byte within BASIC content as "$NNNN",
+ * or null for preamble bytes (which precede the loaded address range).
+ * Address = start_address_from_header + (byteIdx - firstContentByte).
+ */
+function progByteAddr(prog: Program, byteIdx: number): string | null {
+  const lines = prog.lines;
+  if (!lines.length) return null;
+  if (byteIdx < lines[0].firstByte) return null; // preamble — no address
+
+  // Find the line that contains this byte, or fall back to the last line for
+  // bytes beyond the last parsed line (e.g. orphaned post-program bytes).
+  // Use line.memAddr (derived from the chain of next-line pointers) so the
+  // address stays correct even when the byte stream has gained or lost bytes
+  // due to corruption.
+  const line = lines.find(l => byteIdx >= l.firstByte && byteIdx <= l.lastByte)
+            ?? lines[lines.length - 1];
+  const addr = line.memAddr + (byteIdx - line.firstByte);
+  return '$' + (addr & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+}
+
+function describeProgRegion(prog: Program, byteIdx: number): string {
+  const lines     = prog.lines;
+  const lastLine  = lines[lines.length - 1];
+
+  // After the last parsed BASIC line.
+  if (lastLine && byteIdx > lastLine.lastByte) {
+    const extra = byteIdx - lastLine.lastByte;
+    return `After program data · byte +${extra}`;
+  }
+
+  // Preamble — need firstByte to locate fields.
+  const firstByte = lines[0]?.firstByte;
+  if (firstByte === undefined) return 'Preamble';
+
+  const nameLen     = prog.name.length;
+  const nameTermIdx = firstByte - 1;
+  const nameStart   = firstByte - 1 - nameLen;   // first name char (= nameTermIdx when empty)
+  const h0          = firstByte - 1 - nameLen - 9; // header[0]
+  const syncMarker  = h0 - 1;                      // 0x24
+
+  if (byteIdx === nameTermIdx && nameLen === 0) return 'Header · name: (empty)';
+  if (byteIdx === nameTermIdx)                  return 'Header · name terminator';
+  if (nameLen > 0 && byteIdx >= nameStart && byteIdx < nameTermIdx)
+    return `Header · name: "${escHtml(prog.name)}"`;
+
+  const ho = byteIdx - h0;
+  if (ho >= 0 && ho <= 8) {
+    const b      = prog.bytes;
+    const endHi  = b[h0 + 4]?.v ?? 0;
+    const endLo  = b[h0 + 5]?.v ?? 0;
+    const staHi  = b[h0 + 6]?.v ?? 0;
+    const staLo  = b[h0 + 7]?.v ?? 0;
+    const endAddr = (endHi << 8) | endLo;
+    const staAddr = (staHi << 8) | staLo;
+    const dataLen = endAddr - staAddr + 1;
+    const hex4    = (n: number) => '$' + n.toString(16).toUpperCase().padStart(4, '0');
+
+    switch (ho) {
+      case 0: case 1: case 8: return 'Header · reserved';
+      case 2: {
+        const v = b[byteIdx]?.v ?? 0;
+        const s = v === 0x00 ? 'BASIC' : v === 0x80 ? 'machine code'
+                : `0x${v.toString(16).toUpperCase().padStart(2, '0')}`;
+        return `Header · type: ${s}`;
+      }
+      case 3: {
+        const v = b[byteIdx]?.v ?? 0;
+        const s = v === 0x00 ? 'off' : v === 0x80 ? 'on (BASIC)' : v === 0xC7 ? 'on (machine code)'
+                : `0x${v.toString(16).toUpperCase().padStart(2, '0')}`;
+        return `Header · autorun: ${s}`;
+      }
+      case 4: return `Header · end address (hi) · ${hex4(endAddr)}`;
+      case 5: return `Header · end address (lo) · ${hex4(endAddr)}`;
+      case 6: return `Header · start address (hi) · ${hex4(staAddr)} · data length: ${dataLen} bytes`;
+      case 7: return `Header · start address (lo) · ${hex4(staAddr)} · data length: ${dataLen} bytes`;
+    }
+  }
+
+  if (byteIdx === syncMarker) return 'Sync marker (0x24)';
+  return 'Sync preamble (0x16)';
+}
+
 function updateStatusBar(): void {
   if (viewMode === 'merged') {
     updateMergedStatusBar();
@@ -1605,8 +1700,12 @@ function updateStatusBar(): void {
   const pipe = '  <span class="sb-dim">│</span>  ';
 
   const contentStart = prog.lines[0]?.firstByte;
-  const byteNum      = contentStart !== undefined ? selByte - contentStart : selByte;
-  const byteSegs: string[] = [`Byte ${byteNum}`];
+  const isPreamble   = contentStart !== undefined && selByte < contentStart;
+  const byteNum      = isPreamble ? selByte : (contentStart !== undefined ? selByte - contentStart : selByte);
+  const byteLabel    = isPreamble ? 'Preamble byte' : 'Byte';
+  const byteSegs: string[] = [`${byteLabel} ${byteNum}`];
+  const addr = progByteAddr(prog, selByte!);
+  if (addr) byteSegs.push(addr);
   if (byte.unclear) byteSegs.push('<span class="sb-warn">Unclear</span>');
   if (byte.chkErr)  byteSegs.push('<span class="sb-err">Checksum error</span>');
 
@@ -1616,7 +1715,7 @@ function updateStatusBar(): void {
     const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
     const lineSegs: string[] = [];
     if (li < 0) {
-      lineSegs.push('Line -');
+      lineSegs.push(describeProgRegion(prog, selByte!));
     } else {
       const line = prog.lines[li];
       lineSegs.push(`Line ${li + 1}`);
