@@ -311,10 +311,16 @@ function renderTabs(): void {
       btn.dataset.ti = String(ti);
       btn.dataset.pi = String(pi);
       const hasErrors = prog.lines.some(l => l.lenErr);
-      btn.innerHTML   = `<span class="prog-num">${pi + 1}</span>` +
-        escHtml(prog.name || `Prog ${pi + 1}`) +
-        (hasErrors ? ' <span class="badge badge-err">errors</span>' : '') +
-        (prog.earlyTermination ? ' <span class="badge badge-warn">early end</span>' : '');
+      const infoText  = prog.lines.length > 0
+        ? `${prog.lines.length} line${prog.lines.length !== 1 ? 's' : ''}`
+        : `${prog.bytes.length} byte${prog.bytes.length !== 1 ? 's' : ''}`;
+      const badgesHtml =
+        (hasErrors            ? '<span class="badge badge-err">errors</span>' : '') +
+        (prog.earlyTermination ? '<span class="badge badge-warn">early end</span>' : '');
+      btn.innerHTML =
+        `<div class="prog-tab-name"><span class="prog-num">${pi + 1}</span>${escHtml(prog.name || `Prog ${pi + 1}`)}</div>` +
+        `<div class="prog-tab-info">${infoText}</div>` +
+        `<div class="prog-tab-badges">${badgesHtml}</div>`;
       progTabs.appendChild(btn);
     });
   });
