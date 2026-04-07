@@ -156,40 +156,36 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const readCycle = (): boolean => {
     // Find next minimum within a SEARCH_WINDOW after the current max.
     minVal = 32767;
-    let swi = 0;
+    minIndex = maxIndex + 1;
     const minEnd = Math.min(maxIndex + SEARCH_WINDOW, samples.length);
     for (let i = maxIndex + 1; i < minEnd; i++) {
-      if (samples[i] < minVal) { minVal = samples[i]; swi = i - maxIndex - 1; }
+      if (samples[i] < minVal) { minVal = samples[i]; minIndex = i; }
     }
-    minIndex = maxIndex + 1 + swi;
     if (minVal < streamMinVal) streamMinVal = minVal;
 
     // Find the crossover point falling below threshold.
     threshold = (maxVal + minVal) >> 1;
-    swi = 0;
+    belowIndex = maxIndex + 1;
     for (let i = maxIndex + 1; i < minEnd; i++) {
-      if (samples[i] <= threshold) { swi = i - maxIndex - 1; break; }
+      if (samples[i] <= threshold) { belowIndex = i; break; }
     }
-    belowIndex = maxIndex + 1 + swi;
     lengthBelow = belowIndex - aboveIndex;
 
     // Find next maximum within a SEARCH_WINDOW after the current min.
     maxVal = -32768;
-    swi = 0;
+    maxIndex = minIndex + 1;
     const maxEnd = Math.min(minIndex + SEARCH_WINDOW, samples.length);
     for (let i = minIndex + 1; i < maxEnd; i++) {
-      if (samples[i] > maxVal) { maxVal = samples[i]; swi = i - minIndex - 1; }
+      if (samples[i] > maxVal) { maxVal = samples[i]; maxIndex = i; }
     }
-    maxIndex = minIndex + 1 + swi;
     if (maxVal > streamMaxVal) streamMaxVal = maxVal;
 
     // Find the crossover point rising above threshold.
     threshold = (maxVal + minVal) >> 1;
-    swi = 0;
+    aboveIndex = minIndex + 1;
     for (let i = minIndex + 1; i < maxEnd; i++) {
-      if (samples[i] >= threshold) { swi = i - minIndex - 1; break; }
+      if (samples[i] >= threshold) { aboveIndex = i; break; }
     }
-    aboveIndex = minIndex + 1 + swi;
     lengthAbove = aboveIndex - belowIndex;
     length = lengthBelow + lengthAbove;
 
