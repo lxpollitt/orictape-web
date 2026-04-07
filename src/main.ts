@@ -23,6 +23,9 @@ const basicTypeEl  = document.getElementById('basic-type')      as HTMLElement;
 const wrapLabelEl      = document.getElementById('wrap-label')       as HTMLElement;
 const wrapToggle       = document.getElementById('wrap-toggle')      as HTMLInputElement;
 const normaliseToggle  = document.getElementById('normalise-toggle') as HTMLInputElement;
+const zoomInBtn        = document.getElementById('zoom-in')          as HTMLButtonElement;
+const zoomOutBtn       = document.getElementById('zoom-out')         as HTMLButtonElement;
+const zoomResetBtn     = document.getElementById('zoom-reset')       as HTMLButtonElement;
 const mergeBtnEl   = document.getElementById('merge-btn')       as HTMLButtonElement;
 const mergeModal   = document.getElementById('merge-modal')     as HTMLElement;
 const mergePickerEl = document.getElementById('merge-picker')   as HTMLElement;
@@ -96,6 +99,7 @@ let programs:    Program[]         = [];
 let leftSamples: Int16Array | null = null;
 
 const waveform = new WaveformView(waveCanvas);
+waveform.setZoomLabel(document.getElementById('zoom-level') as HTMLElement);
 
 // Apply initial wrap state and keep in sync with the checkbox.
 const appEl = document.getElementById('app')!;
@@ -112,6 +116,10 @@ wrapToggle.addEventListener('change', () => {
 normaliseToggle.addEventListener('change', () => {
   waveform.setNormalise(normaliseToggle.checked);
 });
+
+zoomInBtn   .addEventListener('click', () => waveform.zoomIn());
+zoomOutBtn  .addEventListener('click', () => waveform.zoomOut());
+zoomResetBtn.addEventListener('click', () => waveform.zoomReset());
 
 function activateTape(ti: number, pi: number): void {
   activeTapeIdx = ti;

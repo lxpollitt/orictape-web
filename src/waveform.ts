@@ -14,10 +14,13 @@ export class WaveformView {
   private bitIsError:    Uint8Array | null = null; // per-bit: 1 if part of a chkErr byte (waveform colouring)
   private bitIsParityErr: Uint8Array | null = null; // per-bit: 1 only for the parity bit of a chkErr byte (label colouring)
 
-  private viewStart  = 0;
-  private spp        = 10;   // samples per pixel (zoom level)
-  private selByte:   number | null = null;
-  private normalise  = false;
+  private viewStart   = 0;
+  private spp         = 10;  // samples per pixel (current view)
+  private baseSpp     = 10;  // spp at 100% for the active view mode (overview or byte)
+  private zoomFactor  = 1;   // persistent button zoom: 1 = 100%
+  private selByte:    number | null = null;
+  private normalise   = false;
+  private zoomLabel:  HTMLElement | null = null;
 
   private dragging  = false;
   private dragX     = 0;
@@ -68,16 +71,52 @@ export class WaveformView {
     this.bitIsError     = bitIsError;
     this.bitIsParityErr = bitIsParityErr;
 
-    // Default view: show the whole stream condensed into the canvas width.
-    const len = prog.stream.lastSample - prog.stream.firstSample;
-    this.spp      = Math.max(1, len / this.canvas.width);
+    // Default view: fit the whole stream, scaled by the persistent zoom factor.
+    const len    = prog.stream.lastSample - prog.stream.firstSample;
+    this.baseSpp  = Math.max(1, len / this.canvas.width);
+    this.spp      = Math.max(0.5, this.baseSpp / this.zoomFactor);
     this.viewStart = prog.stream.firstSample;
+    this.clampView();
+    this.updateZoomDisplay();
     this.draw();
+  }
+
+  setZoomLabel(el: HTMLElement): void {
+    this.zoomLabel = el;
+    this.updateZoomDisplay();
+  }
+
+  private updateZoomDisplay(): void {
+    if (this.zoomLabel) {
+      this.zoomLabel.textContent = Math.round(this.baseSpp / this.spp * 100) + '%';
+    }
   }
 
   setNormalise(v: boolean): void {
     this.normalise = v;
     this.draw();
+  }
+
+  zoomIn():    void { this.zoomFactor = Math.min(8,   this.zoomFactor * 2); this.applyZoom(); }
+  zoomOut():   void { this.zoomFactor = Math.max(0.5, this.zoomFactor / 2); this.applyZoom(); }
+  zoomReset(): void { this.zoomFactor = 1; this.applyZoom(); }
+
+  private applyZoom(): void {
+    if (this.selByte !== null) {
+      // Re-centre on the selected byte at the new zoom level.
+      // selectByte updates baseSpp and the display.
+      this.selectByte(this.selByte);
+    } else if (this.samples && this.prog) {
+      // Zoom the overview, anchoring on the current view centre.
+      const len    = this.prog.stream.lastSample - this.prog.stream.firstSample;
+      this.baseSpp  = Math.max(1, len / this.canvas.width);
+      const centre = this.viewStart + (this.canvas.width / 2) * this.spp;
+      this.spp       = Math.max(0.5, this.baseSpp / this.zoomFactor);
+      this.viewStart = centre - (this.canvas.width / 2) * this.spp;
+      this.clampView();
+      this.updateZoomDisplay();
+      this.draw();
+    }
   }
 
   selectByte(byteIndex: number | null): void {
@@ -89,12 +128,14 @@ export class WaveformView {
         const s0  = stream.bitFirstSample[b.firstBit];
         const s1  = stream.bitLastSample[b.lastBit];
         const mid = (s0 + s1) / 2;
-        // Zoom in so individual cycles are visible, then centre on the byte.
-        this.spp       = 3;
+        // Centre on the byte at the current zoom level (default spp=3 at 100%).
+        this.baseSpp   = 3;
+        this.spp       = Math.max(0.5, 3 / this.zoomFactor);
         this.viewStart = mid - (this.canvas.width / 2) * this.spp;
         this.clampView();
       }
     }
+    this.updateZoomDisplay();
     this.draw();
   }
 
@@ -266,6 +307,7 @@ export class WaveformView {
       this.spp       = Math.max(0.5, Math.min(20000, this.spp * factor));
       this.viewStart = anchor - e.offsetX * this.spp;
       this.clampView();
+      this.updateZoomDisplay();
       this.draw();
     }, { passive: false });
 
