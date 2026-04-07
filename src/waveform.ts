@@ -22,9 +22,12 @@ export class WaveformView {
   private normalise   = false;
   private zoomLabel:  HTMLElement | null = null;
 
-  private dragging  = false;
-  private dragX     = 0;
-  private dragView  = 0;
+  private dragging        = false;
+  private dragX           = 0;
+  private dragView        = 0;
+  private dragMoved       = false;
+  private suppressRecentre = false;
+  private onByteClick: ((byteIndex: number) => void) | null = null;
 
   /** True when a TAP file is active — shows "No waveform" label. */
   private noWaveform = false;
@@ -86,6 +89,30 @@ export class WaveformView {
     this.updateZoomDisplay();
   }
 
+  setByteClickHandler(cb: (byteIndex: number) => void): void {
+    this.onByteClick = cb;
+  }
+
+  /** Binary-search for the byte whose sample range contains `sample`.
+   *  Falls back to the nearest byte when the click lands in a gap. */
+  private sampleToByte(sample: number): number | null {
+    if (!this.prog || this.prog.bytes.length === 0) return null;
+    const { bytes, stream } = this.prog;
+    let lo = 0, hi = bytes.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const b = bytes[mid];
+      if (b.firstBit >= stream.bitCount || b.lastBit >= stream.bitCount) { hi = mid - 1; continue; }
+      const bFirst = stream.bitFirstSample[b.firstBit];
+      const bLast  = stream.bitLastSample[b.lastBit];
+      if      (sample < bFirst) hi = mid - 1;
+      else if (sample > bLast)  lo = mid + 1;
+      else return mid;
+    }
+    // Click landed in a gap — return nearest byte.
+    return Math.min(lo, bytes.length - 1);
+  }
+
   private updateZoomDisplay(): void {
     if (this.zoomLabel) {
       this.zoomLabel.textContent = Math.round(this.baseSpp / this.spp * 100) + '%';
@@ -121,7 +148,9 @@ export class WaveformView {
 
   selectByte(byteIndex: number | null): void {
     this.selByte = byteIndex;
-    if (byteIndex !== null && this.prog) {
+    const recentre = !this.suppressRecentre;
+    this.suppressRecentre = false;
+    if (recentre && byteIndex !== null && this.prog) {
       const stream = this.prog.stream;
       const b      = this.prog.bytes[byteIndex];
       if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
@@ -281,14 +310,16 @@ export class WaveformView {
     const { canvas } = this;
 
     canvas.addEventListener('mousedown', (e) => {
-      this.dragging = true;
-      this.dragX    = e.clientX;
-      this.dragView = this.viewStart;
+      this.dragging  = true;
+      this.dragMoved = false;
+      this.dragX     = e.clientX;
+      this.dragView  = this.viewStart;
       canvas.style.cursor = 'grabbing';
     });
 
     window.addEventListener('mousemove', (e) => {
       if (!this.dragging) return;
+      if (Math.abs(e.clientX - this.dragX) > 4) this.dragMoved = true;
       this.viewStart = this.dragView - (e.clientX - this.dragX) * this.spp;
       this.clampView();
       this.draw();
@@ -298,6 +329,16 @@ export class WaveformView {
       if (!this.dragging) return;
       this.dragging = false;
       canvas.style.cursor = 'grab';
+      if (!this.dragMoved && this.onByteClick) {
+        const rect   = canvas.getBoundingClientRect();
+        const x      = this.dragX - rect.left;
+        const sample = this.viewStart + x * this.spp;
+        const idx    = this.sampleToByte(sample);
+        if (idx !== null) {
+          if (this.selByte !== null) this.suppressRecentre = true;
+          this.onByteClick(idx);
+        }
+      }
     });
 
     canvas.addEventListener('wheel', (e) => {

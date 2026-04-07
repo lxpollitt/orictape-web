@@ -100,6 +100,9 @@ let leftSamples: Int16Array | null = null;
 
 const waveform = new WaveformView(waveCanvas);
 waveform.setZoomLabel(document.getElementById('zoom-level') as HTMLElement);
+waveform.setByteClickHandler((i) => {
+  if (viewMode === 'tape' && programs[activeProgIdx]) selectByte(i);
+});
 
 // Apply initial wrap state and keep in sync with the checkbox.
 const appEl = document.getElementById('app')!;
