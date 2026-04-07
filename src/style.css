@@ -146,14 +146,44 @@ header h1 {
 }
 
 #waveform-panel {
+  display: flex;
+  flex-direction: column;
   border-bottom: 1px solid var(--border);
   overflow: hidden;
 }
 
+#waveform-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+#waveform-title {
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.6;
+}
+
+#normalise-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.6;
+  cursor: pointer;
+}
+#normalise-label:hover { opacity: 1; }
+
 #waveform-canvas {
   display: block;
   width: 100%;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 #hex-panel {

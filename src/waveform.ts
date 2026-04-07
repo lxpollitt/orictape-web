@@ -14,9 +14,10 @@ export class WaveformView {
   private bitIsError:    Uint8Array | null = null; // per-bit: 1 if part of a chkErr byte (waveform colouring)
   private bitIsParityErr: Uint8Array | null = null; // per-bit: 1 only for the parity bit of a chkErr byte (label colouring)
 
-  private viewStart = 0;
-  private spp       = 10;   // samples per pixel (zoom level)
-  private selByte:  number | null = null;
+  private viewStart  = 0;
+  private spp        = 10;   // samples per pixel (zoom level)
+  private selByte:   number | null = null;
+  private normalise  = false;
 
   private dragging  = false;
   private dragX     = 0;
@@ -74,6 +75,11 @@ export class WaveformView {
     this.draw();
   }
 
+  setNormalise(v: boolean): void {
+    this.normalise = v;
+    this.draw();
+  }
+
   selectByte(byteIndex: number | null): void {
     this.selByte = byteIndex;
     if (byteIndex !== null && this.prog) {
@@ -112,7 +118,10 @@ export class WaveformView {
     const LABEL_H = 20;
     const waveH   = h - LABEL_H;
     const midY    = waveH / 2;
-    const scaleY  = (waveH * 0.45) / 32768;
+    const amplitude = this.normalise
+      ? Math.max(Math.abs(stream.minVal), Math.abs(stream.maxVal), 1)
+      : 32768;
+    const scaleY  = (waveH * 0.45) / amplitude;
     const spp     = this.spp;
     const vs      = this.viewStart;
 

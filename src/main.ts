@@ -20,8 +20,9 @@ const basicPanel    = document.getElementById('basic-view')    as HTMLElement;
 const waveCanvas = document.getElementById('waveform-canvas')  as HTMLCanvasElement;
 const statusBar  = document.getElementById('statusbar')        as HTMLElement;
 const basicTypeEl  = document.getElementById('basic-type')      as HTMLElement;
-const wrapLabelEl  = document.getElementById('wrap-label')      as HTMLElement;
-const wrapToggle   = document.getElementById('wrap-toggle')     as HTMLInputElement;
+const wrapLabelEl      = document.getElementById('wrap-label')       as HTMLElement;
+const wrapToggle       = document.getElementById('wrap-toggle')      as HTMLInputElement;
+const normaliseToggle  = document.getElementById('normalise-toggle') as HTMLInputElement;
 const mergeBtnEl   = document.getElementById('merge-btn')       as HTMLButtonElement;
 const mergeModal   = document.getElementById('merge-modal')     as HTMLElement;
 const mergePickerEl = document.getElementById('merge-picker')   as HTMLElement;
@@ -106,6 +107,10 @@ wrapToggle.addEventListener('change', () => {
   // When toggling in merged mode, the CSS class change alters line rendering;
   // wait one frame for the browser to apply the new styles before measuring.
   if (viewMode === 'merged') requestAnimationFrame(applyMergeColumnWidths);
+});
+
+normaliseToggle.addEventListener('change', () => {
+  waveform.setNormalise(normaliseToggle.checked);
 });
 
 function activateTape(ti: number, pi: number): void {
