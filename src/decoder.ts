@@ -139,7 +139,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const LONG_MAX      = Math.round(44 * sampleRate / 44100);
   const GAP_MIN       = Math.round(46 * sampleRate / 44100); // will increase for slow format
   const SEARCH_WINDOW = Math.round(20 * sampleRate / 44100);
-  const MIN_SYNC_BITS = Math.round(8820 * sampleRate / 44100); // 0.2 s minimum sync run
+  const MIN_SYNC_BITS = 100; // min continuous cycles before accepting a sync run
 
   // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
   // (every cycle is the shortest possible). We'll slice to actual size at the end.
@@ -238,7 +238,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     bitCount++;
   };
 
-  // Keep searching until we find a continuous run of at least 0.2 s (MIN_SYNC_BITS).
+  // Keep searching until we find a continuous run of at least MIN_SYNC_BITS cycles.
   while (maxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
     bitCount = 0;  // reset without reallocating
     streamFirstSample = aboveIndex;
