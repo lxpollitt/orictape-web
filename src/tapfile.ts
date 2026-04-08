@@ -1,9 +1,12 @@
 import type { ByteInfo, BitStream, Program } from './decoder';
 import { readProgramLines } from './decoder';
 
+const TAP_META_MAGIC = 'ORICTAPE_META';
+
 /** A minimal empty BitStream for programs loaded from TAP (no waveform data). */
-function emptyStream(): BitStream {
+function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
   return {
+    format,
     bitCount:       0,
     bitV:           new Uint8Array(0),
     bitL1:          new Uint16Array(0),
@@ -16,6 +19,32 @@ function emptyStream(): BitStream {
     minVal:         0,
     maxVal:         0,
   };
+}
+
+/**
+ * Search for ORICTAPE_META magic in a byte range and parse the JSON metadata.
+ * Returns null if no metadata is found.
+ */
+function findMetadata(data: Uint8Array, start: number, end: number): { format?: 'fast' | 'slow'; chkErr?: number[]; unclear?: number[] } | null {
+  // Search for the magic string.
+  outer:
+  for (let i = start; i <= end - TAP_META_MAGIC.length - 1; i++) {
+    for (let j = 0; j < TAP_META_MAGIC.length; j++) {
+      if (data[i + j] !== TAP_META_MAGIC.charCodeAt(j)) continue outer;
+    }
+    // Found magic — expect null terminator then JSON.
+    const jsonStart = i + TAP_META_MAGIC.length + 1; // skip null
+    if (data[i + TAP_META_MAGIC.length] !== 0x00) continue;
+    // Read JSON until end of region.
+    let json = '';
+    for (let k = jsonStart; k < end; k++) json += String.fromCharCode(data[k]);
+    try {
+      return JSON.parse(json);
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -59,20 +88,43 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     // extra trailing bytes is safe.
     const end = b + 1 < blockStarts.length ? blockStarts[b + 1] : data.length;
 
-    // Build ByteInfo[] — all bytes are clean (no errors in a TAP file).
+    // Build ByteInfo[] — all bytes are clean by default.
     const bytes: ByteInfo[] = [];
     for (let j = start; j < end; j++) {
       bytes.push({ v: data[j], firstBit: 0, lastBit: 0, unclear: false, chkErr: false });
     }
 
+    // Check for metadata between this block's data and the next sync / EOF.
+    const meta = findMetadata(data, start, end);
+
     const prog: Program = {
-      stream: emptyStream(),
+      stream: emptyStream(meta?.format),
       bytes,
       lines:  [],
       name:   '',
+      headerStart: 0,
     };
 
     readProgramLines(prog);
+
+    // Apply metadata flags to bytes if present.
+    // Metadata indices are relative to the first header byte; offset them
+    // to the TAP byte stream's prog.bytes indices.
+    if (meta) {
+      const headerStart = prog.headerStart;
+      if (meta.chkErr) {
+        for (const idx of meta.chkErr) {
+          const bi = idx + headerStart;
+          if (bi >= 0 && bi < bytes.length) bytes[bi].chkErr = true;
+        }
+      }
+      if (meta.unclear) {
+        for (const idx of meta.unclear) {
+          const bi = idx + headerStart;
+          if (bi >= 0 && bi < bytes.length) bytes[bi].unclear = true;
+        }
+      }
+    }
 
     if (prog.lines.length > 0) {
       programs.push(prog);

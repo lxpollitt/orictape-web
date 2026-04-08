@@ -7,7 +7,7 @@ import {
   alignPrograms, bestSource,
   type MergedProgram,
 } from './merger';
-import { linesFromProgram, linesFromMerged, encodeTapFile, downloadTap, type TapBlock } from './encoder';
+import { linesFromProgram, linesFromMerged, encodeTapFile, encodeTapMetadata, downloadTap, type TapBlock, type TapEntry } from './encoder';
 import { parseTapFile } from './tapfile';
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
@@ -38,6 +38,7 @@ const tapQueueEl   = document.getElementById('tap-queue')       as HTMLElement;
 const tapAutoEl    = document.getElementById('tap-auto')        as HTMLElement;
 const tapCancelBtn = document.getElementById('tap-cancel')      as HTMLButtonElement;
 const tapDlBtn     = document.getElementById('tap-download')    as HTMLButtonElement;
+const tapMetaToggle = document.getElementById('tap-meta-toggle') as HTMLInputElement;
 const searchBar    = document.getElementById('search-bar')      as HTMLElement;
 const searchInput  = document.getElementById('search-input')    as HTMLInputElement;
 const searchCount  = document.getElementById('search-count')    as HTMLElement;
@@ -1002,12 +1003,15 @@ tapDlBtn.addEventListener('click', doDownloadTap);
 function doDownloadTap(): void {
   if (tapQueue.length === 0) return;
 
-  const blocks: TapBlock[] = [];
+  const includeMeta = tapMetaToggle.checked;
+  const entries: TapEntry[] = [];
+
   for (const entry of tapQueue) {
     if (entry.kind === 'tape') {
       const prog = tapes[entry.tapeIdx]?.programs[entry.progIdx];
       if (!prog) continue;
-      blocks.push({ name: prog.name || 'PROG', lines: linesFromProgram(prog), autorun: entry.autorun });
+      const block: TapBlock = { name: prog.name || 'PROG', lines: linesFromProgram(prog), autorun: entry.autorun };
+      entries.push({ block, metadata: includeMeta ? encodeTapMetadata(prog) : undefined });
     } else {
       const um = userMerges[entry.progIdx];
       if (!um) continue;
@@ -1015,15 +1019,18 @@ function doDownloadTap(): void {
       // Build progs array by slot index (matches LineSource.tapeIdx).
       const progs = um.sources.map(src => tapes[src.tapeIdx]?.programs[src.progIdx]);
       const name = progs.find(p => p?.name)?.name ?? 'MERGED';
-      blocks.push({ name, lines: linesFromMerged(merged, progs), autorun: entry.autorun });
+      const block: TapBlock = { name, lines: linesFromMerged(merged, progs), autorun: entry.autorun };
+      // For merged programs, use the first available source for metadata.
+      const metaProg = includeMeta ? progs.find(p => p !== undefined) : undefined;
+      entries.push({ block, metadata: metaProg ? encodeTapMetadata(metaProg) : undefined });
     }
   }
 
-  if (blocks.length === 0) return;
+  if (entries.length === 0) return;
 
   // Derive filename from first block's name.
-  const filename = `${blocks[0].name || 'tape'}.tap`;
-  const bytes    = encodeTapFile(blocks);
+  const filename = `${entries[0].block.name || 'tape'}.tap`;
+  const bytes    = encodeTapFile(entries);
   downloadTap(bytes, filename);
   closeTapBuilder();
 }

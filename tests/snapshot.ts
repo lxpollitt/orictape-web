@@ -139,9 +139,7 @@ for (const filename of wavFiles) {
 
       const tapLines = linesFromProgram(prog);
       const tapBytes = encodeTapFile([{
-        name:    prog.name,
-        lines:   tapLines,
-        autorun: false,
+        block: { name: prog.name, lines: tapLines, autorun: false },
       }]);
       const tapFilename = `${base}_${prog.name}_${startSec}s.tap`;
       writeFileSync(join(outputDir, tapFilename), tapBytes);

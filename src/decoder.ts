@@ -81,6 +81,9 @@ export interface Program {
   bytes: ByteInfo[];
   lines: LineInfo[];
   name: string;
+  /** Byte index of the first header byte (after the 0x24 sync marker)
+   *  within the bytes[] array.  Set by readProgramLines. */
+  headerStart: number;
   /** Set when the BASIC end-of-program null pointer (0x00 0x00) was
    *  encountered before the address range declared in the tape header was
    *  exhausted.  Condition 1 already handles the normal case where the null
@@ -282,7 +285,7 @@ export function readPrograms(streams: BitStream[]): Program[] {
 }
 
 function readProgramBytes(stream: BitStream): Program {
-  const prog: Program = { stream, bytes: [], lines: [], name: '' };
+  const prog: Program = { stream, bytes: [], lines: [], name: '', headerStart: 0 };
   let currentBit = 0;
   let byteUnclear = false;
 
@@ -366,6 +369,7 @@ export function readProgramLines(prog: Program): void {
     else if (b === 0x24 && syncCount > 3) { break; }
     else { syncCount = 0; }
   }
+  prog.headerStart = nextByte;
 
   // 9-byte file header; byte[2] === 0 means BASIC file.
   const header: number[] = [];

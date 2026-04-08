@@ -137,16 +137,58 @@ function encodeTapBlock(block: TapBlock): number[] {
   return out;
 }
 
+export interface TapEntry {
+  block:     TapBlock;
+  metadata?: number[];   // optional metadata bytes to append after the block
+}
+
 /**
- * Encode one or more TapBlocks into a single TAP file byte stream.
- * Each block has its own sync sequence and header.
+ * Encode one or more TAP entries into a single TAP file byte stream.
+ * Each entry has its own sync sequence and header, optionally followed by metadata.
  */
-export function encodeTapFile(blocks: TapBlock[]): Uint8Array {
+export function encodeTapFile(entries: TapEntry[]): Uint8Array {
   const out: number[] = [];
-  for (const block of blocks) {
-    out.push(...encodeTapBlock(block));
+  for (const entry of entries) {
+    out.push(...encodeTapBlock(entry.block));
+    if (entry.metadata) out.push(...entry.metadata);
   }
   return new Uint8Array(out);
+}
+
+// ── Metadata encoding ─────────────────────────────────────────────────────────
+
+const TAP_META_MAGIC = 'ORICTAPE_META';
+
+/**
+ * Encode decode-quality metadata for a program as bytes to append after a TAP block.
+ * Format: magic string + null terminator + UTF-8 JSON.
+ *
+ * The JSON records which bytes had checksum errors or unclear bits during WAV
+ * decoding, so this information survives the TAP round-trip.  Byte indices are
+ * relative to the first header byte (byte after 0x24 sync marker), so they are
+ * stable regardless of how many sync/pre-sync bytes the byte stream contains.
+ */
+export function encodeTapMetadata(prog: Program): number[] {
+  const headerStart = prog.headerStart;
+  const chkErr:  number[] = [];
+  const unclear: number[] = [];
+  for (let i = 0; i < prog.bytes.length; i++) {
+    if (prog.bytes[i].chkErr)  chkErr.push(i - headerStart);
+    if (prog.bytes[i].unclear) unclear.push(i - headerStart);
+  }
+
+  const json = JSON.stringify({
+    v: 1,
+    format: prog.stream.format,
+    chkErr,
+    unclear,
+  });
+
+  const out: number[] = [];
+  for (let i = 0; i < TAP_META_MAGIC.length; i++) out.push(TAP_META_MAGIC.charCodeAt(i));
+  out.push(0x00); // null terminator
+  for (let i = 0; i < json.length; i++) out.push(json.charCodeAt(i));
+  return out;
 }
 
 // ── Browser download helper ───────────────────────────────────────────────────
