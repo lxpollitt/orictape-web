@@ -42,6 +42,10 @@ export interface LineInfo {
   /** Set when the line contains at least one byte in the keyword range
    *  (0x80–0xFF) that does not map to a known BASIC keyword. */
   unknownKeyword?: boolean;
+  /** Set when the line's line number is not part of the longest increasing
+   *  subsequence of line numbers in the program — i.e. it breaks the expected
+   *  monotonic ordering, likely due to a corrupt line-number byte. */
+  nonMonotonic?: boolean;
 }
 
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
@@ -278,6 +282,7 @@ export function readPrograms(streams: BitStream[]): Program[] {
     const prog = readProgramBytes(stream);
     if (prog.bytes.length > 0) {
       readProgramLines(prog);
+      flagNonMonotonicLines(prog);
       programs.push(prog);
     }
   }
@@ -465,5 +470,60 @@ export function readProgramLines(prog: Program): void {
   if (prog.lines.length > 0) {
     prog.lines[0].lenErr = false;
     prog.lines[0].expectedLastByte = prog.lines[0].lastByte;
+  }
+}
+
+/**
+ * Flag lines whose line numbers are not part of the longest increasing
+ * subsequence (LIS) of line numbers in the program.  These are likely
+ * corrupt line-number bytes rather than intentionally out-of-order lines.
+ *
+ * Uses O(n log n) patience sort — the same algorithm the merger uses.
+ */
+export function flagNonMonotonicLines(prog: Program): void {
+  const n = prog.lines.length;
+  if (n === 0) return;
+
+  // Parse line numbers from elements[0] (the line-number string, e.g. "100 ").
+  const lineNums = prog.lines.map(l => {
+    const num = parseInt(l.elements[0] ?? '', 10);
+    return isNaN(num) ? -1 : num;
+  });
+
+  // Patience sort to find the LIS.
+  const tailNums: number[] = [];  // smallest tail ending an IS of length i+1
+  const tailPos:  number[] = [];  // index into lineNums[] of that tail
+  const parent = new Int32Array(n).fill(-1);
+
+  for (let i = 0; i < n; i++) {
+    const v = lineNums[i];
+    if (v < 0) continue;  // unparseable line number — skip (will be flagged)
+
+    // Binary search: first pile whose tail >= v (strict increase).
+    let lo = 0, hi = tailNums.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tailNums[mid] < v) lo = mid + 1; else hi = mid;
+    }
+    tailNums[lo] = v;
+    tailPos[lo]  = i;
+    parent[i]    = lo > 0 ? tailPos[lo - 1] : -1;
+  }
+
+  // Reconstruct the LIS indices.
+  const inLIS = new Uint8Array(n);  // 1 = in LIS
+  if (tailNums.length > 0) {
+    let idx = tailPos[tailNums.length - 1];
+    while (idx >= 0) {
+      inLIS[idx] = 1;
+      idx = parent[idx];
+    }
+  }
+
+  // Flag lines not in the LIS (or with unparseable line numbers).
+  for (let i = 0; i < n; i++) {
+    if (!inLIS[i]) {
+      prog.lines[i].nonMonotonic = true;
+    }
   }
 }
