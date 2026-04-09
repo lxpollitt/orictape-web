@@ -583,10 +583,10 @@ for (const pair of pairs) {
   }
 
   if (classifiedLines.length === 0) {
-    // Lines all match — the byte-level difference must be in headers/pointers only.
+    // Lines all match — BASIC programs are identical.
     if (verbose) {
       if (lastOutput === 'changes') console.log('');
-      console.log(`${pair.progNum} ${c.blue(pair.name)}: ${c.green(`BASIC identical (${consensusCount} lines)`)} — byte difference is structural only`);
+      console.log(`${pair.progNum} ${c.blue(pair.name)}: ${c.green(`identical program (${consensusCount} lines)`)}`);
       lastOutput = 'clean';
     }
     structuralOnlyPairs++;
@@ -653,7 +653,7 @@ for (const pair of pairs) {
 console.log('');
 const totalFiles = totalPairs + newInCurrent + missingInCurrent;
 const fileParts = [`${identicalPairs} identical`];
-if (structuralOnlyPairs > 0) fileParts.push(`${structuralOnlyPairs} structural only`);
+if (structuralOnlyPairs > 0) fileParts.push(`${structuralOnlyPairs} identical programs`);
 if (changedPairs > 0) fileParts.push(`${changedPairs} changed`);
 if (newInCurrent > 0) fileParts.push(`${newInCurrent} new`);
 if (missingInCurrent > 0) fileParts.push(`${missingInCurrent} missing`);
