@@ -359,17 +359,58 @@ const rawArgs = process.argv.slice(2);
 const verbose = rawArgs.includes('--verbose') || rawArgs.includes('-v');
 const args = rawArgs.filter(a => a !== '--verbose' && a !== '-v');
 
+const wantsHelp = rawArgs.includes('--help') || rawArgs.includes('-h');
+
+if (wantsHelp) {
+  console.log(`BASIC-aware TAP file comparison with severity classification.
+
+Usage:
+  compareTaps [options] <baseline-dir> <current-dir> [filter...]
+  compareTaps [options] <baseline.tap> <current.tap>
+
+Filter:
+  Numbers       One or more program indexes separated by spaces (shown in output, e.g. 3 7 12)
+  String        Substring match against TAP filenames (no need to escape spaces)
+  (omit)        Compare all TAP files
+
+Options:
+  -v, --verbose Show identical/structural-only files and SIMILAR line details
+  -h, --help    Show full help
+
+Severity levels:
+  REGRESSION    Was clean, now corrupted or missing (red)
+  DEGRADED      Significantly worsened (red)
+  CHANGED       Was clean, still clean, different content (yellow)
+  SIMILAR       Marginal change in already-imperfect lines (yellow)
+  IMPROVED      Significantly improved or newly recovered (green)
+
+Exit code: 1 if regressions/degraded, 0 otherwise.`);
+  process.exit(0);
+}
+
 if (args.length < 2) {
-  console.error('Usage: npx tsx tests/compareTaps.ts [--verbose] <baseline.tap> <current.tap>');
-  console.error('   or: npx tsx tests/compareTaps.ts [--verbose] <baseline-dir> <current-dir> [filter...]');
+  console.error(`Usage:
+  compareTaps [options] <baseline-dir> <current-dir> [filter...]
+  compareTaps [options] <baseline.tap> <current.tap>
+
+Options:
+  -v, --verbose Show identical/structural-only files and SIMILAR line details
+  -h, --help    Show full help`);
   process.exit(1);
 }
 
 const [arg1, arg2, ...filterParts] = args;
-const tapFilter = filterParts.length > 0 ? filterParts.join(' ') : null;
 
-interface TapPair { name: string; baselinePath: string; currentPath: string; }
+// Filter parsing: if all filter args are pure numbers → program index filter.
+// Otherwise → filename substring filter.
+const allNumeric = filterParts.length > 0 && filterParts.every(a => /^\d+$/.test(a));
+const progIndexFilter = allNumeric ? new Set(filterParts.map(Number)) : null;
+const tapFilter = !allNumeric && filterParts.length > 0 ? filterParts.join(' ') : null;
 
+interface TapEntry { name: string; progNum: number; inBaseline: boolean; inCurrent: boolean; baselinePath?: string; currentPath?: string; }
+interface TapPair  { name: string; progNum: number; baselinePath: string; currentPath: string; }
+
+const allEntries: TapEntry[] = [];
 const pairs: TapPair[] = [];
 let newInCurrent = 0;
 let missingInCurrent = 0;
@@ -382,36 +423,55 @@ const globalSeverity: Record<Severity, number> = {
 };
 
 if (statSync(arg1).isDirectory() && statSync(arg2).isDirectory()) {
-  // Directory mode: find matching TAP files
-  const matchesFilter = (f: string) => !tapFilter || f.includes(tapFilter);
-  const baseFiles = new Set(readdirSync(arg1).filter(f => f.endsWith('.tap') && matchesFilter(f)));
-  const currFiles = new Set(readdirSync(arg2).filter(f => f.endsWith('.tap') && matchesFilter(f)));
+  // Directory mode: build full sorted list with program numbers, then filter.
+  const baseFiles = new Set(readdirSync(arg1).filter(f => f.endsWith('.tap')));
+  const currFiles = new Set(readdirSync(arg2).filter(f => f.endsWith('.tap')));
+  const allFiles = [...new Set([...baseFiles, ...currFiles])].sort();
 
-  const allFiles = new Set([...baseFiles, ...currFiles]);
-  for (const f of [...allFiles].sort()) {
-    if (!baseFiles.has(f)) {
-      console.log(`${c.blue(f)}:`);
-      console.log(`  ${c.green('New in current (no baseline)')}`);
-      console.log('');
-      newInCurrent++;
-      globalSeverity.improved++;
-      continue;
+  // Assign program numbers to ALL files (stable regardless of filter).
+  for (let i = 0; i < allFiles.length; i++) {
+    const f = allFiles[i];
+    allEntries.push({
+      name: f,
+      progNum: i + 1,
+      inBaseline: baseFiles.has(f),
+      inCurrent:  currFiles.has(f),
+      baselinePath: baseFiles.has(f) ? join(arg1, f) : undefined,
+      currentPath:  currFiles.has(f) ? join(arg2, f) : undefined,
+    });
+  }
+
+  // Apply filter.
+  const matchesFilter = (e: TapEntry) => {
+    if (progIndexFilter) return progIndexFilter.has(e.progNum);
+    if (tapFilter)       return e.name.includes(tapFilter);
+    return true;
+  };
+
+  const filtered = allEntries.filter(matchesFilter);
+
+  if (filterParts.length > 0 && filtered.length === 0) {
+    if (progIndexFilter) {
+      console.error(`No programs found matching index(es): ${filterParts.join(', ')}`);
+    } else {
+      console.error(`No filenames found matching filter '${tapFilter}'`);
     }
-    if (!currFiles.has(f)) {
-      console.log(`${c.blue(f)}:`);
-      console.log(`  ${c.red('Missing in current')}`);
-      console.log('');
-      missingInCurrent++;
-      globalSeverity.regression++;
-      continue;
-    }
-    pairs.push({ name: f, baselinePath: join(arg1, f), currentPath: join(arg2, f) });
+    process.exit(1);
+  }
+
+  for (const e of filtered) {
+    pairs.push({
+      name: e.name,
+      progNum: e.progNum,
+      baselinePath: e.baselinePath ?? '',
+      currentPath:  e.currentPath ?? '',
+    });
   }
 } else {
   // Direct file mode
   if (!existsSync(arg1)) { console.error(`File not found: ${arg1}`); process.exit(1); }
   if (!existsSync(arg2)) { console.error(`File not found: ${arg2}`); process.exit(1); }
-  pairs.push({ name: basename(arg1), baselinePath: arg1, currentPath: arg2 });
+  pairs.push({ name: basename(arg1), progNum: 1, baselinePath: arg1, currentPath: arg2 });
 }
 
 // ── Compare each pair ────────────────────────────────────────────────────────
@@ -427,6 +487,26 @@ let lastOutput: 'none' | 'clean' | 'changes' = 'none';
 for (const pair of pairs) {
   totalPairs++;
 
+  // Handle new/missing files (no baseline or no current path).
+  if (!pair.baselinePath) {
+    if (lastOutput !== 'none') console.log('');
+    console.log(`${pair.progNum} ${c.blue(pair.name)}:`);
+    console.log(`  ${c.green('New in current (no baseline)')}`);
+    lastOutput = 'changes';
+    newInCurrent++;
+    globalSeverity.improved++;
+    continue;
+  }
+  if (!pair.currentPath) {
+    if (lastOutput !== 'none') console.log('');
+    console.log(`${pair.progNum} ${c.blue(pair.name)}:`);
+    console.log(`  ${c.red('Missing in current')}`);
+    lastOutput = 'changes';
+    missingInCurrent++;
+    globalSeverity.regression++;
+    continue;
+  }
+
   const baseBuf  = readFileSync(pair.baselinePath);
   const currBuf  = readFileSync(pair.currentPath);
 
@@ -434,7 +514,7 @@ for (const pair of pairs) {
   if (Buffer.compare(baseBuf, currBuf) === 0) {
     if (verbose) {
       if (lastOutput === 'changes') console.log('');
-      console.log(`${c.blue(pair.name)}: ${c.dim('identical')}`);
+      console.log(`${pair.progNum} ${c.blue(pair.name)}: ${c.dim('identical')}`);
       lastOutput = 'clean';
     }
     identicalPairs++;
@@ -447,7 +527,7 @@ for (const pair of pairs) {
   if (baseProgs.length === 0 && currProgs.length === 0) {
     if (verbose) {
       if (lastOutput === 'changes') console.log('');
-      console.log(`${c.blue(pair.name)}: ${c.dim('identical')}`);
+      console.log(`${pair.progNum} ${c.blue(pair.name)}: ${c.dim('identical')}`);
       lastOutput = 'clean';
     }
     identicalPairs++;
@@ -461,7 +541,7 @@ for (const pair of pairs) {
   if (!baseProg || !currProg) {
     changedPairs++;
     globalSeverity.regression++;
-    console.log(`${c.blue(pair.name)}: ${c.red(`parse failure (baseline: ${baseProgs.length} progs, current: ${currProgs.length} progs)`)}`);
+    console.log(`${pair.progNum} ${c.blue(pair.name)}: ${c.red(`parse failure (baseline: ${baseProgs.length} progs, current: ${currProgs.length} progs)`)}`);
     continue;
   }
 
@@ -506,7 +586,7 @@ for (const pair of pairs) {
     // Lines all match — the byte-level difference must be in headers/pointers only.
     if (verbose) {
       if (lastOutput === 'changes') console.log('');
-      console.log(`${c.blue(pair.name)}: ${c.green(`BASIC identical (${consensusCount} lines)`)} — byte difference is structural only`);
+      console.log(`${pair.progNum} ${c.blue(pair.name)}: ${c.green(`BASIC identical (${consensusCount} lines)`)} — byte difference is structural only`);
       lastOutput = 'clean';
     }
     structuralOnlyPairs++;
@@ -536,7 +616,7 @@ for (const pair of pairs) {
   }
   if (sevCounts['improved'])    parts.push(c.green(`${sevCounts['improved']} improved`));
   if (lastOutput !== 'none') console.log('');
-  console.log(`${c.blue(pair.name)}:`);
+  console.log(`${pair.progNum} ${c.blue(pair.name)}:`);
   console.log(`  ${parts.join(', ')}`);
   lastOutput = 'changes';
 
