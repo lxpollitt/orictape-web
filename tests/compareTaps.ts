@@ -355,10 +355,13 @@ function highlightElementDiffs(
 
 // ── Argument parsing ─────────────────────────────────────────────────────────
 
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+const verbose = rawArgs.includes('--verbose') || rawArgs.includes('-v');
+const args = rawArgs.filter(a => a !== '--verbose' && a !== '-v');
+
 if (args.length < 2) {
-  console.error('Usage: npx tsx tests/compareTaps.ts <baseline.tap> <current.tap>');
-  console.error('   or: npx tsx tests/compareTaps.ts <baseline-dir> <current-dir> [filter...]');
+  console.error('Usage: npx tsx tests/compareTaps.ts [--verbose] <baseline.tap> <current.tap>');
+  console.error('   or: npx tsx tests/compareTaps.ts [--verbose] <baseline-dir> <current-dir> [filter...]');
   process.exit(1);
 }
 
@@ -387,13 +390,17 @@ if (statSync(arg1).isDirectory() && statSync(arg2).isDirectory()) {
   const allFiles = new Set([...baseFiles, ...currFiles]);
   for (const f of [...allFiles].sort()) {
     if (!baseFiles.has(f)) {
-      console.log(`${c.blue(f)}: ${c.green('new in current (no baseline)')}`);
+      console.log(`${c.blue(f)}:`);
+      console.log(`  ${c.green('New in current (no baseline)')}`);
+      console.log('');
       newInCurrent++;
       globalSeverity.improved++;
       continue;
     }
     if (!currFiles.has(f)) {
-      console.log(`${c.blue(f)}: ${c.red('missing in current')}`);
+      console.log(`${c.blue(f)}:`);
+      console.log(`  ${c.red('Missing in current')}`);
+      console.log('');
       missingInCurrent++;
       globalSeverity.regression++;
       continue;
@@ -413,6 +420,9 @@ let totalPairs = 0;
 let identicalPairs = 0;
 let structuralOnlyPairs = 0;
 let changedPairs = 0;
+// Track last output type for blank-line separators: 'none' | 'clean' | 'changes'.
+// Blank line before changes (unless first output). Blank line before clean if prev was changes.
+let lastOutput: 'none' | 'clean' | 'changes' = 'none';
 
 for (const pair of pairs) {
   totalPairs++;
@@ -422,6 +432,11 @@ for (const pair of pairs) {
 
   // Quick check: if files are byte-identical, skip the detailed comparison.
   if (Buffer.compare(baseBuf, currBuf) === 0) {
+    if (verbose) {
+      if (lastOutput === 'changes') console.log('');
+      console.log(`${c.blue(pair.name)}: ${c.dim('identical')}`);
+      lastOutput = 'clean';
+    }
     identicalPairs++;
     continue;
   }
@@ -430,6 +445,11 @@ for (const pair of pairs) {
   const currProgs = parseTapFile(currBuf.buffer.slice(currBuf.byteOffset, currBuf.byteOffset + currBuf.byteLength));
 
   if (baseProgs.length === 0 && currProgs.length === 0) {
+    if (verbose) {
+      if (lastOutput === 'changes') console.log('');
+      console.log(`${c.blue(pair.name)}: ${c.dim('identical')}`);
+      lastOutput = 'clean';
+    }
     identicalPairs++;
     continue;
   }
@@ -484,30 +504,49 @@ for (const pair of pairs) {
 
   if (classifiedLines.length === 0) {
     // Lines all match — the byte-level difference must be in headers/pointers only.
-    console.log(`${c.blue(pair.name)}: ${c.green(`BASIC identical (${consensusCount} lines)`)} — byte difference is structural only`);
+    if (verbose) {
+      if (lastOutput === 'changes') console.log('');
+      console.log(`${c.blue(pair.name)}: ${c.green(`BASIC identical (${consensusCount} lines)`)} — byte difference is structural only`);
+      lastOutput = 'clean';
+    }
     structuralOnlyPairs++;
     continue;
   }
 
   changedPairs++;
 
-  // Build summary line with severity-coloured counts (group similar subtypes).
-  const grouped = new Map<string, number>();
+  // Build summary line with severity-coloured counts.
+  const sevCounts: Partial<Record<Severity, number>> = {};
   for (const cl of classifiedLines) {
-    const name = severityShortName(cl.severity);
-    grouped.set(name, (grouped.get(name) ?? 0) + 1);
+    sevCounts[cl.severity] = (sevCounts[cl.severity] ?? 0) + 1;
   }
+
+  const simD = sevCounts['similar-degraded'] ?? 0;
+  const simE = sevCounts['similar-equivalent'] ?? 0;
+  const simI = sevCounts['similar-improved'] ?? 0;
+  const simTotal = simD + simE + simI;
 
   const parts: string[] = [];
   parts.push(c.green(`${consensusCount} matching`));
-  for (const [name, sev] of [['regression', 'regression'], ['degraded', 'degraded'], ['changed', 'changed'], ['similar', 'similar-equivalent'], ['improved', 'improved']] as [string, Severity][]) {
-    const count = grouped.get(name);
-    if (count && count > 0) parts.push(severityColour(sev, `${count} ${name}`));
+  if (sevCounts['regression'])  parts.push(c.red(`${sevCounts['regression']} regression`));
+  if (sevCounts['degraded'])    parts.push(c.red(`${sevCounts['degraded']} degraded`));
+  if (sevCounts['changed'])     parts.push(c.yellow(`${sevCounts['changed']} changed`));
+  if (simTotal > 0) {
+    parts.push(c.yellow(`${simTotal} similar`) + ` (${c.red(String(simD))}+${c.yellow(String(simE))}+${c.green(String(simI))})`);
   }
-  console.log(`${c.blue(pair.name)}: ${parts.join(', ')}`);
+  if (sevCounts['improved'])    parts.push(c.green(`${sevCounts['improved']} improved`));
+  if (lastOutput !== 'none') console.log('');
+  console.log(`${c.blue(pair.name)}:`);
+  console.log(`  ${parts.join(', ')}`);
+  lastOutput = 'changes';
 
-  // Show detail for each classified line — always show both versions.
+  // Show detail for each classified line.
+  const isSimilar = (s: Severity) => s === 'similar-degraded' || s === 'similar-equivalent' || s === 'similar-improved';
+
   for (const cl of classifiedLines) {
+    // In non-verbose mode, skip SIMILAR lines entirely — the per-file summary has the counts.
+    if (!verbose && isSimilar(cl.severity)) continue;
+
     if (cl.kind === 'conflict') {
       const baseElems = baseProg.lines[cl.baseSrc!.lineIdx].elements;
       const currElems = currProg.lines[cl.currSrc!.lineIdx].elements;
@@ -562,14 +601,16 @@ const hasChanges     = globalSeverity.changed > 0;
 console.log('');
 if (hasRegressions) {
   console.log(c.red('Result: REGRESSIONS DETECTED'));
-  process.exit(1);
 } else if (hasChanges) {
   console.log(c.yellow('Result: CHANGES DETECTED (no regressions)'));
-  process.exit(0);
 } else if (totalDiffs > 0) {
   console.log(c.green('Result: NO REGRESSIONS (similar and/or improvements only)'));
-  process.exit(0);
 } else {
   console.log(c.green('Result: ALL IDENTICAL'));
-  process.exit(0);
 }
+
+if (!verbose && totalDiffs > 0) {
+  console.log(c.dim('For full details, re-run with --verbose or -v'));
+}
+
+process.exit(hasRegressions ? 1 : 0);
