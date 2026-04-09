@@ -268,7 +268,7 @@ export function mergeLineBytes(
  * unclear bits, and length mismatches.  Both errors AND warnings count as
  * not-clean so that "agree on corrupt data" is correctly flagged as an issue.
  */
-function isLineClean(prog: Program, lineIdx: number): boolean {
+export function isLineClean(prog: Program, lineIdx: number): boolean {
   const line = prog.lines[lineIdx];
   if (line.lenErr) return false;
   for (let i = line.firstByte; i <= line.lastByte; i++) {
