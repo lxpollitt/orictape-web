@@ -13,7 +13,7 @@ import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 
 import { join, basename } from 'path';
 import { parseWavFile } from '../src/wavfile';
 import { readBitStreams, readPrograms } from '../src/decoder';
-import { linesFromProgram, encodeTapFile } from '../src/encoder';
+import { linesFromProgram, encodeTapFile, encodeTapMetadata } from '../src/encoder';
 import type { Program } from '../src/decoder';
 
 function usage(): never {
@@ -140,6 +140,7 @@ for (const filename of wavFiles) {
       const tapLines = linesFromProgram(prog);
       const tapBytes = encodeTapFile([{
         block: { name: prog.name, lines: tapLines, autorun: false },
+        metadata: encodeTapMetadata(prog),
       }]);
       const tapFilename = `${base}_${prog.name}_${startSec}s.tap`;
       writeFileSync(join(outputDir, tapFilename), tapBytes);
