@@ -91,21 +91,21 @@ export function alignPrograms(
 ): MergedProgram {
   const tapeCount = programs.length;
 
-  // Step 1 — per-tape filtered sequences.
-  const filtered = programs.map((prog, tapeIdx) =>
-    prog ? extractMonotonicLines(prog, tapeIdx) : [],
+  // Step 1 — per-tape partition into monotonic and non-monotonic lines.
+  const extracted = programs.map((prog, tapeIdx) =>
+    prog ? extractLines(prog, tapeIdx) : { monotonic: [], nonMonotonic: [] },
   );
 
-  // Step 2 — union into lineNum → LineSource[].
+  // Step 2 — union monotonic lines into lineNum → LineSource[].
   const lineMap = new Map<number, LineSource[]>();
-  for (const tapeLines of filtered) {
-    for (const { lineNum, lineIdx, tapeIdx } of tapeLines) {
+  for (const { monotonic } of extracted) {
+    for (const { lineNum, lineIdx, tapeIdx } of monotonic) {
       if (!lineMap.has(lineNum)) lineMap.set(lineNum, []);
       lineMap.get(lineNum)!.push({ tapeIdx, lineIdx });
     }
   }
 
-  // Step 3 — sort, classify, and assess quality.
+  // Step 3 — sort, classify, and assess quality for monotonic lines.
   const sortedNums = [...lineMap.keys()].sort((a, b) => a - b);
   const lines: AlignedLine[] = sortedNums.map(lineNum => {
     const sources = lineMap.get(lineNum)!;
@@ -118,6 +118,50 @@ export function alignPrograms(
       mergedBytes: null,
     };
   });
+
+  // Step 4 — insert non-monotonic lines at their correct positions.
+  // Each non-monotonic line sits between two monotonic lines in the original
+  // program.  Find the preceding monotonic line's line number and insert after
+  // the corresponding entry in the merged output.
+  for (const { monotonic, nonMonotonic } of extracted) {
+    if (nonMonotonic.length === 0) continue;
+
+    // Build a set of monotonic lineIdx values for quick lookup, and an ordered
+    // list so we can find the preceding monotonic line for each non-monotonic line.
+    const monoIndices = new Set(monotonic.map(m => m.lineIdx));
+    const monoByIdx   = new Map(monotonic.map(m => [m.lineIdx, m.lineNum]));
+
+    for (const nm of nonMonotonic) {
+      // Find the last monotonic line that precedes this non-monotonic line
+      // in the original program (by lineIdx, i.e. byte order).
+      let precedingLineNum = -1;
+      for (let li = nm.lineIdx - 1; li >= 0; li--) {
+        if (monoByIdx.has(li)) {
+          precedingLineNum = monoByIdx.get(li)!;
+          break;
+        }
+      }
+
+      // Build the AlignedLine entry for this non-monotonic line.
+      const sources: LineSource[] = [{ tapeIdx: nm.tapeIdx, lineIdx: nm.lineIdx }];
+      const entry: AlignedLine = {
+        lineNum:     nm.lineNum,
+        status:      'single',
+        quality:     'issue',  // non-monotonic line numbers are always an issue
+        sources,
+        mergedBytes: null,
+      };
+
+      // Insert after the preceding monotonic line in the merged output.
+      if (precedingLineNum < 0) {
+        // No preceding monotonic line — insert at the very beginning.
+        lines.splice(0, 0, entry);
+      } else {
+        const insertAfter = lines.findIndex(l => l.lineNum === precedingLineNum);
+        lines.splice(insertAfter + 1, 0, entry);
+      }
+    }
+  }
 
   const clean      = lines.filter(l => l.quality === 'clean').length;
   const issues     = lines.filter(l => l.quality === 'issue').length;
@@ -251,7 +295,18 @@ interface FilteredLine {
  *   1210 replaces 50608 in pile 2 → tails=[1130,1131,1210], parent[3] = 1
  *   Reconstruct: 1210→1131→1130  ✓  (50608 excluded)
  */
-function extractMonotonicLines(prog: Program, tapeIdx: number): FilteredLine[] {
+interface ExtractResult {
+  monotonic:    FilteredLine[];  // lines in the LIS (reliable line numbers)
+  nonMonotonic: FilteredLine[];  // lines excluded from the LIS (corrupt line numbers)
+}
+
+/**
+ * Partition a program's lines into monotonic (in the Longest Increasing
+ * Subsequence of line numbers) and non-monotonic (excluded from the LIS).
+ *
+ * Uses O(n log n) patience sort with parent-pointer reconstruction.
+ */
+function extractLines(prog: Program, tapeIdx: number): ExtractResult {
   // Collect candidates with valid parsed line numbers.
   const candidates: FilteredLine[] = [];
   for (let lineIdx = 0; lineIdx < prog.lines.length; lineIdx++) {
@@ -262,16 +317,15 @@ function extractMonotonicLines(prog: Program, tapeIdx: number): FilteredLine[] {
       candidates.push({ tapeIdx, lineIdx, lineNum });
     }
   }
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return { monotonic: [], nonMonotonic: [] };
 
   const n        = candidates.length;
   const parent   = new Int32Array(n).fill(-1);
-  const tailNums: number[] = [];   // tailNums[i] = smallest tail ending an IS of length i+1
-  const tailPos:  number[] = [];   // tailPos[i]  = candidates[] index of that tail
+  const tailNums: number[] = [];
+  const tailPos:  number[] = [];
 
   for (let i = 0; i < n; i++) {
     const v = candidates[i].lineNum;
-    // Binary search: first pile whose tail >= v (strict increase).
     let lo = 0, hi = tailNums.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
@@ -282,15 +336,21 @@ function extractMonotonicLines(prog: Program, tapeIdx: number): FilteredLine[] {
     parent[i]    = lo > 0 ? tailPos[lo - 1] : -1;
   }
 
-  // Reconstruct LIS from the tail of the longest pile.
+  // Reconstruct LIS indices.
+  const inLIS = new Uint8Array(n);
   const lisLen = tailNums.length;
-  const result = new Array<FilteredLine>(lisLen);
-  let   idx    = tailPos[lisLen - 1];
-  for (let pos = lisLen - 1; pos >= 0; pos--) {
-    result[pos] = candidates[idx];
-    idx         = parent[idx];
+  let idx = tailPos[lisLen - 1];
+  while (idx >= 0) {
+    inLIS[idx] = 1;
+    idx = parent[idx];
   }
-  return result;
+
+  const monotonic:    FilteredLine[] = [];
+  const nonMonotonic: FilteredLine[] = [];
+  for (let i = 0; i < n; i++) {
+    (inLIS[i] ? monotonic : nonMonotonic).push(candidates[i]);
+  }
+  return { monotonic, nonMonotonic };
 }
 
 /**
