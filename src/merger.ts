@@ -120,45 +120,99 @@ export function alignPrograms(
   });
 
   // Step 4 — insert non-monotonic lines at their correct positions.
-  // Each non-monotonic line sits between two monotonic lines in the original
-  // program.  Find the preceding monotonic line's line number and insert after
-  // the corresponding entry in the merged output.
+  // Non-monotonic lines can't be matched by line number (it's corrupt), so we
+  // match them by position: the (preceding, following) monotonic line number pair.
+  // Lines from different tapes that share the same slot are grouped as one
+  // AlignedLine with multiple sources, just like normal line-number matches.
+
+  // 4a: For each tape, annotate non-monotonic lines with their slot key.
+  interface SlottedNM {
+    tapeIdx: number;
+    lineIdx: number;
+    lineNum: number;
+    key:     string;   // "preceding:following" monotonic line numbers
+    ordinal: number;   // position within this slot (for multi-NM slots)
+  }
+
+  const allNM: SlottedNM[] = [];
+
   for (const { monotonic, nonMonotonic } of extracted) {
     if (nonMonotonic.length === 0) continue;
 
-    // Build a set of monotonic lineIdx values for quick lookup, and an ordered
-    // list so we can find the preceding monotonic line for each non-monotonic line.
-    const monoIndices = new Set(monotonic.map(m => m.lineIdx));
-    const monoByIdx   = new Map(monotonic.map(m => [m.lineIdx, m.lineNum]));
+    const monoByIdx = new Map(monotonic.map(m => [m.lineIdx, m.lineNum]));
+
+    // Track ordinals per slot key within this tape.
+    const slotOrdinals = new Map<string, number>();
 
     for (const nm of nonMonotonic) {
-      // Find the last monotonic line that precedes this non-monotonic line
-      // in the original program (by lineIdx, i.e. byte order).
-      let precedingLineNum = -1;
+      // Find preceding monotonic line number.
+      let preceding = -1;
       for (let li = nm.lineIdx - 1; li >= 0; li--) {
-        if (monoByIdx.has(li)) {
-          precedingLineNum = monoByIdx.get(li)!;
-          break;
-        }
+        if (monoByIdx.has(li)) { preceding = monoByIdx.get(li)!; break; }
+      }
+      // Find following monotonic line number.
+      let following = -1;
+      for (let li = nm.lineIdx + 1; li < (programs[nm.tapeIdx]?.lines.length ?? 0); li++) {
+        if (monoByIdx.has(li)) { following = monoByIdx.get(li)!; break; }
       }
 
-      // Build the AlignedLine entry for this non-monotonic line.
-      const sources: LineSource[] = [{ tapeIdx: nm.tapeIdx, lineIdx: nm.lineIdx }];
-      const entry: AlignedLine = {
-        lineNum:     nm.lineNum,
-        status:      'single',
-        quality:     'issue',  // non-monotonic line numbers are always an issue
-        sources,
-        mergedBytes: null,
-      };
+      const key = `${preceding}:${following}`;
+      const ordinal = slotOrdinals.get(key) ?? 0;
+      slotOrdinals.set(key, ordinal + 1);
+      allNM.push({ tapeIdx: nm.tapeIdx, lineIdx: nm.lineIdx, lineNum: nm.lineNum, key, ordinal });
+    }
+  }
 
-      // Insert after the preceding monotonic line in the merged output.
-      if (precedingLineNum < 0) {
-        // No preceding monotonic line — insert at the very beginning.
-        lines.splice(0, 0, entry);
+  // 4b: Group by (key, ordinal) to pair lines from different tapes.
+  const nmGroups = new Map<string, SlottedNM[]>();
+  for (const nm of allNM) {
+    const groupKey = `${nm.key}#${nm.ordinal}`;
+    if (!nmGroups.has(groupKey)) nmGroups.set(groupKey, []);
+    nmGroups.get(groupKey)!.push(nm);
+  }
+
+  // 4c: Build AlignedLine entries and insert at the correct positions.
+  // Sort groups by preceding line number so we insert in order.
+  const sortedGroups = [...nmGroups.values()].sort((a, b) => {
+    const aPrec = parseInt(a[0].key.split(':')[0], 10);
+    const bPrec = parseInt(b[0].key.split(':')[0], 10);
+    if (aPrec !== bPrec) return aPrec - bPrec;
+    return a[0].ordinal - b[0].ordinal;
+  });
+
+  for (const group of sortedGroups) {
+    const sources: LineSource[] = group.map(nm => ({ tapeIdx: nm.tapeIdx, lineIdx: nm.lineIdx }));
+    const lineNum = group[0].lineNum;  // use first tape's (corrupt) line number
+    const status  = classifyLine(sources, programs, tapeCount);
+
+    const entry: AlignedLine = {
+      lineNum,
+      status,
+      quality:     'issue',  // non-monotonic line numbers are always an issue
+      sources,
+      mergedBytes: null,
+    };
+
+    // Insert after the preceding monotonic line in the merged output.
+    const precedingLineNum = parseInt(group[0].key.split(':')[0], 10);
+    if (precedingLineNum < 0) {
+      lines.splice(0, 0, entry);
+    } else {
+      // Find the last line in the output with this line number (in case
+      // previous NM insertions shifted things).
+      let insertIdx = -1;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].lineNum === precedingLineNum) { insertIdx = i; break; }
+      }
+      // Insert after the preceding line, plus any previously inserted NM lines.
+      if (insertIdx >= 0) {
+        // Skip past any already-inserted entries after the preceding line.
+        while (insertIdx + 1 < lines.length && lines[insertIdx + 1].quality === 'issue') {
+          insertIdx++;
+        }
+        lines.splice(insertIdx + 1, 0, entry);
       } else {
-        const insertAfter = lines.findIndex(l => l.lineNum === precedingLineNum);
-        lines.splice(insertAfter + 1, 0, entry);
+        lines.push(entry);
       }
     }
   }
