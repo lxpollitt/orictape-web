@@ -545,6 +545,59 @@ for (const pair of pairs) {
     continue;
   }
 
+  // ── Header comparison ──────────────────────────────────────────────────────
+  const bh = baseProg.header;
+  const ch = currProg.header;
+
+  interface HeaderDiff { field: string; baseVal: string; currVal: string; }
+  const headerDiffs: HeaderDiff[] = [];
+
+  if (baseProg.name !== currProg.name)
+    headerDiffs.push({ field: 'Program name', baseVal: `"${baseProg.name}"`, currVal: `"${currProg.name}"` });
+  if (bh.fileType !== ch.fileType)
+    headerDiffs.push({ field: 'File type', baseVal: `0x${bh.fileType.toString(16).padStart(2, '0')}`, currVal: `0x${ch.fileType.toString(16).padStart(2, '0')}` });
+  if (bh.autorun !== ch.autorun)
+    headerDiffs.push({ field: 'Autorun', baseVal: String(bh.autorun), currVal: String(ch.autorun) });
+  if (bh.startAddr !== ch.startAddr)
+    headerDiffs.push({ field: 'Start address', baseVal: `0x${bh.startAddr.toString(16).padStart(4, '0')}`, currVal: `0x${ch.startAddr.toString(16).padStart(4, '0')}` });
+
+  // End address validity: check it points to 0x00 0x00 (encoder correctness check).
+  function hasValidEndAddr(prog: Program): boolean {
+    const h = prog.header;
+    let nameEnd = h.byteIndex + 9;
+    while (nameEnd < prog.bytes.length && prog.bytes[nameEnd].v !== 0) nameEnd++;
+    nameEnd++;
+    const endOffset = nameEnd + (h.endAddr - h.startAddr);
+    const b0 = prog.bytes[endOffset - 2]?.v;
+    const b1 = prog.bytes[endOffset - 1]?.v;
+    return b0 === 0x00 && b1 === 0x00;
+  }
+
+  function endAddrDetail(prog: Program): string {
+    const h = prog.header;
+    let nameEnd = h.byteIndex + 9;
+    while (nameEnd < prog.bytes.length && prog.bytes[nameEnd].v !== 0) nameEnd++;
+    nameEnd++;
+    const endOffset = nameEnd + (h.endAddr - h.startAddr);
+    const b0 = prog.bytes[endOffset - 2]?.v ?? 0;
+    const b1 = prog.bytes[endOffset - 1]?.v ?? 0;
+    return `0x${h.endAddr.toString(16).padStart(4, '0')} → 0x${b0.toString(16).padStart(2, '0')} 0x${b1.toString(16).padStart(2, '0')}`;
+  }
+
+  const baseEndOk = hasValidEndAddr(baseProg);
+  const currEndOk = hasValidEndAddr(currProg);
+  const headerWarnings: string[] = [];
+
+  if (!baseEndOk && !currEndOk) {
+    headerWarnings.push(`End address invalid in both (baseline: ${endAddrDetail(baseProg)}, current: ${endAddrDetail(currProg)})`);
+  } else if (!baseEndOk) {
+    headerWarnings.push(`End address invalid in baseline: ${endAddrDetail(baseProg)}`);
+    globalSeverity.improved++;
+  } else if (!currEndOk) {
+    headerWarnings.push(`End address invalid in current: ${endAddrDetail(currProg)}`);
+    globalSeverity.regression++;
+  }
+
   // Use the merger to do line-level alignment.
   const merged = alignPrograms([baseProg, currProg]);
 
@@ -582,8 +635,8 @@ for (const pair of pairs) {
     }
   }
 
-  if (classifiedLines.length === 0) {
-    // Lines all match — BASIC programs are identical.
+  if (classifiedLines.length === 0 && headerDiffs.length === 0 && headerWarnings.length === 0) {
+    // Lines and headers all match — programs are identical.
     if (verbose) {
       if (lastOutput === 'changes') console.log('');
       console.log(`${pair.progNum} ${c.blue(pair.name)}: ${c.green(`identical program (${consensusCount} lines)`)}`);
@@ -619,6 +672,25 @@ for (const pair of pairs) {
   console.log(`${pair.progNum} ${c.blue(pair.name)}:`);
   console.log(`  ${parts.join(', ')}`);
   lastOutput = 'changes';
+
+  // Show header differences (if any) before line-level details.
+  if (headerDiffs.length > 0) {
+    if (verbose) {
+      for (const hd of headerDiffs) {
+        console.log(`  ${c.yellow(`${hd.field} differs:`)}`);
+        console.log(`    baseline: ${hd.baseVal}`);
+        console.log(`    current:  ${hd.currVal}`);
+      }
+    } else {
+      const fields = headerDiffs.map(hd => hd.field.toLowerCase());
+      console.log(`  ${c.yellow(`Headers differ: ${fields.join(', ')}`)}`);
+    }
+  }
+
+  // Show end-address validity warnings.
+  for (const w of headerWarnings) {
+    console.log(`  ${c.red(w)}`);
+  }
 
   // Show detail for each classified line.
   const isSimilar = (s: Severity) => s === 'similar-degraded' || s === 'similar-equivalent' || s === 'similar-improved';

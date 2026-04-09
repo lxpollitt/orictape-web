@@ -102,7 +102,7 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
       bytes,
       lines:  [],
       name:   '',
-      headerStart: 0,
+      header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false },
     };
 
     readProgramLines(prog);
@@ -112,7 +112,7 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     // Metadata indices are relative to the first header byte; offset them
     // to the TAP byte stream's prog.bytes indices.
     if (meta) {
-      const headerStart = prog.headerStart;
+      const headerStart = prog.header.byteIndex;
       if (meta.chkErr) {
         for (const idx of meta.chkErr) {
           const bi = idx + headerStart;

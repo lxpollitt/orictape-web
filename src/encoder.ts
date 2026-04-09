@@ -169,7 +169,7 @@ const TAP_META_MAGIC = 'ORICTAPE_META';
  * stable regardless of how many sync/pre-sync bytes the byte stream contains.
  */
 export function encodeTapMetadata(prog: Program): number[] {
-  const headerStart = prog.headerStart;
+  const headerStart = prog.header.byteIndex;
   const chkErr:  number[] = [];
   const unclear: number[] = [];
   for (let i = 0; i < prog.bytes.length; i++) {

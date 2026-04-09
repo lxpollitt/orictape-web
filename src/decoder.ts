@@ -80,14 +80,27 @@ export function streamBitAt(s: BitStream, i: number): BitInfo {
   };
 }
 
+export interface ProgramHeader {
+  /** Byte index of the first header byte (after the 0x24 sync marker)
+   *  within the bytes[] array. */
+  byteIndex:  number;
+  /** 0x00 = BASIC, 0x01 = machine code. */
+  fileType:   number;
+  /** True if the program should auto-run on load (header byte 3 = 0x80). */
+  autorun:    boolean;
+  /** First byte of program data in Oric memory (big-endian from header). */
+  startAddr:  number;
+  /** First byte past program data in Oric memory (big-endian from header, exclusive). */
+  endAddr:    number;
+}
+
 export interface Program {
   stream: BitStream;
   bytes: ByteInfo[];
   lines: LineInfo[];
   name: string;
-  /** Byte index of the first header byte (after the 0x24 sync marker)
-   *  within the bytes[] array.  Set by readProgramLines. */
-  headerStart: number;
+  /** Parsed header fields. Set by readProgramLines. */
+  header: ProgramHeader;
   /** Set when the BASIC end-of-program null pointer (0x00 0x00) was
    *  encountered before the address range declared in the tape header was
    *  exhausted.  Condition 1 already handles the normal case where the null
@@ -290,7 +303,7 @@ export function readPrograms(streams: BitStream[]): Program[] {
 }
 
 function readProgramBytes(stream: BitStream): Program {
-  const prog: Program = { stream, bytes: [], lines: [], name: '', headerStart: 0 };
+  const prog: Program = { stream, bytes: [], lines: [], name: '', header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false } };
   let currentBit = 0;
   let byteUnclear = false;
 
@@ -374,17 +387,26 @@ export function readProgramLines(prog: Program): void {
     else if (b === 0x24 && syncCount > 3) { break; }
     else { syncCount = 0; }
   }
-  prog.headerStart = nextByte;
+  const headerByteIndex = nextByte;
 
   // 9-byte file header; byte[2] === 0 means BASIC file.
-  const header: number[] = [];
-  for (let i = 0; i < 9; i++) header.push(getByte());
-  if (header[2] !== 0) return;
+  const headerBytes: number[] = [];
+  for (let i = 0; i < 9; i++) headerBytes.push(getByte());
+  if (headerBytes[2] !== 0) return;
 
   // Start address from header (bytes 6–7, big-endian).  Used to anchor the
   // chain of next-line pointer addresses to real Oric memory addresses.
-  const endAddr   = (header[4] << 8) | header[5];
-  const startAddr = (header[6] << 8) | header[7];
+  const endAddr   = (headerBytes[4] << 8) | headerBytes[5];
+  const startAddr = (headerBytes[6] << 8) | headerBytes[7];
+
+  // Store parsed header fields on the Program object.
+  prog.header = {
+    byteIndex:  headerByteIndex,
+    fileType:   headerBytes[2],
+    autorun:    headerBytes[3] === 0x80,
+    startAddr,
+    endAddr,
+  };
 
   // Null-terminated program name.
   for (let b = getByte(); b > 0; b = getByte()) {
