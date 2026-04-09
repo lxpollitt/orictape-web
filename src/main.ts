@@ -1254,7 +1254,7 @@ function selectMergeElem(mli: number, col: 0 | 1 | 2, ei: number): void {
   basicPanel.querySelector('.elem.sel')?.classList.remove('sel');
   const elemEl = rowEl?.querySelector<HTMLElement>(`[data-col="${col}"] [data-ei="${ei}"]`);
   elemEl?.classList.add('sel');
-  elemEl?.scrollIntoView({ block: 'nearest' });
+  rowEl?.scrollIntoView({ block: 'nearest' });
 
   // Update hex panel to show the selected column's source bytes.
   const merged = userMerges[activeProgIdx]?.result;

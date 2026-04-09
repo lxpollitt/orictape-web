@@ -376,7 +376,7 @@ header h1 {
   min-height: 0;
 }
 
-.merge-row          { display: flex; cursor: pointer; }
+.merge-row          { display: flex; cursor: pointer; scroll-margin-top: 26px; }
 .merge-row:hover    { background: #202020; }
 .merge-row.sel      { background: #1e3a1e; }
 
