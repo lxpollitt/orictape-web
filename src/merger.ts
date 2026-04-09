@@ -42,6 +42,10 @@ export interface AlignedLine {
   sources:     LineSource[];
   /** Populated lazily by mergeLineBytes() (Phase 2 — currently always null). */
   mergedBytes: MergedByte[] | null;
+  /** When true, this line is displayed but excluded from the merged output.
+   *  Used for non-monotonic lines that are superseded by another tape's clean
+   *  monotonic coverage of the same region. */
+  rejected?:   boolean;
 }
 
 // ── Byte-level merge types (data structure ready; algorithm is future) ────────
@@ -171,8 +175,15 @@ export function alignPrograms(
     nmGroups.get(groupKey)!.push(nm);
   }
 
-  // 4c: Build AlignedLine entries and insert at the correct positions.
-  // Sort groups by preceding line number so we insert in order.
+  // 4c: Build per-tape monotonic line number sets for coverage checks.
+  const monoLineNums: Set<number>[] = extracted.map(({ monotonic }) =>
+    new Set(monotonic.map(m => m.lineNum)),
+  );
+
+  // 4d: Build AlignedLine entries and insert at the correct positions.
+  // Skip groups where another tape's monotonic lines cover the slot — i.e. the
+  // other tape has both the preceding and following line numbers in its monotonic
+  // sequence, confirming it has authoritative data for the entire region.
   const sortedGroups = [...nmGroups.values()].sort((a, b) => {
     const aPrec = parseInt(a[0].key.split(':')[0], 10);
     const bPrec = parseInt(b[0].key.split(':')[0], 10);
@@ -181,6 +192,18 @@ export function alignPrograms(
   });
 
   for (const group of sortedGroups) {
+    const key = group[0].key;
+    const preceding = parseInt(key.split(':')[0], 10);
+    const following = parseInt(key.split(':')[1], 10);
+
+    // Check if any tape that does NOT contribute to this group covers the slot.
+    const contributingTapes = new Set(group.map(nm => nm.tapeIdx));
+    const coveredByOther = monoLineNums.some((lineNums, tapeIdx) => {
+      if (contributingTapes.has(tapeIdx) || programs[tapeIdx] === undefined) return false;
+      const hasB1 = preceding === -1 || lineNums.has(preceding);
+      const hasB2 = following === -1 || lineNums.has(following);
+      return hasB1 && hasB2;
+    });
     const sources: LineSource[] = group.map(nm => ({ tapeIdx: nm.tapeIdx, lineIdx: nm.lineIdx }));
     const lineNum = group[0].lineNum;  // use first tape's (corrupt) line number
     const status  = classifyLine(sources, programs, tapeCount);
@@ -191,6 +214,7 @@ export function alignPrograms(
       quality:     'issue',  // non-monotonic line numbers are always an issue
       sources,
       mergedBytes: null,
+      rejected:    coveredByOther || undefined,
     };
 
     // Insert after the preceding monotonic line in the merged output.
@@ -217,12 +241,13 @@ export function alignPrograms(
     }
   }
 
-  const clean      = lines.filter(l => l.quality === 'clean').length;
-  const issues     = lines.filter(l => l.quality === 'issue').length;
-  const recovered  = lines.filter(l => l.quality === 'recovered').length;
-  const unverified = lines.filter(l => l.quality === 'unverified').length;
+  const active     = lines.filter(l => !l.rejected);
+  const clean      = active.filter(l => l.quality === 'clean').length;
+  const issues     = active.filter(l => l.quality === 'issue').length;
+  const recovered  = active.filter(l => l.quality === 'recovered').length;
+  const unverified = active.filter(l => l.quality === 'unverified').length;
 
-  return { tapeCount, lines, total: lines.length, clean, issues, recovered, unverified };
+  return { tapeCount, lines, total: active.length, clean, issues, recovered, unverified };
 }
 
 /**

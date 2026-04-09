@@ -615,6 +615,7 @@ for (const pair of pairs) {
   const classifiedLines: ClassifiedLine[] = [];
 
   for (const line of merged.lines) {
+    if (line.rejected) continue;  // rejected lines are displayed but not compared
     const baseSrc = line.sources.find(s => s.tapeIdx === 0);
     const currSrc = line.sources.find(s => s.tapeIdx === 1);
 

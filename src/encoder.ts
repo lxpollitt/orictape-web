@@ -43,6 +43,7 @@ export function linesFromMerged(
 ): TapLine[] {
   const lines: TapLine[] = [];
   for (const alignedLine of merged.lines) {
+    if (alignedLine.rejected) continue;
     const src  = bestSource(alignedLine, progs);
     const prog = progs[src.tapeIdx];
     if (!prog) continue;

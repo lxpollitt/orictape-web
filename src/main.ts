@@ -4,7 +4,7 @@ import { WaveformView } from './waveform';
 import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
 import {
-  alignPrograms, bestSource,
+  alignPrograms, bestSource, isLineClean,
   type MergedProgram,
 } from './merger';
 import { linesFromProgram, linesFromMerged, encodeTapFile, encodeTapMetadata, downloadTap, type TapBlock, type TapEntry } from './encoder';
@@ -682,7 +682,6 @@ function renderMergeView(merged: MergedProgram): void {
   const progName1 = tapes[ati1]?.programs[merge.sources[1].progIdx]?.name ?? '';
 
   const rowsHtml = merged.lines.map((line, i) => {
-    const src    = bestSource(line, progs);
     const rowSel = i === selMergeLine ? ' sel' : '';
 
     // Determine which element (if any) is selected within each column.
@@ -690,6 +689,29 @@ function renderMergeView(merged: MergedProgram): void {
     const sel0   = isSel && selMergeCol === 0 ? selMergeElem : null;
     const selMid = isSel && selMergeCol === 1 ? selMergeElem : null;
     const sel1   = isSel && selMergeCol === 2 ? selMergeElem : null;
+
+    if (line.rejected) {
+      // Rejected lines: show in source columns (dimmed) but empty merged column.
+      const srcLeft  = line.sources.find(s => s.tapeIdx === ti0);
+      const progLeft = progs[ti0];
+      const col0 = srcLeft && progLeft
+        ? renderBasicLineHtml(progLeft, srcLeft.lineIdx, 'not-merged', sel0)
+        : '';
+
+      const srcRight  = line.sources.find(s => s.tapeIdx === ti1);
+      const progRight = progs[ti1];
+      const col1 = srcRight && progRight
+        ? renderBasicLineHtml(progRight, srcRight.lineIdx, 'not-merged', sel1)
+        : '';
+
+      return `<div class="merge-row${rowSel}" data-mli="${i}">` +
+        `<div class="merge-col" data-col="0">${col0}</div>` +
+        `<div class="merge-col merge-col-result" data-col="1"></div>` +
+        `<div class="merge-col" data-col="2">${col1}</div>` +
+        `</div>`;
+    }
+
+    const src = bestSource(line, progs);
 
     // Left column — source 0 tape
     const srcLeft  = line.sources.find(s => s.tapeIdx === ti0);
@@ -1256,6 +1278,7 @@ function mergeColSource(col: 0|1|2, mli: number): { prog: Program; lineIdx: numb
   let src: { tapeIdx: number; lineIdx: number } | undefined;
   if      (col === 0) src = line.sources.find(s => s.tapeIdx === ti0);
   else if (col === 2) src = line.sources.find(s => s.tapeIdx === ti1);
+  else if (line.rejected) return null;  // rejected lines have no merged content
   else                src = bestSource(line, progs);
   if (!src) return null;
   const prog = progs[src.tapeIdx];
@@ -1401,9 +1424,16 @@ function navigateMerge(key: string, alt: boolean): void {
     const step  = key === 'ArrowUp' ? -1 : 1;
     const start = curMli < 0 ? (step < 0 ? nLines : -1) : curMli;
     for (let mli = start + step; mli >= 0 && mli < nLines; mli += step) {
-      if (merged.lines[mli].quality !== 'issue') continue;
+      if (col === 1 && merged.lines[mli].rejected) continue;  // skip rejected lines in merged column
       const src = mergeColSource(col, mli);
-      if (!src) continue; // skip issue lines where this column has no source
+      if (!src) continue; // skip lines where this column has no source
+      // For the merged column, only stop at issue lines. For source columns,
+      // stop at any line that has errors in that column's source.
+      if (col === 1) {
+        if (merged.lines[mli].quality !== 'issue') continue;
+      } else {
+        if (isLineClean(src.prog, src.lineIdx)) continue;
+      }
       const landLine = src.prog.lines[src.lineIdx];
       let landed = false;
       for (let ei = 0; ei < landLine.elements.length; ei++) {
@@ -1914,21 +1944,27 @@ function updateMergedStatusBar(): void {
   const line = merged.lines[selMergeLine];
 
   // Per-line quality label with structural detail.
-  const QUALITY_LABEL: Record<string, string> = {
-    clean:      `<span style="color:var(--green)">Clean</span>`,
-    recovered:  `<span style="color:var(--green)">Recovered · clean source chosen over corrupt</span>`,
-    issue:      line.status === 'consensus'
-                  ? `<span class="sb-err">Issue · sources agree but contain errors</span>`
-                  : line.status === 'single'
-                    ? `<span class="sb-err">Issue · only source contains errors</span>`
-                    : line.status === 'partial'
-                      ? `<span class="sb-err">Issue · source contains errors, absent from other tape</span>`
-                      : `<span class="sb-err">Issue · sources conflict</span>`,
-    unverified: line.status === 'single'
-                  ? `<span class="sb-warn">Unverified · single source (tape ${(um!.sources[line.sources[0]?.tapeIdx ?? 0]?.tapeIdx ?? 0) + 1})</span>`
-                  : `<span class="sb-warn">Unverified · ${line.sources.length}/${merged.tapeCount} tapes</span>`,
-  };
-  const segs = [`BASIC line ${line.lineNum}`, QUALITY_LABEL[line.quality]];
+  let qualityLabel: string;
+  if (line.rejected) {
+    qualityLabel = `<span style="color:var(--green)">Recovered · corrupted line safely ignored</span>`;
+  } else {
+    const QUALITY_LABEL: Record<string, string> = {
+      clean:      `<span style="color:var(--green)">Clean</span>`,
+      recovered:  `<span style="color:var(--green)">Recovered · clean source chosen over corrupt</span>`,
+      issue:      line.status === 'consensus'
+                    ? `<span class="sb-err">Issue · sources agree but contain errors</span>`
+                    : line.status === 'single'
+                      ? `<span class="sb-err">Issue · only source contains errors</span>`
+                      : line.status === 'partial'
+                        ? `<span class="sb-err">Issue · source contains errors, absent from other tape</span>`
+                        : `<span class="sb-err">Issue · sources conflict</span>`,
+      unverified: line.status === 'single'
+                    ? `<span class="sb-warn">Unverified · single source (tape ${(um!.sources[line.sources[0]?.tapeIdx ?? 0]?.tapeIdx ?? 0) + 1})</span>`
+                    : `<span class="sb-warn">Unverified · ${line.sources.length}/${merged.tapeCount} tapes</span>`,
+    };
+    qualityLabel = QUALITY_LABEL[line.quality];
+  }
+  const segs = [`BASIC line ${line.lineNum}`, qualityLabel];
   statusBar.innerHTML = segs.join(dot) + pipe + `Line ${selMergeLine + 1}`;
 }
 
