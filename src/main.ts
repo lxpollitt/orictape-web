@@ -1878,10 +1878,9 @@ function updateStatusBar(): void {
   const dot  = ' <span class="sb-dim">·</span> ';
   const pipe = '  <span class="sb-dim">│</span>  ';
 
-  const contentStart = prog.lines[0]?.firstByte;
-  const isPreamble   = contentStart !== undefined && selByte < contentStart;
-  const byteNum      = isPreamble ? selByte : (contentStart !== undefined ? selByte - contentStart : selByte);
-  const byteLabel    = isPreamble ? 'Preamble byte' : 'Byte';
+  const headerStart  = prog.header.byteIndex;
+  const byteNum      = selByte - headerStart;
+  const byteLabel    = byteNum < 0 ? 'Pre-header byte' : 'Byte';
   const byteSegs: string[] = [`${byteLabel} ${byteNum}`];
   const addr = progByteAddr(prog, selByte!);
   if (addr) byteSegs.push(addr);
