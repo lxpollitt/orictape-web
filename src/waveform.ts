@@ -3,7 +3,7 @@ import type { Program } from './decoder';
 const GREEN  = '#3d8c3d';
 const YELLOW = '#c9a428';
 const RED    = '#c94040';
-const DIM    = '#242424';
+const DIM    = '#444444';
 
 export class WaveformView {
   private readonly canvas: HTMLCanvasElement;
@@ -213,7 +213,7 @@ export class WaveformView {
       if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
         const x0 = (stream.bitFirstSample[b.firstBit] - vs) / spp;
         const x1 = (stream.bitLastSample[b.lastBit]   - vs) / spp;
-        ctx.fillStyle = 'rgba(78,201,78,0.08)';
+        ctx.fillStyle = 'rgba(78,201,78,0.06)';
         ctx.fillRect(x0, 0, x1 - x0, h);
       }
     }

@@ -286,53 +286,113 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   // Bit 1 = 8 short cycles, bit 0 = 4 long cycles.
   // Emit the bit after 2 consecutive matching cycles, then absorb the rest
   // (up to 8 for short, 4 for long). Counters reset when cycle type changes.
-  let slow1s = 0;
-  let slow0s = 0;
+  //
+  // Medium cycles are transitions: one short half-cycle + one long half-cycle
+  // (exactly 1600 Hz = harmonic mean of 2400 and 1200 Hz). We use lengthBelow
+  // and lengthAbove to determine which half is short and which is long, credit
+  // the short half to the short count and the long half to the long count.
+  let slow1s = 0;   // consecutive short half-cycle pairs (counting full short cycles)
+  let slow0s = 0;   // consecutive long half-cycle pairs (counting full long cycles)
   let slowBitFirstSample = 0;
   let slowBitUnclear = false;
 
+  // Sample range tracking for slow half-cycle credits.
+  let slowSampleFrom = 0;   // start of current half-credit's sample range
+  let slowSampleTo   = 0;   // end of current half-credit's sample range
+
+  /** Record a short cycle (or short half of a transition). */
+  const slowShort = (): void => {
+    if (slow1s === 0) slowBitFirstSample = slowSampleFrom;
+    slow1s++;
+    // Type change from long → short: if the long run had an incomplete bit
+    // (slow0s was 1 after a wrap), extend the previous bit to cover the orphan.
+    if (slow0s === 1 && bitCount > 0) {
+      _bitLastSample[bitCount - 1] = slowSampleFrom - 1;
+    }
+    slow0s = 0;
+    slowBitUnclear = slowBitUnclear || cycleUnclear;
+    if (slow1s === 2) {
+      _bitV[bitCount] = 1;
+      _bitL1[bitCount] = 0;
+      _bitL2[bitCount] = 0;
+      _bitFirstSample[bitCount] = slowBitFirstSample;
+      _bitLastSample[bitCount]  = slowSampleTo;
+      _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
+      bitCount++;
+      slowBitUnclear = false;
+    } else if (slow1s > 2 && slow1s <= 8 && bitCount > 0) {
+      _bitLastSample[bitCount - 1] = slowSampleTo;
+      if (cycleUnclear) _bitUnclear[bitCount - 1] = 1;
+    }
+    if (slow1s >= 8) slow1s = 0;
+  };
+
+  /** Record a long cycle (or long half of a transition). */
+  const slowLong = (): void => {
+    if (slow0s === 0) slowBitFirstSample = slowSampleFrom;
+    slow0s++;
+    // Type change from short → long: if the short run had an incomplete bit
+    // (slow1s was 1 after a wrap), extend the previous bit to cover the orphan.
+    if (slow1s === 1 && bitCount > 0) {
+      _bitLastSample[bitCount - 1] = slowSampleFrom - 1;
+    }
+    slow1s = 0;
+    slowBitUnclear = slowBitUnclear || cycleUnclear;
+    if (slow0s === 2) {
+      _bitV[bitCount] = 0;
+      _bitL1[bitCount] = 0;
+      _bitL2[bitCount] = 0;
+      _bitFirstSample[bitCount] = slowBitFirstSample;
+      _bitLastSample[bitCount]  = slowSampleTo;
+      _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
+      bitCount++;
+      slowBitUnclear = false;
+    } else if (slow0s > 2 && slow0s <= 4 && bitCount > 0) {
+      _bitLastSample[bitCount - 1] = slowSampleTo;
+      if (cycleUnclear) _bitUnclear[bitCount - 1] = 1;
+    }
+    if (slow0s >= 4) slow0s = 0;
+  };
+
   const pushBitSlow = (): void => {
-    if (cycleKind === 'short' || cycleKind === 'medium') {
-      // Short cycles = bit 1. Medium cycles shouldn't appear in slow format
-      // but treat them as short (with unclear flag) for robustness.
-      if (slow1s === 0) slowBitFirstSample = aboveIndex - length;
-      slow1s++;
-      slow0s = 0;
-      slowBitUnclear = slowBitUnclear || cycleUnclear || cycleKind === 'medium';
-      if (slow1s === 2) {
-        _bitV[bitCount] = 1;
-        _bitL1[bitCount] = 0;
-        _bitL2[bitCount] = 0;
-        _bitFirstSample[bitCount] = slowBitFirstSample;
-        _bitLastSample[bitCount]  = aboveIndex - 1;
-        _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
-        bitCount++;
-        slowBitUnclear = false;
-      } else if (slow1s > 2 && slow1s <= 8 && bitCount > 0) {
-        _bitLastSample[bitCount - 1] = aboveIndex - 1;
-        if (cycleUnclear || cycleKind === 'medium') _bitUnclear[bitCount - 1] = 1;
-      }
-      if (slow1s >= 8) slow1s = 0;
+    const cycleFirst = aboveIndex - length;
+    const cycleLast  = aboveIndex - 1;
+    // The crossover midpoint between the two half-cycles.
+    const midSample  = cycleFirst + lengthBelow;
+
+    if (cycleKind === 'short') {
+      slowSampleFrom = cycleFirst;
+      slowSampleTo   = cycleLast;
+      slowShort();
+    } else if (cycleKind === 'long') {
+      slowSampleFrom = cycleFirst;
+      slowSampleTo   = cycleLast;
+      slowLong();
     } else {
-      // Long cycles = bit 0.
-      if (slow0s === 0) slowBitFirstSample = aboveIndex - length;
-      slow0s++;
-      slow1s = 0;
-      slowBitUnclear = slowBitUnclear || cycleUnclear;
-      if (slow0s === 2) {
-        _bitV[bitCount] = 0;
-        _bitL1[bitCount] = 0;
-        _bitL2[bitCount] = 0;
-        _bitFirstSample[bitCount] = slowBitFirstSample;
-        _bitLastSample[bitCount]  = aboveIndex - 1;
-        _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
-        bitCount++;
-        slowBitUnclear = false;
-      } else if (slow0s > 2 && slow0s <= 4 && bitCount > 0) {
-        _bitLastSample[bitCount - 1] = aboveIndex - 1;
-        if (cycleUnclear) _bitUnclear[bitCount - 1] = 1;
+      // Medium cycle = transition (short half + long half).
+      // Split at the crossover midpoint and credit each half separately.
+      // The first half completes the previous bit's run; extend its sample range.
+      // The second half starts the next bit's run.
+      if (bitCount > 0) {
+        _bitLastSample[bitCount - 1] = midSample - 1;
       }
-      if (slow0s >= 4) slow0s = 0;
+      if (lengthBelow <= lengthAbove) {
+        // First half is short, second is long.
+        slowSampleFrom = cycleFirst;
+        slowSampleTo   = midSample - 1;
+        slowShort();
+        slowSampleFrom = midSample;
+        slowSampleTo   = cycleLast;
+        slowLong();
+      } else {
+        // First half is long, second is short.
+        slowSampleFrom = cycleFirst;
+        slowSampleTo   = midSample - 1;
+        slowLong();
+        slowSampleFrom = midSample;
+        slowSampleTo   = cycleLast;
+        slowShort();
+      }
     }
   };
 
