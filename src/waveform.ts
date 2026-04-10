@@ -233,7 +233,7 @@ export class WaveformView {
       if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
         const x0 = (stream.bitFirstSample[b.firstBit] - vs) / spp;
         const x1 = (stream.bitLastSample[b.lastBit]   - vs) / spp;
-        ctx.fillStyle = 'rgba(78,201,78,0.06)';
+        ctx.fillStyle = '#1e3a1e';
         ctx.fillRect(x0, 0, x1 - x0, h);
       }
     }
