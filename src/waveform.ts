@@ -352,6 +352,17 @@ export class WaveformView {
         ctx.stroke();
         ctx.setLineDash([]);
       }
+
+      // Sparse dotted lines at maxIndex and minIndex (debug: where readCycle found extrema).
+      const xMax = (stream.bitMaxIndex[bi] - vs) / spp;
+      const xMin = (stream.bitMinIndex[bi] - vs) / spp;
+      ctx.strokeStyle = 'rgba(255, 180, 0, 0.5)';
+      ctx.setLineDash([2, 6]);
+      ctx.beginPath();
+      ctx.moveTo(xMax + 0.5, 0); ctx.lineTo(xMax + 0.5, waveH);
+      ctx.moveTo(xMin + 0.5, 0); ctx.lineTo(xMin + 0.5, waveH);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     // ── Hover info overlay ─────────────────────────────────────────────────────
@@ -368,10 +379,13 @@ export class WaveformView {
         const l1    = stream.bitL1[bi];
         const l2    = stream.bitL2[bi];
         const hz = Math.round(this.sampleRate / len);
+        const maxIdx = stream.bitMaxIndex[bi];
+        const minIdx = stream.bitMinIndex[bi];
         lines = [
           `Bit ${fmt(bi)}`,
           `Samples ${fmt(first)} - ${fmt(last)}`,
           `Length ${len} (${l1}+${l2})`,
+          `Max @${fmt(maxIdx)}  Min @${fmt(minIdx)}`,
         ];
         hzSuffix = `  ~${fmt(hz)}Hz`;
       } else {

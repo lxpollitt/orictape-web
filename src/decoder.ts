@@ -61,6 +61,8 @@ export interface BitStream {
   bitFirstSample: Uint32Array;
   bitLastSample: Uint32Array;
   bitUnclear: Uint8Array;      // 0 = clean, 1 = unclear
+  bitMaxIndex: Uint32Array;    // debug: sample index of the max found by readCycle
+  bitMinIndex: Uint32Array;    // debug: sample index of the min found by readCycle
   // Note: raw samples are NOT stored here. The UI holds them separately
   // (from the original WAV parse) to avoid duplicating 20MB per stream.
   firstSample: number;
@@ -171,12 +173,12 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const MEDIUM_MAX    = Math.round(31 * sampleRate / 44100);
   const LONG_MIN      = Math.round(35 * sampleRate / 44100);
   const LONG_MAX      = Math.round(42 * sampleRate / 44100);
-  const GAP_MIN       = Math.round(54 * sampleRate / 44100);
-  const NOISE_FLOOR            = 100; // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
-  const SMALLEST_SEARCH_WINDOW = Math.round(20 * sampleRate / 44100);
+  const GAP_MIN       = Math.round(50 * sampleRate / 44100);
+  const NOISE_FLOOR            = 200; // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
+  const SMALLEST_SEARCH_WINDOW = Math.round(15 * sampleRate / 44100);
   const LONGEST_SEARCH_WINDOW  = Math.round(30 * sampleRate / 44100);
-  const TURNAROUND_PCT         = 30;  // % of peak-to-threshold distance to confirm turn-around
-  const MIN_SYNC_BITS = 200; // min continuous cycles before accepting a sync run
+  const TURNAROUND_PCT         = 10;  // % of peak-to-threshold distance to confirm turn-around
+  const MIN_SYNC_BITS = 100; // min continuous cycles before accepting a sync run
 
   // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
   // (every cycle is the shortest possible). We'll slice to actual size at the end.
@@ -187,6 +189,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const _bitFirstSample  = new Uint32Array(maxBits);
   const _bitLastSample   = new Uint32Array(maxBits);
   const _bitUnclear      = new Uint8Array(maxBits);
+  const _bitMaxIndex     = new Uint32Array(maxBits);
+  const _bitMinIndex     = new Uint32Array(maxBits);
   let bitCount = 0;
 
   // Working state shared with readCycle (mirrors the Go closure pattern).
@@ -202,6 +206,9 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   let cycleKind:    CycleKind = 'short';
   let cycleUnclear = false;
 
+  // readCycle quiet gap detection counter
+  let quietCycles = 0;
+
   /** Measure one waveform cycle and classify it as short, medium, or long.
    *  Returns true if the cycle exceeded GAP_MIN (gap in tape signal). */
   const readCycle = (): boolean => {
@@ -215,10 +222,12 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     let turnaroundMin = 32767;  // recalculated only when minVal changes
     const minSmallEnd = Math.min(maxIndex + SMALLEST_SEARCH_WINDOW, samples.length);
     const minLongEnd  = Math.min(maxIndex + LONGEST_SEARCH_WINDOW, samples.length);
+    minVal = maxVal;
+    minIndex = minLongEnd;
     for (let i = maxIndex + 1; i < minLongEnd; i++) {
       if (samples[i] < minVal) {
         minVal = samples[i]; minIndex = i; maxValSinceMin = minVal;
-        turnaroundMin = minVal + ((threshold - minVal) * TURNAROUND_PCT / 100);
+        turnaroundMin = minVal + ((maxVal - minVal) * TURNAROUND_PCT / 100);
       } else if (samples[i] > maxValSinceMin) {
         maxValSinceMin = samples[i];
       }
@@ -242,10 +251,12 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     let turnaroundMax = -32768;  // recalculated only when maxVal changes
     const maxSmallEnd = Math.min(minIndex + SMALLEST_SEARCH_WINDOW, samples.length);
     const maxLongEnd  = Math.min(minIndex + LONGEST_SEARCH_WINDOW, samples.length);
+    maxVal = minVal;
+    maxIndex = maxLongEnd;
     for (let i = minIndex + 1; i < maxLongEnd; i++) {
       if (samples[i] > maxVal) {
         maxVal = samples[i]; maxIndex = i; minValSinceMax = maxVal;
-        turnaroundMax = maxVal - ((maxVal - threshold) * TURNAROUND_PCT / 100);
+        turnaroundMax = maxVal - ((maxVal - minVal) * TURNAROUND_PCT / 100);
       } else if (samples[i] < minValSinceMax) {
         minValSinceMax = samples[i];
       }
@@ -262,10 +273,15 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     lengthAbove = aboveIndex - belowIndex;
     length = lengthBelow + lengthAbove;
 
-    if (length > GAP_MIN) return true; // gap in tape signal
+    if (length > GAP_MIN || maxVal - minVal < NOISE_FLOOR) {
+      quietCycles++;
+    } else { 
+      quietCycles = 0;
+    }
+    if (quietCycles > 200) return true; // gap in tape signal
 
     // Tri-value cycle classification.
-    if (length <= SHORT_MAX) {
+    if (length <= SHORT_MAX || length > GAP_MIN) { // Map gaps to 1 bits (otherwise terminates BASIC program)
       cycleKind = 'short';
     } else if (length < MEDIUM_MIN) {
       // Unclear zone between short and medium — use half-cycle asymmetry heuristic.
@@ -320,6 +336,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       _bitFirstSample[bitCount] = aboveIndex - length;
       _bitLastSample[bitCount]  = aboveIndex - 1;
       _bitUnclear[bitCount] = cycleUnclear ? 1 : 0;
+      _bitMaxIndex[bitCount] = maxIndex;
+      _bitMinIndex[bitCount] = minIndex;
       bitCount++;
     // }
   };
@@ -516,6 +534,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     bitFirstSample: _bitFirstSample.slice(0, bitCount),
     bitLastSample:  _bitLastSample.slice(0, bitCount),
     bitUnclear:     _bitUnclear.slice(0, bitCount),
+    bitMaxIndex:    _bitMaxIndex.slice(0, bitCount),
+    bitMinIndex:    _bitMinIndex.slice(0, bitCount),
     firstSample: streamFirstSample,
     lastSample:  aboveIndex,
     minVal: streamMinVal,
