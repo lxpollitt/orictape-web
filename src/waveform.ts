@@ -82,7 +82,7 @@ export class WaveformView {
     // Default view: fit the whole stream, scaled by the persistent zoom factor.
     const len    = prog.stream.lastSample - prog.stream.firstSample;
     this.baseSpp  = Math.max(1, len / this.canvas.width);
-    this.spp      = Math.max(0.5, this.baseSpp / this.zoomFactor);
+    this.spp      = Math.max(0.1875, this.baseSpp / this.zoomFactor);
     this.viewStart = prog.stream.firstSample;
     this.clampView();
     this.updateZoomDisplay();
@@ -144,8 +144,8 @@ export class WaveformView {
     this.draw();
   }
 
-  zoomIn():    void { this.zoomFactor = Math.min(8,   this.zoomFactor * 2); this.applyZoom(); }
-  zoomOut():   void { this.zoomFactor = Math.max(0.5, this.zoomFactor / 2); this.applyZoom(); }
+  zoomIn():    void { this.zoomFactor = Math.min(16,  this.zoomFactor * 2); this.applyZoom(); }
+  zoomOut():   void { this.zoomFactor = Math.max(0.1875, this.zoomFactor / 2); this.applyZoom(); }
   zoomReset(): void { this.zoomFactor = 1; this.applyZoom(); }
 
   private applyZoom(): void {
@@ -158,7 +158,7 @@ export class WaveformView {
       const len    = this.prog.stream.lastSample - this.prog.stream.firstSample;
       this.baseSpp  = Math.max(1, len / this.canvas.width);
       const centre = this.viewStart + (this.canvas.width / 2) * this.spp;
-      this.spp       = Math.max(0.5, this.baseSpp / this.zoomFactor);
+      this.spp       = Math.max(0.1875, this.baseSpp / this.zoomFactor);
       this.viewStart = centre - (this.canvas.width / 2) * this.spp;
       this.clampView();
       this.updateZoomDisplay();
@@ -179,7 +179,7 @@ export class WaveformView {
         const mid = (s0 + s1) / 2;
         // Centre on the byte at the current zoom level (default spp=3 at 100%).
         this.baseSpp   = 3;
-        this.spp       = Math.max(0.5, 3 / this.zoomFactor);
+        this.spp       = Math.max(0.1875, 3 / this.zoomFactor);
         this.viewStart = mid - (this.canvas.width / 2) * this.spp;
         this.clampView();
       }
@@ -253,7 +253,10 @@ export class WaveformView {
       const sEnd   = sStart + spp;
 
       // Advance past bits that are fully left of this pixel.
-      while (bi < stream.bitCount && stream.bitLastSample[bi] < sStart) bi++;
+      // Use Math.floor(sStart) so fractional pixel positions don't skip past
+      // a bit whose last sample still overlaps this pixel.
+      const sampleStart = Math.floor(sStart);
+      while (bi < stream.bitCount && stream.bitLastSample[bi] < sampleStart) bi++;
 
       // Pick colour from the first overlapping bit (if any).
       let color = DIM;
@@ -335,7 +338,7 @@ export class WaveformView {
       const xEnd   = (last + 1 - vs) / spp;
 
       // Solid lines at bit edges.
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
       ctx.lineWidth = 1;
       ctx.setLineDash([]);
       ctx.beginPath();
@@ -356,7 +359,7 @@ export class WaveformView {
       // Sparse dotted lines at maxIndex and minIndex (debug: where readCycle found extrema).
       const xMax = (stream.bitMaxIndex[bi] - vs) / spp;
       const xMin = (stream.bitMinIndex[bi] - vs) / spp;
-      ctx.strokeStyle = 'rgba(255, 180, 0, 0.5)';
+      ctx.strokeStyle = '#00b4ff';
       ctx.setLineDash([2, 6]);
       ctx.beginPath();
       ctx.moveTo(xMax + 0.5, 0); ctx.lineTo(xMax + 0.5, waveH);
@@ -487,7 +490,7 @@ export class WaveformView {
         // Horizontal scroll → horizontal zoom (time).
         const factor = e.deltaX > 0 ? 1.1 : 1 / 1.1;
         const anchor = this.viewStart + e.offsetX * this.spp;
-        this.spp       = Math.max(0.5, Math.min(20000, this.spp * factor));
+        this.spp       = Math.max(0.1875, Math.min(20000, this.spp * factor));
         this.viewStart = anchor - e.offsetX * this.spp;
         this.clampView();
         this.updateZoomDisplay();

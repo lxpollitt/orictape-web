@@ -195,7 +195,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
 
   // Working state shared with readCycle (mirrors the Go closure pattern).
   let minVal = 0, maxVal = 0, threshold = 0;
-  let minIndex = 0, maxIndex = startSample;
+  let minIndex = 0, maxIndex = startSample, prevMaxIndex = startSample;
   let belowIndex = 0, aboveIndex = startSample;
   let lengthBelow = 0, lengthAbove = 0, length = 0;
   let streamFirstSample = startSample;
@@ -245,6 +245,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
 
     // Find next maximum after the current min.
     // Same adaptive window: at least SMALLEST, extend up to LONGEST.
+    prevMaxIndex = maxIndex;
     maxVal = -32768;
     maxIndex = minIndex + 1;
     let minValSinceMax = 32767;
@@ -342,7 +343,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       _bitFirstSample[bitCount] = aboveIndex - length;
       _bitLastSample[bitCount]  = aboveIndex - 1;
       _bitUnclear[bitCount] = cycleUnclear ? 1 : 0;
-      _bitMaxIndex[bitCount] = maxIndex;
+      _bitMaxIndex[bitCount] = prevMaxIndex;
       _bitMinIndex[bitCount] = minIndex;
       bitCount++;
     // }
