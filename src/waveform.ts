@@ -325,6 +325,35 @@ export class WaveformView {
       ctx.globalAlpha = 1;
     }
 
+    // ── Hover bit markers (vertical lines at bit edges and L1/L2 split) ──────
+    if (spp <= 0.75 && this.hoverBit !== null) {
+      const bi    = this.hoverBit;
+      const first = stream.bitFirstSample[bi];
+      const last  = stream.bitLastSample[bi];
+      const l1    = stream.bitL1[bi];
+      const xStart = (first - vs) / spp;
+      const xEnd   = (last + 1 - vs) / spp;
+
+      // Solid lines at bit edges.
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(xStart + 0.5, 0); ctx.lineTo(xStart + 0.5, waveH);
+      ctx.moveTo(xEnd + 0.5, 0);   ctx.lineTo(xEnd + 0.5, waveH);
+      ctx.stroke();
+
+      // Dotted line at L1/L2 split (crossover point).
+      if (l1 > 0) {
+        const xSplit = (first + l1 - vs) / spp;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(xSplit + 0.5, 0); ctx.lineTo(xSplit + 0.5, waveH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
     // ── Hover info overlay ─────────────────────────────────────────────────────
     if (spp <= 0.75 && (this.hoverBit !== null || this.hoverSample > 0)) {
       const fmt = (n: number) => n.toLocaleString();

@@ -152,17 +152,30 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   //   short  (2400 Hz) ≈ 18 samples  — bit 1 in both fast and slow format
   //   medium (1600 Hz) ≈ 28 samples  — bit 0 in fast format only
   //   long   (1200 Hz) ≈ 37 samples  — bit 0 (×4) in slow format only
-  const SHORT_MIN     = Math.round(12 * sampleRate / 44100);
+  // 
+  //   short  (2400 Hz) ≈ 18.375 samples  — bit 1 in both fast and slow format
+  //   medium (1600 Hz) ≈ 27.5625 samples  — bit 0 in fast format only
+  //   long   (1200 Hz) ≈ 36.75 samples  — bit 0 (×4) in slow format only
+  //   short 1/2 cycle  = 9.1875
+  //   medium 1/2 cycle = 13.78125
+  //   long 1/2 cycle   = 18.375
+  //   medium 3/4 cycle = 0.5*9.1875+18.375=22.96875 or 0.5*18.375+9.1875=18.375
+  //   long 3/4 cycle   = 0.75*36.75 = 27.5625
+  //   short search window = 20 -> 20/18.375 or 20/22.96875 = 1.09 or 0.87* 3/4 medium cycle 
+  //   long search window = 44 -> 44/27.5625 = 1.6 * 3/4 long cycle 
+  //   long search window = 30 -> 30/27.5625 = 1.09 * 3/4 long cycle 
+  //    
+  const SHORT_MIN     = Math.round(15 * sampleRate / 44100);
   const SHORT_MAX     = Math.round(20 * sampleRate / 44100);
   const MEDIUM_MIN    = Math.round(24 * sampleRate / 44100);
   const MEDIUM_MAX    = Math.round(31 * sampleRate / 44100);
   const LONG_MIN      = Math.round(35 * sampleRate / 44100);
-  const LONG_MAX      = Math.round(44 * sampleRate / 44100);
+  const LONG_MAX      = Math.round(42 * sampleRate / 44100);
   const GAP_MIN       = Math.round(54 * sampleRate / 44100);
-  const NOISE_FLOOR            = 300; // min peak-to-peak amplitude for a valid cycle (<0.5% of full scale)
+  const NOISE_FLOOR            = 100; // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
   const SMALLEST_SEARCH_WINDOW = Math.round(20 * sampleRate / 44100);
-  const LONGEST_SEARCH_WINDOW  = Math.round(44 * sampleRate / 44100);
-  const TURNAROUND_PCT         = 50;  // % of peak-to-threshold distance to confirm turn-around
+  const LONGEST_SEARCH_WINDOW  = Math.round(30 * sampleRate / 44100);
+  const TURNAROUND_PCT         = 30;  // % of peak-to-threshold distance to confirm turn-around
   const MIN_SYNC_BITS = 200; // min continuous cycles before accepting a sync run
 
   // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
@@ -277,15 +290,38 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     return false;
   };
 
-  /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit). */
+  /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit).
+   *  Long cycles don't belong in fast format — they're likely two short cycles
+   *  (bit 1) that merged due to a weak signal.  Emit two unclear bit-1s, split
+   *  at the crossover midpoint. */
   const pushBitFast = (): void => {
-    _bitV[bitCount] = cycleKind === 'short' ? 1 : 0;
-    _bitL1[bitCount] = Math.min(lengthBelow, 65535);
-    _bitL2[bitCount] = Math.min(lengthAbove, 65535);
-    _bitFirstSample[bitCount] = aboveIndex - length;
-    _bitLastSample[bitCount]  = aboveIndex - 1;
-    _bitUnclear[bitCount] = cycleUnclear ? 1 : 0;
-    bitCount++;
+    // if (cycleKind === 'long') {
+    //   // Split into two unclear bit-1s at the crossover midpoint.
+    //   const cycleFirst = aboveIndex - length;
+    //   const midSample  = cycleFirst + lengthBelow;
+    //   _bitV[bitCount] = 1;
+    //   _bitL1[bitCount] = Math.min(lengthBelow, 65535);
+    //   _bitL2[bitCount] = 0;
+    //   _bitFirstSample[bitCount] = cycleFirst;
+    //   _bitLastSample[bitCount]  = midSample - 1;
+    //   _bitUnclear[bitCount] = 1;
+    //   bitCount++;
+    //   _bitV[bitCount] = 1;
+    //   _bitL1[bitCount] = 0;
+    //   _bitL2[bitCount] = Math.min(lengthAbove, 65535);
+    //   _bitFirstSample[bitCount] = midSample;
+    //   _bitLastSample[bitCount]  = aboveIndex - 1;
+    //   _bitUnclear[bitCount] = 1;
+    //   bitCount++;
+    // } else {
+      _bitV[bitCount] = cycleKind === 'short' ? 1 : 0;
+      _bitL1[bitCount] = Math.min(lengthBelow, 65535);
+      _bitL2[bitCount] = Math.min(lengthAbove, 65535);
+      _bitFirstSample[bitCount] = aboveIndex - length;
+      _bitLastSample[bitCount]  = aboveIndex - 1;
+      _bitUnclear[bitCount] = cycleUnclear ? 1 : 0;
+      bitCount++;
+    // }
   };
 
   // ── Slow format bit extraction (Oricutron-style) ───────────────────────────
