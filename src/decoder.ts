@@ -199,14 +199,17 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     minVal = 32767;
     minIndex = maxIndex + 1;
     let maxValSinceMin = -32768;
+    let turnaroundMin = 32767;  // recalculated only when minVal changes
     const minSmallEnd = Math.min(maxIndex + SMALLEST_SEARCH_WINDOW, samples.length);
     const minLongEnd  = Math.min(maxIndex + LONGEST_SEARCH_WINDOW, samples.length);
     for (let i = maxIndex + 1; i < minLongEnd; i++) {
-      if (samples[i] < minVal) { minVal = samples[i]; minIndex = i; maxValSinceMin = minVal; }
-      else if (samples[i] > maxValSinceMin) { maxValSinceMin = samples[i]; }
-      // Turn-around: has the signal risen TURNAROUND_PCT% of the way from the min back toward threshold?
-      const turnaroundLevel = minVal + ((threshold - minVal) * TURNAROUND_PCT / 100);
-      if (i >= minSmallEnd && maxValSinceMin >= turnaroundLevel) break;
+      if (samples[i] < minVal) {
+        minVal = samples[i]; minIndex = i; maxValSinceMin = minVal;
+        turnaroundMin = minVal + ((threshold - minVal) * TURNAROUND_PCT / 100);
+      } else if (samples[i] > maxValSinceMin) {
+        maxValSinceMin = samples[i];
+      }
+      if (i >= minSmallEnd && maxValSinceMin >= turnaroundMin) break;
     }
     if (minVal < streamMinVal) streamMinVal = minVal;
 
@@ -223,14 +226,17 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     maxVal = -32768;
     maxIndex = minIndex + 1;
     let minValSinceMax = 32767;
+    let turnaroundMax = -32768;  // recalculated only when maxVal changes
     const maxSmallEnd = Math.min(minIndex + SMALLEST_SEARCH_WINDOW, samples.length);
     const maxLongEnd  = Math.min(minIndex + LONGEST_SEARCH_WINDOW, samples.length);
     for (let i = minIndex + 1; i < maxLongEnd; i++) {
-      if (samples[i] > maxVal) { maxVal = samples[i]; maxIndex = i; minValSinceMax = maxVal; }
-      else if (samples[i] < minValSinceMax) { minValSinceMax = samples[i]; }
-      // Turn-around: has the signal dipped TURNAROUND_PCT% of the way from the max back toward threshold?
-      const turnaroundLevel = maxVal - ((maxVal - threshold) * TURNAROUND_PCT / 100);
-      if (i >= maxSmallEnd && minValSinceMax <= turnaroundLevel) break;
+      if (samples[i] > maxVal) {
+        maxVal = samples[i]; maxIndex = i; minValSinceMax = maxVal;
+        turnaroundMax = maxVal - ((maxVal - threshold) * TURNAROUND_PCT / 100);
+      } else if (samples[i] < minValSinceMax) {
+        minValSinceMax = samples[i];
+      }
+      if (i >= maxSmallEnd && minValSinceMax <= turnaroundMax) break;
     }
     if (maxVal > streamMaxVal) streamMaxVal = maxVal;
 
@@ -419,7 +425,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     syncRunAboveIndex = aboveIndex;
     syncRunMaxVal = maxVal;
     syncRunThreshold = threshold;
-    while (maxIndex < samples.length) {
+    while (maxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
       if (readCycle()) break;
       if (maxVal - minVal < NOISE_FLOOR) break; // noise floor (silence, noise, or slow ramp)
       if (cycleKind === 'medium') mediumCycleCount++;
