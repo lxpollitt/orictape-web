@@ -6,7 +6,7 @@ const TAP_META_MAGIC = 'ORICTAPE_META';
 /** A minimal empty BitStream for programs loaded from TAP (no waveform data). */
 function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
   return {
-    format,
+    format:         'fast',
     bitCount:       0,
     bitV:           new Uint8Array(0),
     bitL1:          new Uint16Array(0),
