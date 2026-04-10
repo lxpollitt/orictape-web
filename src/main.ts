@@ -1868,7 +1868,19 @@ function updateStatusBar(): void {
 
   const prog = programs[activeProgIdx];
   if (selByte === null || !prog) {
-    statusBar.innerHTML = '<span class="sb-dim">Click a byte or BASIC line to inspect.</span>';
+    // Show program identifier matching compareTaps naming convention.
+    const tape = tapes[activeTapeIdx];
+    if (prog && tape) {
+      const refByteIdx  = prog.lines.length > 0 ? prog.lines[0].firstByte : 0;
+      const refBit      = prog.bytes[refByteIdx]?.firstBit ?? 0;
+      const refSample   = prog.stream.bitFirstSample[refBit] ?? 0;
+      const startSec    = Math.floor(refSample / tape.sampleRate);
+      const base        = tape.filename.replace(/\.wav$/i, '');
+      const name        = prog.name || '(unnamed)';
+      statusBar.innerHTML = `<span class="sb-dim">${escHtml(base)}_${escHtml(name)}_${startSec}s</span>`;
+    } else {
+      statusBar.innerHTML = '<span class="sb-dim">Click a byte or BASIC line to inspect.</span>';
+    }
     return;
   }
 

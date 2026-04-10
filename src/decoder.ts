@@ -174,6 +174,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const LONG_MIN      = Math.round(35 * sampleRate / 44100);
   const LONG_MAX      = Math.round(42 * sampleRate / 44100);
   const GAP_MIN       = Math.round(50 * sampleRate / 44100);
+  // TODO: replace with dynamic based on overall file signal level, and differentiate between unclear low signal level and genuine noise floor to map to gap
   const NOISE_FLOOR            = 200; // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
   const SMALLEST_SEARCH_WINDOW = Math.round(15 * sampleRate / 44100);
   const LONGEST_SEARCH_WINDOW  = Math.round(30 * sampleRate / 44100);
