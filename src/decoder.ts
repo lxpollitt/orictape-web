@@ -214,7 +214,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const readCycle = (): boolean => {
     // Find next minimum after the current max.
     // Always search at least SMALLEST_SEARCH_WINDOW samples, but extend up to
-    // LONGEST_SEARCH_WINDOW if the signal hasn't returned to threshold yet
+    // LONGEST_SEARCH_WINDOW if the signal hasn't turned arond enough yet
     // (accommodates long cycles without overshooting on short ones).
     minVal = 32767;
     minIndex = maxIndex + 1;
@@ -222,8 +222,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     let turnaroundMin = 32767;  // recalculated only when minVal changes
     const minSmallEnd = Math.min(maxIndex + SMALLEST_SEARCH_WINDOW, samples.length);
     const minLongEnd  = Math.min(maxIndex + LONGEST_SEARCH_WINDOW, samples.length);
-    minVal = maxVal;
-    minIndex = minLongEnd;
+    // TODO: this isn't a great way of coping with 0 signal? what if didn't find previous peak; is this ok?
+    minVal = maxVal; minIndex = minLongEnd; // Hacks to cope with zero signal, rather than retuning very short read cycles
     for (let i = maxIndex + 1; i < minLongEnd; i++) {
       if (samples[i] < minVal) {
         minVal = samples[i]; minIndex = i; maxValSinceMin = minVal;
@@ -251,8 +251,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     let turnaroundMax = -32768;  // recalculated only when maxVal changes
     const maxSmallEnd = Math.min(minIndex + SMALLEST_SEARCH_WINDOW, samples.length);
     const maxLongEnd  = Math.min(minIndex + LONGEST_SEARCH_WINDOW, samples.length);
-    maxVal = minVal;
-    maxIndex = maxLongEnd;
+    // TODO: this isn't a great way of coping with 0 signal? what if didn't find previous peak; is this ok?
+    maxVal = minVal; maxIndex = maxLongEnd; // Hacks to cope with zero signal, rather than retuning very short read cycles
     for (let i = minIndex + 1; i < maxLongEnd; i++) {
       if (samples[i] > maxVal) {
         maxVal = samples[i]; maxIndex = i; minValSinceMax = maxVal;
@@ -273,6 +273,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     lengthAbove = aboveIndex - belowIndex;
     length = lengthBelow + lengthAbove;
 
+    // TODO: Move thie logic to higher layer where it can make different decision during sync vs program if wants to
     if (length > GAP_MIN || maxVal - minVal < NOISE_FLOOR) {
       quietCycles++;
     } else { 
@@ -280,8 +281,13 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     }
     if (quietCycles > 200) return true; // gap in tape signal
 
+    // TODO: Simplify readCycle to returns every GAP, and have higher layer decide how many milliseconds of gaps it cares about
+    // so it can make sync decision vs inside a program decision
+    // Plus simplify this function as much as possible
+    // Same for quiet cycle counting: move to higher level funcion
+
     // Tri-value cycle classification.
-    if (length <= SHORT_MAX || length > GAP_MIN) { // Map gaps to 1 bits (otherwise terminates BASIC program)
+    if (length <= SHORT_MAX || length > GAP_MIN) { // TODO: Remove hack: map gaps to 1 bits (otherwise terminates BASIC program)
       cycleKind = 'short';
     } else if (length < MEDIUM_MIN) {
       // Unclear zone between short and medium — use half-cycle asymmetry heuristic.
