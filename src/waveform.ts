@@ -11,6 +11,7 @@ export class WaveformView {
 
   private samples:    Int16Array | null = null;
   private prog:       Program | null    = null;
+  private sampleRate  = 44100;
   private bitIsError:    Uint8Array | null = null; // per-bit: 1 if part of a chkErr byte (waveform colouring)
   private bitIsParityErr: Uint8Array | null = null; // per-bit: 1 only for the parity bit of a chkErr byte (label colouring)
 
@@ -23,6 +24,8 @@ export class WaveformView {
   private vZoom       = 1;     // vertical zoom multiplier (scroll-wheel controlled)
   private zoomLabel:  HTMLElement | null = null;
 
+  private hoverBit:       number | null = null;  // bit index under mouse cursor
+  private hoverSample:    number = 0;            // sample position of mouse cursor
   private dragging        = false;
   private dragX           = 0;
   private dragView        = 0;
@@ -53,9 +56,10 @@ export class WaveformView {
     this.draw();
   }
 
-  setData(samples: Int16Array, prog: Program): void {
+  setData(samples: Int16Array, prog: Program, sampleRate = 44100): void {
     this.samples     = samples;
     this.prog        = prog;
+    this.sampleRate  = sampleRate;
     this.selByte     = null;
     this.noWaveform  = false;
 
@@ -112,6 +116,21 @@ export class WaveformView {
     }
     // Click landed in a gap — return nearest byte.
     return Math.min(lo, bytes.length - 1);
+  }
+
+  /** Binary-search for the bit whose sample range contains `sample`.
+   *  Returns null if no bit covers this sample. */
+  private sampleToBit(sample: number): number | null {
+    if (!this.prog) return null;
+    const stream = this.prog.stream;
+    let lo = 0, hi = stream.bitCount - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (sample < stream.bitFirstSample[mid])      hi = mid - 1;
+      else if (sample > stream.bitLastSample[mid])   lo = mid + 1;
+      else return mid;
+    }
+    return null;  // sample falls in a gap between bits
   }
 
   private updateZoomDisplay(): void {
@@ -305,6 +324,79 @@ export class WaveformView {
 
       ctx.globalAlpha = 1;
     }
+
+    // ── Hover info overlay ─────────────────────────────────────────────────────
+    if (spp <= 0.75 && (this.hoverBit !== null || this.hoverSample > 0)) {
+      const fmt = (n: number) => n.toLocaleString();
+      let lines: string[];
+      let hzSuffix = '';
+
+      if (this.hoverBit !== null) {
+        const bi = this.hoverBit;
+        const first = stream.bitFirstSample[bi];
+        const last  = stream.bitLastSample[bi];
+        const len   = last - first + 1;
+        const l1    = stream.bitL1[bi];
+        const l2    = stream.bitL2[bi];
+        const hz = Math.round(this.sampleRate / len);
+        lines = [
+          `Bit ${fmt(bi)}`,
+          `Samples ${fmt(first)} - ${fmt(last)}`,
+          `Length ${len} (${l1}+${l2})`,
+        ];
+        hzSuffix = `  ~${fmt(hz)}Hz`;
+      } else {
+        // Hovering over a gap between bits — find bounds from adjacent bits.
+        const sample = this.hoverSample;
+        // Find the bit just before and just after this gap.
+        let prevEnd = stream.firstSample;
+        let nextStart = stream.lastSample;
+        for (let bi = 0; bi < stream.bitCount; bi++) {
+          if (stream.bitLastSample[bi] < sample) {
+            prevEnd = stream.bitLastSample[bi] + 1;
+          }
+          if (stream.bitFirstSample[bi] > sample) {
+            nextStart = stream.bitFirstSample[bi];
+            break;
+          }
+        }
+        const gapLen = nextStart - prevEnd;
+        const hz = gapLen > 0 ? Math.round(this.sampleRate / gapLen) : 0;
+        lines = [
+          `Gap`,
+          `Samples ${fmt(prevEnd)} - ${fmt(nextStart - 1)}`,
+          `Length ${gapLen}`,
+        ];
+        hzSuffix = hz > 0 ? `  ~${fmt(hz)}Hz` : '';
+      }
+
+      ctx.font         = '11px ui-monospace, Cascadia Code, Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      const lineH   = 14;
+      const padX    = 6;
+      const padY    = 4;
+      const lastLine = lines[lines.length - 1] + hzSuffix;
+      const allLines = [...lines.slice(0, -1), lastLine];
+      const boxW    = Math.max(...allLines.map(l => ctx.measureText(l).width)) + padX * 2;
+      const boxH    = lines.length * lineH + padY * 2;
+      const boxX    = 4;
+      const boxY    = 4;
+
+      ctx.fillStyle   = 'rgba(0, 0, 0, 0.75)';
+      ctx.fillRect(boxX, boxY, boxW, boxH);
+      ctx.fillStyle   = '#ccc';
+      for (let li = 0; li < lines.length; li++) {
+        const y = boxY + padY + li * lineH;
+        ctx.fillText(lines[li], boxX + padX, y);
+        if (li === lines.length - 1 && hzSuffix) {
+          const mainW = ctx.measureText(lines[li]).width;
+          ctx.fillStyle = '#777';
+          ctx.fillText(hzSuffix, boxX + padX + mainW, y);
+          ctx.fillStyle = '#ccc';
+        }
+      }
+    }
   }
 
   private attachEvents(): void {
@@ -359,6 +451,29 @@ export class WaveformView {
       }
       this.draw();
     }, { passive: false });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (this.dragging || !this.prog || this.spp > 0.75) {
+        if (this.hoverBit !== null || this.hoverSample !== 0) {
+          this.hoverBit = null; this.hoverSample = 0; this.draw();
+        }
+        return;
+      }
+      const sample = Math.round(this.viewStart + e.offsetX * this.spp);
+      const bit = this.sampleToBit(sample);
+      if (bit !== this.hoverBit || (bit === null && sample !== this.hoverSample)) {
+        this.hoverBit = bit;
+        this.hoverSample = sample;
+        this.draw();
+      }
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      if (this.hoverBit !== null) {
+        this.hoverBit = null;
+        this.draw();
+      }
+    });
 
     canvas.style.cursor = 'grab';
   }

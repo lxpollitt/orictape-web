@@ -404,7 +404,7 @@ function renderAll(): void {
     const primTape    = tapes[primSrc.tapeIdx];
     const primProg    = primTape?.programs[primSrc.progIdx];
     if (primProg && primTape && !primTape.fromTap) {
-      waveform.setData(primTape.samples, primProg);
+      waveform.setData(primTape.samples, primProg, primTape.sampleRate);
     } else {
       waveform.clearData();
     }
@@ -420,7 +420,7 @@ function renderAll(): void {
   renderBasic(prog);
   const activeTape = tapes[activeTapeIdx];
   if (prog && activeTape && !activeTape.fromTap && leftSamples) {
-    waveform.setData(leftSamples, prog);
+    waveform.setData(leftSamples, prog, activeTape.sampleRate);
   } else {
     waveform.clearData();
   }
