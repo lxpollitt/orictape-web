@@ -20,6 +20,7 @@ export class WaveformView {
   private zoomFactor  = 1;   // persistent button zoom: 1 = 100%
   private selByte:    number | null = null;
   private normalise   = false;
+  private vZoom       = 1;     // vertical zoom multiplier (scroll-wheel controlled)
   private zoomLabel:  HTMLElement | null = null;
 
   private dragging        = false;
@@ -191,7 +192,7 @@ export class WaveformView {
     const amplitude = this.normalise
       ? Math.max(Math.abs(stream.minVal), Math.abs(stream.maxVal), 1)
       : 32768;
-    const scaleY  = (waveH * 0.45) / amplitude;
+    const scaleY  = (waveH * 0.45) / amplitude * this.vZoom;
     const spp     = this.spp;
     const vs      = this.viewStart;
 
@@ -343,12 +344,19 @@ export class WaveformView {
 
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
-      const factor = e.deltaY > 0 ? 1.3 : 1 / 1.3;
-      const anchor = this.viewStart + e.offsetX * this.spp;
-      this.spp       = Math.max(0.5, Math.min(20000, this.spp * factor));
-      this.viewStart = anchor - e.offsetX * this.spp;
-      this.clampView();
-      this.updateZoomDisplay();
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        // Vertical scroll → vertical zoom (amplitude).
+        const factor = e.deltaY > 0 ? 1.1 : 1 / 1.1;
+        this.vZoom = Math.max(0.1, Math.min(100, this.vZoom * factor));
+      } else {
+        // Horizontal scroll → horizontal zoom (time).
+        const factor = e.deltaX > 0 ? 1.1 : 1 / 1.1;
+        const anchor = this.viewStart + e.offsetX * this.spp;
+        this.spp       = Math.max(0.5, Math.min(20000, this.spp * factor));
+        this.viewStart = anchor - e.offsetX * this.spp;
+        this.clampView();
+        this.updateZoomDisplay();
+      }
       this.draw();
     }, { passive: false });
 
