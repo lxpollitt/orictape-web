@@ -184,11 +184,12 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const LONGEST_SEARCH_WINDOW  = Math.round(33 * sampleRate / 48000);   // 30 at 44100 Hz
   const TURNAROUND_PCT  = 10;  // % of peak-to-threshold distance to confirm signal has turned around from peak
 
-  // Gap and sync detection 
-  const GAP_MIN         = Math.round(54 * sampleRate / 48000);   // 50 at 44100 Hz
+  // Triggers for unreadable, noisefloor, sync, and abandonn 
+  const MIN_UREADBALE_CYCLE_LENGTH = Math.round(55 * sampleRate / 48000);  // Must be > LONG_MAX && < 2*LONGEST_SEARCH_WINDOW
   // TODO: replace with dynamic based on overall file signal level, and differentiate between unclear low signal level and genuine noise floor to map to gap
-  const NOISE_FLOOR            = 200; // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
-  const MIN_SYNC_BITS = 100; // min continuous cycles before accepting a sync run
+  const NOISE_FLOOR     = 200; // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
+  const MIN_SYNC_BITS   = 100; // min continuous cycles before accepting a sync run
+  const MAX_POOR_SIGNAL_CYCLES = 200; // max number of poor cycles to accept before terminating a post sync bitstream
 
   // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
   // (every cycle is the shortest possible). We'll slice to actual size at the end.
@@ -212,15 +213,12 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   let streamMinVal = 0, streamMaxVal = 0;
 
   // Cycle classification output (set by readCycle, consumed by pushBit).
-  type CycleKind = 'short' | 'medium' | 'long';
+  type CycleKind = 'short' | 'medium' | 'long' | 'unreadable';
   let cycleKind:    CycleKind = 'short';
   let cycleUnclear = false;
 
-  // readCycle quiet gap detection counter
-  let quietCycles = 0;
-
   /** Measure one waveform cycle and classify it as short, medium, or long.
-   *  Returns true if no usable signal is found (for section of ~cycle length). */
+   *  Returns false if bit is unreadbale / no useful signal found (for section of ~cycle length). */
   const readCycle = (): boolean => {
     // The previous readCyle already had to find this cycle's maxIndex to workout the crossover point
     maxIndex = nextMaxIndex;
@@ -262,7 +260,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     const maxSearchShortestEnd = Math.min(minIndex + SMALLEST_SEARCH_WINDOW, samples.length);
     const maxSearchLongestEnd  = Math.min(minIndex + LONGEST_SEARCH_WINDOW, samples.length);
     let minValSinceMax = 32767;
-    turnaroundThreshold = -32768;   // Recalculated each time minVal is updated
+    turnaroundThreshold = -32768;   // Recalculated each time maxVal is updated
     maxVal = minVal; 
     nextMaxIndex = maxSearchLongestEnd;   // Move forwad by search window length if don't find a minVal
     for (let i = minIndex + 1; i < maxSearchLongestEnd; i++) {
@@ -285,21 +283,13 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     lengthAbove = aboveIndex - belowIndex;
     length = lengthBelow + lengthAbove;
 
-    // TODO: Move thie logic to higher layer where it can make different decision during sync vs program if wants to
-    if (length > GAP_MIN || maxVal - minVal < NOISE_FLOOR) {
-      quietCycles++;
-    } else { 
-      quietCycles = 0;
-    }
-    if (quietCycles > 200) return true; // gap in tape signal
-
     // TODO: Simplify readCycle to returns every GAP, and have higher layer decide how many milliseconds of gaps it cares about
     // so it can make sync decision vs inside a program decision
     // Plus simplify this function as much as possible
     // Same for quiet cycle counting: move to higher level funcion
 
     // Tri-value cycle classification.
-    if (length <= SHORT_MAX || length > GAP_MIN) { // TODO: Remove hack: map gaps to 1 bits (otherwise terminates BASIC program)
+    if (length <= SHORT_MAX) {
       cycleKind = 'short';
     } else if (length < MEDIUM_MIN) {
       // Unclear zone between short and medium — use half-cycle asymmetry heuristic.
@@ -310,8 +300,10 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     } else if (length < LONG_MIN) {
       // Unclear zone between medium and long — classify as nearest.
       cycleKind = (length - MEDIUM_MAX) <= (LONG_MIN - length) ? 'medium' : 'long';
+    } else if (length < MIN_UREADBALE_CYCLE_LENGTH) {
+      cycleKind = 'long'; 
     } else {
-      cycleKind = 'long';  // includes confident long and long/gap unclear zone
+      cycleKind = 'unreadable';
     }
 
     // Unclear flag: set when the cycle falls outside confident bands or near noise floor.
@@ -321,7 +313,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
                 || (length > MEDIUM_MAX && length < LONG_MIN)    // medium/long boundary
                 || length > LONG_MAX;                            // long/gap boundary
 
-    return false;
+    return length < MIN_UREADBALE_CYCLE_LENGTH;
   };
 
   /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit).
@@ -348,7 +340,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     //   _bitUnclear[bitCount] = 1;
     //   bitCount++;
     // } else {
-      _bitV[bitCount] = cycleKind === 'short' ? 1 : 0;
+      _bitV[bitCount] = (cycleKind === 'short' || cycleKind === 'unreadable') ? 1 : 0;
       _bitL1[bitCount] = Math.min(lengthBelow, 65535);
       _bitL2[bitCount] = Math.min(lengthAbove, 65535);
       _bitFirstSample[bitCount] = aboveIndex - length;
@@ -438,7 +430,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     // The crossover midpoint between the two half-cycles.
     const midSample  = cycleFirst + lengthBelow;
 
-    if (cycleKind === 'short') {
+    if (cycleKind === 'short' || cycleKind == 'unreadable') {
       slowSampleFrom = cycleFirst;
       slowSampleTo   = cycleLast;
       slowShort();
@@ -498,21 +490,24 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     syncRunMaxVal = maxVal;
     syncRunThreshold = threshold;
     while (nextMaxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
-      if (readCycle()) break;
+      if (!readCycle()) break;
       if (maxVal - minVal < NOISE_FLOOR) break; // noise floor (silence, noise, or slow ramp)
       if (cycleKind === 'medium') mediumCycleCount++;
       else if (cycleKind === 'long') longCycleCount++;
       pushBitFast();
     }
   }
+  
 
   // Auto-detect format: fast format uses medium cycles (1600 Hz) for bit 0,
   // slow format uses long cycles (1200 Hz).  Compare relative counts so that
   // a few stretched fast-format cycles don't trigger a false slow detection.
   const format: 'fast' | 'slow' = longCycleCount > mediumCycleCount ? 'slow' : 'fast';
-
+  let pushBit = pushBitFast;
   if (format === 'slow') {
-    // Rewind to the start of the sync run and re-decode with slow-format
+    pushBit = pushBitSlow;
+
+    // Reset to the start of the sync run so we re-decode with slow-format
     // bit extraction.  Phase 1 consumed all cycles as fast-decoded bits
     // which are wrong for slow format.
     bitCount = 0;
@@ -526,18 +521,19 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     slow1s = 0;
     slow0s = 0;
     slowBitUnclear = false;
-    while (nextMaxIndex < samples.length) {
-      if (readCycle()) break;
-      pushBitSlow();
-    }
-  } else {
-    // Fast format: Phase 2 — continue reading until a length-based gap.
-    // Noise-floor drops mid-program produce garbled bits but don't split the stream.
-    while (nextMaxIndex < samples.length) {
-      if (readCycle()) break;
-      pushBitFast();
-    }
   }
+
+  let consecutivePoorCycles = 0;
+  while (nextMaxIndex < samples.length) {
+    if (readCycle() && (maxVal - minVal >= NOISE_FLOOR)) {
+      consecutivePoorCycles = 0;
+    } else {
+      consecutivePoorCycles++;
+      if (consecutivePoorCycles > MAX_POOR_SIGNAL_CYCLES) break;
+    }
+    pushBit();
+  }
+
 
   const samplesRead = aboveIndex - startSample;
 
