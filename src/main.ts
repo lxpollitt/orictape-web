@@ -607,7 +607,9 @@ function renderBasic(prog: Program): void {
 
     const elemsHtml = line.elements.map((el, ei) => {
       // Error class is always applied so errors are visible without selecting.
-      const errCls = el === '[UNKNOWN_KEYWORD]' ? 'elem-err' : elemErrorClass(prog, line.firstByte, ei);
+      const errCls = el === '[UNKNOWN_KEYWORD]' ? 'elem-err'
+        : (ei === 0 && line.nonMonotonic) ? 'elem-err'
+        : elemErrorClass(prog, line.firstByte, ei);
       const selCls = (i === selLine && ei === selElem) ? ' sel' : '';
       return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
     }).join('');
@@ -655,7 +657,9 @@ function renderBasicLineHtml(
     ...(extraClass ? [extraClass] : []),
   ].join(' ');
   const elems = line.elements.map((el, ei) => {
-    const errCls = el === '[UNKNOWN_KEYWORD]' ? 'elem-err' : elemErrorClass(prog, line.firstByte, ei);
+    const errCls = el === '[UNKNOWN_KEYWORD]' ? 'elem-err'
+      : (ei === 0 && line.nonMonotonic) ? 'elem-err'
+      : elemErrorClass(prog, line.firstByte, ei);
     const selCls = ei === selElem ? ' sel' : '';
     return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
   }).join('');
