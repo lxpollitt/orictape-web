@@ -369,9 +369,10 @@ function renderTabs(): void {
       btn.dataset.mi = String(mi);
 
       const merged = merge.result;
+      const issueBadgeClass = merged.issuesError > 0 ? 'badge-err' : 'badge-warn';
       let badge = '';
       if (merged.issues > 0)
-        badge += ` <span class="badge badge-err">${merged.issues} issue${merged.issues !== 1 ? 's' : ''}</span>`;
+        badge += ` <span class="badge ${issueBadgeClass}">${merged.issues} issue${merged.issues !== 1 ? 's' : ''}</span>`;
       if (merged.recovered > 0)
         badge += ` <span class="badge badge-ok">${merged.recovered} recovered</span>`;
       if (merged.unverified > 0 && merged.issues === 0)
@@ -1974,13 +1975,26 @@ function updateMergedStatusBar(): void {
     const QUALITY_LABEL: Record<string, string> = {
       clean:      `<span style="color:var(--green)">Clean</span>`,
       recovered:  `<span style="color:var(--green)">Recovered · clean source chosen over corrupt</span>`,
-      issue:      line.status === 'consensus'
-                    ? `<span class="sb-err">Issue · sources agree but contain errors</span>`
-                    : line.status === 'single'
-                      ? `<span class="sb-err">Issue · only source contains errors</span>`
-                      : line.status === 'partial'
-                        ? `<span class="sb-err">Issue · source contains errors, absent from other tape</span>`
-                        : `<span class="sb-err">Issue · sources conflict</span>`,
+      issue:      (() => {
+                    const progs = mergeProgs();
+                    const src = bestSource(line, progs);
+                    const prog = progs[src.tapeIdx];
+                    const hasHardErr = prog && (() => {
+                      const li = prog.lines[src.lineIdx];
+                      if (li.lenErr || li.earlyEnd || li.unknownKeyword || li.nonMonotonic) return true;
+                      for (let b = li.firstByte; b <= li.lastByte; b++) { if (prog.bytes[b]?.chkErr) return true; }
+                      return false;
+                    })();
+                    const cls = hasHardErr ? 'sb-err' : 'sb-warn';
+                    const errWord = hasHardErr ? 'errors' : 'unclear';
+                    return line.status === 'consensus'
+                      ? `<span class="${cls}">Issue · sources agree but ${errWord}</span>`
+                      : line.status === 'single'
+                        ? `<span class="${cls}">Issue · only source is ${errWord}</span>`
+                        : line.status === 'partial'
+                          ? `<span class="${cls}">Issue · source is ${errWord}, absent from other tape</span>`
+                          : `<span class="${cls}">Issue · sources conflict</span>`;
+                  })(),
       unverified: line.status === 'single'
                     ? `<span class="sb-warn">Unverified · single source (tape ${(um!.sources[line.sources[0]?.tapeIdx ?? 0]?.tapeIdx ?? 0) + 1})</span>`
                     : `<span class="sb-warn">Unverified · ${line.sources.length}/${merged.tapeCount} tapes</span>`,

@@ -66,11 +66,13 @@ export interface MergedProgram {
   tapeCount:  number;
   lines:      AlignedLine[];
   // Summary counts for badges / status bar (based on LineQuality)
-  total:      number;
-  clean:      number;   // all sources agree and all are byte-perfect
-  issues:     number;   // uncertain output — needs human attention
-  recovered:  number;   // conflicts resolved by preferring a clean source
-  unverified: number;   // single-source or partial lines
+  total:        number;
+  clean:        number;   // all sources agree and all are byte-perfect
+  issues:       number;   // uncertain output — needs human attention
+  issuesError:  number;   // subset of issues with hard errors (chkErr, lenErr, etc.)
+  issuesUnclear:number;   // subset of issues with only unclear bytes (no hard errors)
+  recovered:    number;   // conflicts resolved by preferring a clean source
+  unverified:   number;   // single-source or partial lines
 }
 
 // ── Primary algorithm: line-level alignment ───────────────────────────────────
@@ -243,11 +245,21 @@ export function alignPrograms(
 
   const active     = lines.filter(l => !l.rejected);
   const clean      = active.filter(l => l.quality === 'clean').length;
-  const issues     = active.filter(l => l.quality === 'issue').length;
+  const issueLines = active.filter(l => l.quality === 'issue');
+  const issues     = issueLines.length;
   const recovered  = active.filter(l => l.quality === 'recovered').length;
   const unverified = active.filter(l => l.quality === 'unverified').length;
 
-  return { tapeCount, lines, total: active.length, clean, issues, recovered, unverified };
+  // Classify issue lines: hard errors vs unclear-only.
+  let issuesError = 0;
+  for (const line of issueLines) {
+    const src  = bestSource(line, programs);
+    const prog = programs[src.tapeIdx];
+    if (prog && lineHasHardError(prog, src.lineIdx)) issuesError++;
+  }
+  const issuesUnclear = issues - issuesError;
+
+  return { tapeCount, lines, total: active.length, clean, issues, issuesError, issuesUnclear, recovered, unverified };
 }
 
 /**
@@ -287,6 +299,19 @@ export function mergeLineBytes(
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Returns true if the line has hard errors (chkErr bytes, structural errors).
+ * Unclear-only lines return false.
+ */
+function lineHasHardError(prog: Program, lineIdx: number): boolean {
+  const line = prog.lines[lineIdx];
+  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic) return true;
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    if (prog.bytes[i]?.chkErr) return true;
+  }
+  return false;
+}
 
 /**
  * Returns true only if every byte in the line is free of checksum errors,
