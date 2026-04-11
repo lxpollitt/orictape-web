@@ -758,6 +758,8 @@ if (hasRegressions) {
   console.log(c.yellow('Result: CHANGES DETECTED (no regressions)'));
 } else if (totalDiffs > 0) {
   console.log(c.green('Result: NO REGRESSIONS (similar and/or improvements only)'));
+} else if (structuralOnlyPairs > 0) {
+  console.log(c.green('Result: ALL PROGRAMS IDENTICAL'));
 } else {
   console.log(c.green('Result: ALL IDENTICAL'));
 }
