@@ -5,6 +5,15 @@ const YELLOW = '#c9a428';
 const RED    = '#c94040';
 const DIM    = '#444444';
 
+export interface StreamInfo {
+  progIdx:     number;
+  name:        string;
+  lineCount:   number;
+  byteCount:   number;
+  firstSample: number;
+  lastSample:  number;
+}
+
 export class WaveformView {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
@@ -12,6 +21,7 @@ export class WaveformView {
   private samples:    Int16Array | null = null;
   private prog:       Program | null    = null;
   private sampleRate  = 48000;
+  private allStreams:  StreamInfo[] = [];
   private bitIsError:    Uint8Array | null = null; // per-bit: 1 if part of a chkErr byte (waveform colouring)
   private bitIsParityErr: Uint8Array | null = null; // per-bit: 1 only for the parity bit of a chkErr byte (label colouring)
 
@@ -31,7 +41,10 @@ export class WaveformView {
   private dragView        = 0;
   private dragMoved       = false;
   private suppressRecentre = false;
+  private clickedStream: StreamInfo | null = null;  // stream highlighted by clicking outside current program
+  private clickedSample: number = 0;                // sample position of the click (for unmatched regions)
   private onByteClick: ((byteIndex: number) => void) | null = null;
+  private onStreamSelect: ((progIdx: number) => void) | null = null;
 
   /** True when a TAP file is active — shows "No waveform" label. */
   private noWaveform = false;
@@ -56,12 +69,14 @@ export class WaveformView {
     this.draw();
   }
 
-  setData(samples: Int16Array, prog: Program, sampleRate = 48000): void {
-    this.samples     = samples;
-    this.prog        = prog;
-    this.sampleRate  = sampleRate;
-    this.selByte     = null;
-    this.noWaveform  = false;
+  setData(samples: Int16Array, prog: Program, sampleRate = 48000, allStreams: StreamInfo[] = []): void {
+    this.samples      = samples;
+    this.prog         = prog;
+    this.sampleRate   = sampleRate;
+    this.allStreams    = allStreams;
+    this.selByte      = null;
+    this.clickedStream = null;
+    this.noWaveform   = false;
 
     // Pre-compute per-bit flags from byte checksum errors.
     const { bitCount } = prog.stream;
@@ -98,11 +113,19 @@ export class WaveformView {
     this.onByteClick = cb;
   }
 
+  setStreamSelectHandler(cb: (progIdx: number) => void): void {
+    this.onStreamSelect = cb;
+  }
+
   /** Binary-search for the byte whose sample range contains `sample`.
-   *  Falls back to the nearest byte when the click lands in a gap. */
+   *  Falls back to the nearest byte when the click lands in a small gap
+   *  between bytes within the program.  Returns null if the sample is
+   *  outside the program's stream range entirely. */
   private sampleToByte(sample: number): number | null {
     if (!this.prog || this.prog.bytes.length === 0) return null;
     const { bytes, stream } = this.prog;
+    // Reject clicks outside the program's stream range.
+    if (sample < stream.firstSample || sample > stream.lastSample) return null;
     let lo = 0, hi = bytes.length - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
@@ -114,7 +137,7 @@ export class WaveformView {
       else if (sample > bLast)  lo = mid + 1;
       else return mid;
     }
-    // Click landed in a gap — return nearest byte.
+    // Click landed in a gap between bytes within the program — return nearest byte.
     return Math.min(lo, bytes.length - 1);
   }
 
@@ -133,10 +156,55 @@ export class WaveformView {
     return null;  // sample falls in a gap between bits
   }
 
+  /** Find which stream (if any) contains the given sample position. */
+  private sampleToStream(sample: number): StreamInfo | null {
+    for (const s of this.allStreams) {
+      if (sample >= s.firstSample && sample <= s.lastSample) return s;
+    }
+    return null;
+  }
+
   private updateZoomDisplay(): void {
     if (this.zoomLabel) {
       this.zoomLabel.textContent = Math.round(this.baseSpp / this.spp * 100) + '%';
     }
+  }
+
+  /** Save current view position for restoring after a program switch. */
+  saveView(): { viewStart: number; spp: number } {
+    return { viewStart: this.viewStart, spp: this.spp };
+  }
+
+  /** Restore a previously saved view position. */
+  restoreView(v: { viewStart: number; spp: number }): void {
+    this.spp = v.spp;
+    this.viewStart = v.viewStart;
+    this.clampView();
+    this.updateZoomDisplay();
+    this.draw();
+  }
+
+  /** Check if the current view is at the program overview (program fills the canvas). */
+  isAtOverview(): boolean {
+    if (!this.prog) return true;
+    const len = this.prog.stream.lastSample - this.prog.stream.firstSample;
+    const overviewSpp = Math.max(1, len / this.canvas.width);
+    // Allow small tolerance for floating-point comparison.
+    return Math.abs(this.spp - overviewSpp) < 0.01
+        && Math.abs(this.viewStart - this.prog.stream.firstSample) < this.spp * 2;
+  }
+
+  /** Reset view to show the full program (overview). */
+  fitToProgram(): void {
+    if (!this.prog) return;
+    const len = this.prog.stream.lastSample - this.prog.stream.firstSample;
+    this.baseSpp    = Math.max(1, len / this.canvas.width);
+    this.spp        = this.baseSpp;
+    this.zoomFactor = 1;
+    this.viewStart  = this.prog.stream.firstSample;
+    this.clampView();
+    this.updateZoomDisplay();
+    this.draw();
   }
 
   /** Reset zoom levels to defaults (called on file load). */
@@ -186,6 +254,7 @@ export class WaveformView {
 
   selectByte(byteIndex: number | null): void {
     this.selByte = byteIndex;
+    this.clickedStream = null;
     const recentre = !this.suppressRecentre;
     this.suppressRecentre = false;
     if (recentre && byteIndex !== null && this.prog) {
@@ -231,8 +300,17 @@ export class WaveformView {
     const vs      = this.viewStart;
 
     // Background
-    ctx.fillStyle = '#1a1a1a';
+    ctx.fillStyle = '#181818';
     ctx.fillRect(0, 0, w, h);
+
+    // Shade matched program stream ranges slightly lighter than the background
+    // so unmatched signal areas are visually distinct.
+    ctx.fillStyle = '#1a1a1a';
+    for (const si of this.allStreams) {
+      const x0 = (si.firstSample - vs) / spp;
+      const x1 = (si.lastSample  - vs) / spp;
+      if (x1 > 0 && x0 < w) ctx.fillRect(x0, 0, x1 - x0, h);
+    }
 
     // Centre line
     ctx.strokeStyle = '#2a2a2a';
@@ -251,6 +329,15 @@ export class WaveformView {
         ctx.fillStyle = '#1e3a1e';
         ctx.fillRect(x0, 0, x1 - x0, h);
       }
+    }
+
+    // Clicked-stream highlight (subtle brighter grey for the stream's sample range)
+    if (this.clickedStream) {
+      const cs = this.clickedStream;
+      const x0 = (cs.firstSample - vs) / spp;
+      const x1 = (cs.lastSample  - vs) / spp;
+      ctx.fillStyle = '#2a2a2a';
+      ctx.fillRect(x0, 0, x1 - x0, h);
     }
 
     // Advance bit pointer to the first bit that could be visible.
@@ -469,6 +556,68 @@ export class WaveformView {
         }
       }
     }
+
+    // ── Clicked stream info popup ────────────────────────────────────────────
+    if (this.clickedStream && this.hoverBit === null) {
+      const cs = this.clickedStream;
+      const fmt = (n: number) => n.toLocaleString();
+      const lines: string[] = [];
+      lines.push(cs.name
+        ? `Program ${cs.progIdx + 1}: ${cs.name}`
+        : `Program ${cs.progIdx + 1}`);
+      lines.push(`${fmt(cs.byteCount)} bytes · ${fmt(cs.lineCount)} lines`);
+      const startSec = (cs.firstSample / this.sampleRate).toFixed(1);
+      const endSec   = (cs.lastSample / this.sampleRate).toFixed(1);
+      lines.push(`${startSec}s - ${endSec}s`);
+      const hintLine = '(click again to select)';
+
+      ctx.font         = '11px ui-monospace, Cascadia Code, Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      const lineH = 14;
+      const padX  = 6;
+      const padY  = 4;
+      const allLines = [...lines, hintLine];
+      const boxW  = Math.max(...allLines.map(l => ctx.measureText(l).width)) + padX * 2;
+      const boxH  = allLines.length * lineH + padY * 2;
+      const boxX  = 4;
+      const boxY  = 4;
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+      ctx.fillRect(boxX, boxY, boxW, boxH);
+      ctx.fillStyle = '#ccc';
+      for (let li = 0; li < lines.length; li++) {
+        ctx.fillText(lines[li], boxX + padX, boxY + padY + li * lineH);
+      }
+      ctx.fillStyle = '#666';
+      ctx.fillText(hintLine, boxX + padX, boxY + padY + lines.length * lineH);
+    } else if (this.clickedSample > 0 && !this.clickedStream && this.hoverBit === null && this.selByte === null) {
+      // Clicked on a region not mapped to any program.
+      const fmt = (n: number) => n.toLocaleString();
+      const timeSec = (this.clickedSample / this.sampleRate).toFixed(3);
+      const lines = [
+        'Unmatched signal',
+        `@${timeSec}s (sample ${fmt(this.clickedSample)})`,
+      ];
+
+      ctx.font         = '11px ui-monospace, Cascadia Code, Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      const lineH = 14;
+      const padX  = 6;
+      const padY  = 4;
+      const boxW  = Math.max(...lines.map(l => ctx.measureText(l).width)) + padX * 2;
+      const boxH  = lines.length * lineH + padY * 2;
+      const boxX  = 4;
+      const boxY  = 4;
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+      ctx.fillRect(boxX, boxY, boxW, boxH);
+      ctx.fillStyle = '#777';
+      for (let li = 0; li < lines.length; li++) {
+        ctx.fillText(lines[li], boxX + padX, boxY + padY + li * lineH);
+      }
+    }
   }
 
   private attachEvents(): void {
@@ -494,14 +643,50 @@ export class WaveformView {
       if (!this.dragging) return;
       this.dragging = false;
       canvas.style.cursor = 'grab';
-      if (!this.dragMoved && this.onByteClick) {
+      if (!this.dragMoved) {
         const rect   = canvas.getBoundingClientRect();
         const x      = this.dragX - rect.left;
         const sample = this.viewStart + x * this.spp;
         const idx    = this.sampleToByte(sample);
-        if (idx !== null) {
-          if (this.selByte !== null) this.suppressRecentre = true;
-          this.onByteClick(idx);
+        if (idx !== null && this.onByteClick) {
+          // Click within current program.
+          this.clickedStream = null;
+          if (!this.isAtOverview()) {
+            // Zoomed out or scrolled — fit to program first.
+            this.fitToProgram();
+          } else {
+            // At overview — select the byte (zoom to bit detail).
+            if (this.selByte !== null) this.suppressRecentre = true;
+            this.onByteClick(idx);
+          }
+        } else {
+          // Click outside current program.
+          const stream = this.sampleToStream(sample);
+          if (stream && this.clickedStream === stream && this.onStreamSelect) {
+            // Second click on the same already-highlighted stream — navigate to it.
+            this.onStreamSelect(stream.progIdx);
+            this.clickedStream = null;
+          } else {
+            // First click — highlight the stream and show info.
+            this.clickedStream = stream;
+            this.clickedSample = sample;
+          }
+          this.draw();
+        }
+      }
+    });
+
+    canvas.addEventListener('dblclick', (e) => {
+      const rect   = canvas.getBoundingClientRect();
+      const x      = e.clientX - rect.left;
+      const sample = this.viewStart + x * this.spp;
+      const idx    = this.sampleToByte(sample);
+      if (idx === null) {
+        // Double-click outside current program — navigate directly.
+        const stream = this.sampleToStream(sample);
+        if (stream && this.onStreamSelect) {
+          this.clickedStream = null;
+          this.onStreamSelect(stream.progIdx);
         }
       }
     });
@@ -515,7 +700,7 @@ export class WaveformView {
         const factor = e.deltaY > 0 ? 1 / 1.1 : 1.1;
         const vFactor = e.deltaY > 0 ? 1 / 1.033 : 1.033;  // ~1/3 of horizontal rate
         // Vertical zoom.
-        this.vZoom = Math.max(0.1, Math.min(100, this.vZoom * vFactor));
+        this.vZoom = Math.max(1, Math.min(100, this.vZoom * vFactor));
         this.onNormaliseChange?.(false);
         // Horizontal zoom, anchored on cursor position.
         const anchor = this.viewStart + e.offsetX * this.spp;
@@ -526,7 +711,7 @@ export class WaveformView {
       } else if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
         // Vertical scroll → vertical zoom (amplitude).
         const factor = e.deltaY > 0 ? 1.1 : 1 / 1.1;
-        this.vZoom = Math.max(0.1, Math.min(100, this.vZoom * factor));
+        this.vZoom = Math.max(1, Math.min(100, this.vZoom * factor));
         this.onNormaliseChange?.(false);
       } else {
         // Horizontal scroll → horizontal pan.

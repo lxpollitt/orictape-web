@@ -1,6 +1,6 @@
 import './style.css';
 import { parseWavFile } from './wavfile';
-import { WaveformView } from './waveform';
+import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
@@ -104,6 +104,15 @@ const waveform = new WaveformView(waveCanvas);
 waveform.setZoomLabel(document.getElementById('zoom-level') as HTMLElement);
 waveform.setByteClickHandler((i) => {
   if (viewMode === 'tape' && programs[activeProgIdx]) selectByte(i);
+});
+waveform.setStreamSelectHandler((progIdx) => {
+  if (viewMode === 'tape') {
+    const savedView = waveform.saveView();
+    activateTape(activeTapeIdx, progIdx);
+    selByte = null;
+    renderAll();
+    waveform.restoreView(savedView);
+  }
 });
 
 // Apply initial wrap state and keep in sync with the checkbox.
@@ -391,6 +400,17 @@ function renderTabs(): void {
 }
 
 // ── Per-tape rendering (unchanged logic) ──────────────────────────────────────
+function buildStreamInfos(tape: typeof tapes[0]): StreamInfo[] {
+  return tape.programs.map((prog, i) => ({
+    progIdx:     i,
+    name:        prog.name,
+    lineCount:   prog.lines.length,
+    byteCount:   prog.bytes.length,
+    firstSample: prog.stream.firstSample,
+    lastSample:  prog.stream.lastSample,
+  }));
+}
+
 function renderAll(): void {
   renderTabs();
   basicPanel.classList.toggle('merge-active', viewMode === 'merged');
@@ -410,7 +430,7 @@ function renderAll(): void {
     const primTape    = tapes[primSrc.tapeIdx];
     const primProg    = primTape?.programs[primSrc.progIdx];
     if (primProg && primTape && !primTape.fromTap) {
-      waveform.setData(primTape.samples, primProg, primTape.sampleRate);
+      waveform.setData(primTape.samples, primProg, primTape.sampleRate, buildStreamInfos(primTape));
     } else {
       waveform.clearData();
     }
@@ -426,7 +446,7 @@ function renderAll(): void {
   renderBasic(prog);
   const activeTape = tapes[activeTapeIdx];
   if (prog && activeTape && !activeTape.fromTap && leftSamples) {
-    waveform.setData(leftSamples, prog, activeTape.sampleRate);
+    waveform.setData(leftSamples, prog, activeTape.sampleRate, buildStreamInfos(activeTape));
   } else {
     waveform.clearData();
   }
