@@ -10,7 +10,6 @@
 export interface BitInfo {
   v: 0 | 1;
   l1: number;
-  l2: number;
   firstSample: number;
   lastSample: number;
   unclear: boolean;
@@ -56,8 +55,7 @@ export interface BitStream {
   format: 'fast' | 'slow';
   bitCount: number;
   bitV: Uint8Array;            // bit value: 0 or 1
-  bitL1: Uint16Array;          // first half-cycle length (samples)
-  bitL2: Uint16Array;          // second half-cycle length (samples)
+  bitL1: Uint16Array;          // first half-cycle length (samples; L2 = bitLength - L1)
   bitFirstSample: Uint32Array;
   bitLastSample: Uint32Array;
   bitUnclear: Uint8Array;      // 0 = clean, 1 = unclear
@@ -76,7 +74,6 @@ export function streamBitAt(s: BitStream, i: number): BitInfo {
   return {
     v: s.bitV[i] as 0 | 1,
     l1: s.bitL1[i],
-    l2: s.bitL2[i],
     firstSample: s.bitFirstSample[i],
     lastSample: s.bitLastSample[i],
     unclear: s.bitUnclear[i] === 1,
@@ -205,7 +202,6 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const maxBits = Math.ceil((samples.length - startSample) / SHORT_MAX) + 1;
   const _bitV            = new Uint8Array(maxBits);
   const _bitL1           = new Uint16Array(maxBits);
-  const _bitL2           = new Uint16Array(maxBits);
   const _bitFirstSample  = new Uint32Array(maxBits);
   const _bitLastSample   = new Uint32Array(maxBits);
   const _bitUnclear      = new Uint8Array(maxBits);
@@ -325,40 +321,16 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     return length < MIN_UREADABLE_CYCLE_LENGTH;
   };
 
-  /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit).
-   *  Long cycles don't belong in fast format — they're likely two short cycles
-   *  (bit 1) that merged due to a weak signal.  Emit two unclear bit-1s, split
-   *  at the crossover midpoint. */
+  /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit). */
   const pushBitFast = (): void => {
-    // if (cycleKind === 'long') {
-    //   // Split into two unclear bit-1s at the crossover midpoint.
-    //   const cycleFirst = aboveIndex - length;
-    //   const midSample  = cycleFirst + lengthBelow;
-    //   _bitV[bitCount] = 1;
-    //   _bitL1[bitCount] = Math.min(lengthBelow, 65535);
-    //   _bitL2[bitCount] = 0;
-    //   _bitFirstSample[bitCount] = cycleFirst;
-    //   _bitLastSample[bitCount]  = midSample - 1;
-    //   _bitUnclear[bitCount] = 1;
-    //   bitCount++;
-    //   _bitV[bitCount] = 1;
-    //   _bitL1[bitCount] = 0;
-    //   _bitL2[bitCount] = Math.min(lengthAbove, 65535);
-    //   _bitFirstSample[bitCount] = midSample;
-    //   _bitLastSample[bitCount]  = aboveIndex - 1;
-    //   _bitUnclear[bitCount] = 1;
-    //   bitCount++;
-    // } else {
-      _bitV[bitCount] = (cycleKind === 'short' || cycleKind === 'unreadable') ? 1 : 0;
-      _bitL1[bitCount] = Math.min(lengthBelow, 65535);
-      _bitL2[bitCount] = Math.min(lengthAbove, 65535);
-      _bitFirstSample[bitCount] = aboveIndex - length;
-      _bitLastSample[bitCount]  = aboveIndex - 1;
-      _bitUnclear[bitCount] = cycleUnclear ? 1 : 0;
-      _bitMaxIndex[bitCount] = maxIndex;
-      _bitMinIndex[bitCount] = minIndex;
-      bitCount++;
-    // }
+    _bitV[bitCount] = (cycleKind === 'short' || cycleKind === 'unreadable') ? 1 : 0;
+    _bitL1[bitCount] = Math.min(lengthBelow, 65535);
+    _bitFirstSample[bitCount] = aboveIndex - length;
+    _bitLastSample[bitCount]  = aboveIndex - 1;
+    _bitUnclear[bitCount] = cycleUnclear ? 1 : 0;
+    _bitMaxIndex[bitCount] = maxIndex;
+    _bitMinIndex[bitCount] = minIndex;
+    bitCount++;
   };
 
   // ── Slow format bit extraction (Oricutron-style) ───────────────────────────
@@ -393,7 +365,6 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     if (slow1s === 2) {
       _bitV[bitCount] = 1;
       _bitL1[bitCount] = 0;
-      _bitL2[bitCount] = 0;
       _bitFirstSample[bitCount] = slowBitFirstSample;
       _bitLastSample[bitCount]  = slowSampleTo;
       _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
@@ -420,7 +391,6 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     if (slow0s === 2) {
       _bitV[bitCount] = 0;
       _bitL1[bitCount] = 0;
-      _bitL2[bitCount] = 0;
       _bitFirstSample[bitCount] = slowBitFirstSample;
       _bitLastSample[bitCount]  = slowSampleTo;
       _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
@@ -553,7 +523,6 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     bitCount,
     bitV:           _bitV.slice(0, bitCount),
     bitL1:          _bitL1.slice(0, bitCount),
-    bitL2:          _bitL2.slice(0, bitCount),
     bitFirstSample: _bitFirstSample.slice(0, bitCount),
     bitLastSample:  _bitLastSample.slice(0, bitCount),
     bitUnclear:     _bitUnclear.slice(0, bitCount),

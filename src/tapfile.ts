@@ -10,7 +10,6 @@ function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
     bitCount:       0,
     bitV:           new Uint8Array(0),
     bitL1:          new Uint16Array(0),
-    bitL2:          new Uint16Array(0),
     bitFirstSample: new Uint32Array(0),
     bitLastSample:  new Uint32Array(0),
     bitUnclear:     new Uint8Array(0),

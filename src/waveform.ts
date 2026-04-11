@@ -380,7 +380,7 @@ export class WaveformView {
         const last  = stream.bitLastSample[bi];
         const len   = last - first + 1;
         const l1    = stream.bitL1[bi];
-        const l2    = stream.bitL2[bi];
+        const l2    = len - l1;
         const hz = Math.round(this.sampleRate / len);
         const maxIdx = stream.bitMaxIndex[bi];
         const minIdx = stream.bitMinIndex[bi];
