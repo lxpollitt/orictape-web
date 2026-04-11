@@ -233,6 +233,7 @@ export class WaveformView {
   zoomOut():   void { this.zoomFactor = Math.max(0.1875, this.zoomFactor / 2); this.applyZoom(); }
   zoomReset(): void { this.zoomFactor = 1; this.applyZoom(); }
   zoomTo(factor: number): void { this.zoomFactor = factor; this.applyZoom(); }
+  getZoomFactor(): number { return this.zoomFactor; }
 
   private applyZoom(): void {
     if (this.selByte !== null) {

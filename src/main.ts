@@ -1197,15 +1197,23 @@ hexPanel.addEventListener('click', (e) => {
   if (viewMode !== 'tape') return;
   focusedPanel = 'hex';
   const el = (e.target as Element).closest<HTMLElement>('[data-i]');
-  if (el) selectByte(+el.dataset.i!);
+  if (!el) return;
+  const byteIdx = +el.dataset.i!;
+  if (byteIdx === selByte) {
+    // Already selected — toggle between 100% and 400% byte-level zoom.
+    waveform.zoomTo(waveform.getZoomFactor() >= 4 ? 1 : 4);
+  } else {
+    selectByte(byteIdx);
+  }
 });
 hexPanel.addEventListener('dblclick', (e) => {
   if (viewMode !== 'tape') return;
   const el = (e.target as Element).closest<HTMLElement>('[data-i]');
-  if (el) {
-    selectByte(+el.dataset.i!);
-    waveform.zoomTo(4);  // 400% horizontal zoom
-  }
+  if (!el) return;
+  const byteIdx = +el.dataset.i!;
+  if (byteIdx !== selByte) selectByte(byteIdx);
+  // Double-click always zooms to 400%.
+  waveform.zoomTo(4);
 });
 
 // Prevent Safari's swipe-back/forward navigation gesture from firing when the
