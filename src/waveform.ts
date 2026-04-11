@@ -373,6 +373,7 @@ export class WaveformView {
       const fmt = (n: number) => n.toLocaleString();
       let lines: string[];
       let hzSuffix = '';
+      let timeSuffix = '';
 
       if (this.hoverBit !== null) {
         const bi = this.hoverBit;
@@ -382,15 +383,14 @@ export class WaveformView {
         const l1    = stream.bitL1[bi];
         const l2    = len - l1;
         const hz = Math.round(this.sampleRate / len);
-        const maxIdx = stream.bitMaxIndex[bi];
-        const minIdx = stream.bitMinIndex[bi];
+        const timeSec = (first / this.sampleRate).toFixed(3);
         lines = [
           `Bit ${fmt(bi)}`,
           `Samples ${fmt(first)} - ${fmt(last)}`,
           `Length ${len} (${l1}+${l2})`,
-          `Max @${fmt(maxIdx)}  Min @${fmt(minIdx)}`,
         ];
         hzSuffix = `  ~${fmt(hz)}Hz`;
+        timeSuffix = `${timeSec}s`;
       } else {
         // Hovering over a gap between bits — find bounds from adjacent bits.
         const sample = this.hoverSample;
@@ -408,12 +408,14 @@ export class WaveformView {
         }
         const gapLen = nextStart - prevEnd;
         const hz = gapLen > 0 ? Math.round(this.sampleRate / gapLen) : 0;
+        const timeSec = (prevEnd / this.sampleRate).toFixed(3);
         lines = [
           `Gap`,
           `Samples ${fmt(prevEnd)} - ${fmt(nextStart - 1)}`,
           `Length ${gapLen}`,
         ];
         hzSuffix = hz > 0 ? `  ~${fmt(hz)}Hz` : '';
+        timeSuffix = `${timeSec}s`;
       }
 
       ctx.font         = '11px ui-monospace, Cascadia Code, Consolas, monospace';
@@ -422,9 +424,11 @@ export class WaveformView {
       const lineH   = 14;
       const padX    = 6;
       const padY    = 4;
+      const timeSuffixGap = timeSuffix ? '    ' : '';  // gap between first line text and timestamp
+      const firstLineFullW = ctx.measureText(lines[0]).width + ctx.measureText(timeSuffixGap + timeSuffix).width;
       const lastLine = lines[lines.length - 1] + hzSuffix;
-      const allLines = [...lines.slice(0, -1), lastLine];
-      const boxW    = Math.max(...allLines.map(l => ctx.measureText(l).width)) + padX * 2;
+      const allLineWidths = [firstLineFullW, ...lines.slice(1, -1).map(l => ctx.measureText(l).width), ctx.measureText(lastLine).width];
+      const boxW    = Math.max(...allLineWidths) + padX * 2;
       const boxH    = lines.length * lineH + padY * 2;
       const boxX    = 4;
       const boxY    = 4;
@@ -435,6 +439,13 @@ export class WaveformView {
       for (let li = 0; li < lines.length; li++) {
         const y = boxY + padY + li * lineH;
         ctx.fillText(lines[li], boxX + padX, y);
+        if (li === 0 && timeSuffix) {
+          ctx.fillStyle = '#777';
+          ctx.textAlign = 'right';
+          ctx.fillText(timeSuffix, boxX + boxW - padX, y);
+          ctx.textAlign = 'left';
+          ctx.fillStyle = '#ccc';
+        }
         if (li === lines.length - 1 && hzSuffix) {
           const mainW = ctx.measureText(lines[li]).width;
           ctx.fillStyle = '#777';
