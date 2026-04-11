@@ -158,21 +158,21 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   // Cycle classification thresholds, all scaled with sample rate.
   //
   // At 48000 Hz the three expected full-cycle lengths are:
-  //   short  (2400 Hz) ≈ 18 samples  - bit 1 in both fast and slow format
-  //   medium (1600 Hz) ≈ 28 samples  - bit 0 in fast format only
-  //   long   (1200 Hz) ≈ 37 samples  - bit 0 (×4) in slow format only
+  //   short  (2400 Hz) ≈ 20 samples  - bit 1 in both fast and slow format
+  //   medium (1600 Hz) ≈ 30 samples  - bit 0 in fast format only
+  //   long   (1200 Hz) ≈ 40 samples  - bit 0 (×4) in slow format only
   //
   // Scaled to 44100 Hz (our scaling will round to nearest integer):
   //   short  (2400 Hz) ≈ 18 (18.3750) samples  - bit 1 in both fast and slow format
   //   medium (1600 Hz) ≈ 28 (27.5625) samples  - bit 0 in fast format only
   //   long   (1200 Hz) ≈ 37 (36.7500) samples  - bit 0 (×4) in slow format only
   //
-  const SHORT_MIN     = Math.round(16 * sampleRate / 48000);  // 15 at 44100 Hz
+  const SHORT_MIN     = Math.round(18 * sampleRate / 48000);  // 15 at 44100 Hz
   const SHORT_MAX     = Math.round(22 * sampleRate / 48000);  // 20 at 44100 Hz
   const MEDIUM_MIN    = Math.round(26 * sampleRate / 48000);  // 24 at 44100 Hz
   const MEDIUM_MAX    = Math.round(34 * sampleRate / 48000);  // 31 at 44100 Hz
   const LONG_MIN      = Math.round(38 * sampleRate / 48000);  // 35 at 44100 Hz
-  const LONG_MAX      = Math.round(46 * sampleRate / 48000);  // 42 at 44100 Hz
+  const LONG_MAX      = Math.round(44 * sampleRate / 48000);  // 42 at 44100 Hz
   
   // Search window sizes for searching from current peak to next (opposite polarity) peak
   //
