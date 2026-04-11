@@ -550,7 +550,7 @@ export function readPrograms(streams: BitStream[]): Program[] {
   return programs;
 }
 
-function readProgramBytes(stream: BitStream): Program {
+export function readProgramBytes(stream: BitStream, skipSync = false): Program {
   const prog: Program = { stream, bytes: [], lines: [], name: '', header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false } };
   let currentBit = 0;
   let byteUnclear = false;
@@ -563,12 +563,14 @@ function readProgramBytes(stream: BitStream): Program {
     return { bt: 0, ok: false };
   };
 
-  // Scan for sync byte 0x16, assembled LSB-first from the raw bit stream.
   let by = 0;
-  while (by !== 0x16) {
-    const { bt, ok } = getBit();
-    if (!ok) return prog;
-    by = ((by >>> 1) | (bt << 7)) & 0xFF;
+  if (!skipSync) {
+    // Scan for sync byte 0x16, assembled LSB-first from the raw bit stream.
+    while (by !== 0x16) {
+      const { bt, ok } = getBit();
+      if (!ok) return prog;
+      by = ((by >>> 1) | (bt << 7)) & 0xFF;
+    }
   }
 
   // Read bytes until the bit stream is exhausted.
@@ -610,7 +612,7 @@ function readProgramBytes(stream: BitStream): Program {
   }
 }
 
-export function readProgramLines(prog: Program): void {
+export function readProgramLines(prog: Program, skipHeader = false): void {
   let nextByte = 0;
   let ok = true;
   // Hard fence: getByte() will not read past this stream index.
@@ -626,46 +628,68 @@ export function readProgramLines(prog: Program): void {
     return 0;
   };
 
-  // Find sync: 4+ × 0x16 bytes followed by 0x24.
-  let syncCount = 0;
-  while (true) {
-    const b = getByte();
-    if (!ok) return;
-    if (b === 0x16) { syncCount++; }
-    else if (b === 0x24 && syncCount > 3) { break; }
-    else { syncCount = 0; }
+  const START_ADDR = 0x0501;
+  let startAddr = START_ADDR;
+
+  if (skipHeader) {
+    // Force decode: skip sync/header/name, assume BASIC.
+    // Scan forward for a 0x00 (previous line's terminator) so we start on a
+    // clean line boundary.  Fall back to byte 0 if none found within first 256 bytes.
+    let startOffset = 0;
+    for (let i = 0; i < Math.min(prog.bytes.length, 256); i++) {
+      if (prog.bytes[i].v === 0x00) { startOffset = i + 1; break; }
+    }
+    nextByte = startOffset;
+    prog.header = {
+      byteIndex: startOffset,
+      fileType:  0,
+      autorun:   false,
+      startAddr: START_ADDR,
+      endAddr:   START_ADDR + prog.bytes.length - startOffset,
+    };
+    prog.name = '(force decoded)';
+  } else {
+    // Find sync: 4+ × 0x16 bytes followed by 0x24.
+    let syncCount = 0;
+    while (true) {
+      const b = getByte();
+      if (!ok) return;
+      if (b === 0x16) { syncCount++; }
+      else if (b === 0x24 && syncCount > 3) { break; }
+      else { syncCount = 0; }
+    }
+    const headerByteIndex = nextByte;
+
+    // 9-byte file header; byte[2] === 0 means BASIC file.
+    const headerBytes: number[] = [];
+    for (let i = 0; i < 9; i++) headerBytes.push(getByte());
+    if (headerBytes[2] !== 0) return;
+
+    // Start address from header (bytes 6–7, big-endian).  Used to anchor the
+    // chain of next-line pointer addresses to real Oric memory addresses.
+    const endAddr   = (headerBytes[4] << 8) | headerBytes[5];
+    startAddr = (headerBytes[6] << 8) | headerBytes[7];
+
+    // Store parsed header fields on the Program object.
+    prog.header = {
+      byteIndex:  headerByteIndex,
+      fileType:   headerBytes[2],
+      autorun:    headerBytes[3] === 0x80,
+      startAddr,
+      endAddr,
+    };
+
+    // Null-terminated program name.
+    for (let b = getByte(); b > 0; b = getByte()) {
+      prog.name += String.fromCharCode(b);
+    }
+
+    // Cap getByte to the address range declared in the header.
+    // endAddr is exclusive (the first byte past the saved data), so the last
+    // valid stream index is firstContentIdx + (endAddr - startAddr) - 1.
+    const firstContentIdx = nextByte;
+    endIdx = firstContentIdx + (endAddr - startAddr) - 1;
   }
-  const headerByteIndex = nextByte;
-
-  // 9-byte file header; byte[2] === 0 means BASIC file.
-  const headerBytes: number[] = [];
-  for (let i = 0; i < 9; i++) headerBytes.push(getByte());
-  if (headerBytes[2] !== 0) return;
-
-  // Start address from header (bytes 6–7, big-endian).  Used to anchor the
-  // chain of next-line pointer addresses to real Oric memory addresses.
-  const endAddr   = (headerBytes[4] << 8) | headerBytes[5];
-  const startAddr = (headerBytes[6] << 8) | headerBytes[7];
-
-  // Store parsed header fields on the Program object.
-  prog.header = {
-    byteIndex:  headerByteIndex,
-    fileType:   headerBytes[2],
-    autorun:    headerBytes[3] === 0x80,
-    startAddr,
-    endAddr,
-  };
-
-  // Null-terminated program name.
-  for (let b = getByte(); b > 0; b = getByte()) {
-    prog.name += String.fromCharCode(b);
-  }
-
-  // Cap getByte to the address range declared in the header.
-  // endAddr is exclusive (the first byte past the saved data), so the last
-  // valid stream index is firstContentIdx + (endAddr - startAddr) - 1.
-  const firstContentIdx = nextByte;
-  endIdx = firstContentIdx + (endAddr - startAddr) - 1;
 
   // Program lines.
   let correctionOffset = 0;

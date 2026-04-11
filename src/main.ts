@@ -3,6 +3,7 @@ import { parseWavFile } from './wavfile';
 import { WaveformView } from './waveform';
 import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
+import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -418,7 +419,7 @@ function renderAll(): void {
   }
 
   const prog = programs[activeProgIdx];
-  basicTypeEl.textContent = prog ? 'BASIC program found' : '';
+  basicTypeEl.textContent = prog ? 'BASIC program' : '';
   wrapLabelEl.hidden = !prog;
   if (!prog) { clearPanels(); return; }
   renderHex(prog);
@@ -578,7 +579,32 @@ searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
 
 function renderBasic(prog: Program): void {
   if (!prog.lines.length) {
-    basicPanel.innerHTML = '<p class="hint">No BASIC content decoded.</p>';
+    basicPanel.innerHTML =
+      '<p class="hint">No BASIC content decoded.</p>' +
+      '<p class="hint">' +
+        '<button id="force-decode-btn" class="zoom-btn">Force decode as BASIC</button> ' +
+        (prog.bytes.length > 0 && prog.bytes[0].firstBit > 0
+          ? ' <button id="force-decode-bytes-btn" class="zoom-btn">Force read from start of bitstream</button>'
+          : '') +
+      '</p>';
+    document.getElementById('force-decode-btn')?.addEventListener('click', () => {
+      prog.lines = [];
+      prog.name = '';
+      readProgramLines(prog, true);
+      flagNonMonotonicLines(prog);
+      renderHex(prog);
+      renderBasic(prog);
+      updateStatusBar();
+    });
+    document.getElementById('force-decode-bytes-btn')?.addEventListener('click', () => {
+      const rebuilt = readProgramBytes(prog.stream, true);
+      prog.bytes = rebuilt.bytes;
+      prog.lines = [];
+      prog.name = '';
+      renderHex(prog);
+      renderBasic(prog);
+      updateStatusBar();
+    });
     return;
   }
 
