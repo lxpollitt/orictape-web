@@ -184,8 +184,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const LONGEST_SEARCH_WINDOW  = Math.round(33 * sampleRate / 48000);   // 30 at 44100 Hz
   const TURNAROUND_PCT  = 10;  // % of peak-to-threshold distance to confirm signal has turned around from peak
 
-  // Triggers for unreadable, noisefloor, sync, and abandonn 
-  const MIN_UREADBALE_CYCLE_LENGTH = Math.round(55 * sampleRate / 48000);  // Must be > LONG_MAX && < 2*LONGEST_SEARCH_WINDOW
+  // Triggers for unreadable, noisefloor, sync, and abandon etc
+  const MIN_UREADALBE_CYCLE_LENGTH = Math.round(55 * sampleRate / 48000);  // Must be > LONG_MAX && < 2*LONGEST_SEARCH_WINDOW
   // TODO: replace with dynamic based on overall file signal level, and differentiate between unclear low signal level and genuine noise floor to map to gap
   const NOISE_FLOOR       = 1000;  // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
   const SYNC_NOISE_FLOOR  = 1000; // min peak-to-peak amplitude for a valid sync cycle (~1.5% of full scale)
@@ -224,7 +224,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     // The previous readCyle already had to find this cycle's maxIndex to workout the crossover point
     maxIndex = nextMaxIndex;
 
-    // Find the cycle's minimum. Start serarching from the cyccle's max.
+    // Find the cycle's minimum. Start searching from the cycle's max.
     // Always search at least SMALLEST_SEARCH_WINDOW samples, but extend up to
     // LONGEST_SEARCH_WINDOW if the signal hasn't turned around enough yet
     // for us to be confident we found the minimum.
@@ -301,7 +301,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     } else if (length < LONG_MIN) {
       // Unclear zone between medium and long — classify as nearest.
       cycleKind = (length - MEDIUM_MAX) <= (LONG_MIN - length) ? 'medium' : 'long';
-    } else if (length < MIN_UREADBALE_CYCLE_LENGTH) {
+    } else if (length < MIN_UREADALBE_CYCLE_LENGTH) {
       cycleKind = 'long'; 
     } else {
       cycleKind = 'unreadable';
