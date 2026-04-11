@@ -187,9 +187,10 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   // Triggers for unreadable, noisefloor, sync, and abandonn 
   const MIN_UREADBALE_CYCLE_LENGTH = Math.round(55 * sampleRate / 48000);  // Must be > LONG_MAX && < 2*LONGEST_SEARCH_WINDOW
   // TODO: replace with dynamic based on overall file signal level, and differentiate between unclear low signal level and genuine noise floor to map to gap
-  const NOISE_FLOOR     = 200; // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
-  const MIN_SYNC_BITS   = 100; // min continuous cycles before accepting a sync run
-  const MAX_POOR_SIGNAL_CYCLES = 200; // max number of poor cycles to accept before terminating a post sync bitstream
+  const NOISE_FLOOR       = 1000;  // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
+  const SYNC_NOISE_FLOOR  = 1000; // min peak-to-peak amplitude for a valid sync cycle (~1.5% of full scale)
+  const MIN_SYNC_BITS     = 200;  // min continuous cycles before accepting a sync run
+  const MAX_POOR_SIGNAL_CYCLES = 180; // max number of poor cycles to accept before terminating a post sync bitstream
 
   // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
   // (every cycle is the shortest possible). We'll slice to actual size at the end.
@@ -491,7 +492,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     syncRunThreshold = threshold;
     while (nextMaxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
       if (!readCycle()) break;
-      if (maxVal - minVal < NOISE_FLOOR) break; // noise floor (silence, noise, or slow ramp)
+      if (maxVal - minVal < SYNC_NOISE_FLOOR) break; // noise floor (silence, noise, or slow ramp)
       if (cycleKind === 'medium') mediumCycleCount++;
       else if (cycleKind === 'long') longCycleCount++;
       pushBitFast();
