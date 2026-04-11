@@ -18,6 +18,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--mono);
+  overscroll-behavior-x: none;  /* prevent swipe-back/forward browser navigation */
   font-size: 13px;
   line-height: 1.5;
 }

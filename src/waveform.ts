@@ -20,8 +20,8 @@ export class WaveformView {
   private baseSpp     = 10;  // spp at 100% for the active view mode (overview or byte)
   private zoomFactor  = 1;   // persistent button zoom: 1 = 100%
   private selByte:    number | null = null;
-  private normalise   = false;
-  private vZoom       = 1;     // vertical zoom multiplier (scroll-wheel controlled)
+  private vZoom       = 1;     // vertical zoom multiplier (1.0 = default, higher = amplified)
+  private onNormaliseChange: ((checked: boolean) => void) | null = null;
   private zoomLabel:  HTMLElement | null = null;
 
   private hoverBit:       number | null = null;  // bit index under mouse cursor
@@ -139,14 +139,32 @@ export class WaveformView {
     }
   }
 
+  /** Reset zoom levels to defaults (called on file load). */
+  resetZoom(): void {
+    this.vZoom = 1;
+    this.zoomFactor = 1;
+    this.updateZoomDisplay();
+  }
+
   setNormalise(v: boolean): void {
-    this.normalise = v;
+    if (v && this.prog) {
+      // Set vZoom so the stream's peak amplitude fills the display.
+      const peakAmplitude = Math.max(Math.abs(this.prog.stream.minVal), Math.abs(this.prog.stream.maxVal), 1);
+      this.vZoom = 32768 / peakAmplitude;
+    } else {
+      this.vZoom = 1;
+    }
     this.draw();
+  }
+
+  setNormaliseCallback(cb: (checked: boolean) => void): void {
+    this.onNormaliseChange = cb;
   }
 
   zoomIn():    void { this.zoomFactor = Math.min(16,  this.zoomFactor * 2); this.applyZoom(); }
   zoomOut():   void { this.zoomFactor = Math.max(0.1875, this.zoomFactor / 2); this.applyZoom(); }
   zoomReset(): void { this.zoomFactor = 1; this.applyZoom(); }
+  zoomTo(factor: number): void { this.zoomFactor = factor; this.applyZoom(); }
 
   private applyZoom(): void {
     if (this.selByte !== null) {
@@ -208,10 +226,7 @@ export class WaveformView {
     const LABEL_H = 20;
     const waveH   = h - LABEL_H;
     const midY    = waveH / 2;
-    const amplitude = this.normalise
-      ? Math.max(Math.abs(stream.minVal), Math.abs(stream.maxVal), 1)
-      : 32768;
-    const scaleY  = (waveH * 0.45) / amplitude * this.vZoom;
+    const scaleY  = (waveH * 0.45) / 32768 * this.vZoom;
     const spp     = this.spp;
     const vs      = this.viewStart;
 
@@ -493,18 +508,30 @@ export class WaveformView {
 
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
-      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-        // Vertical scroll → vertical zoom (amplitude).
-        const factor = e.deltaY > 0 ? 1.1 : 1 / 1.1;
-        this.vZoom = Math.max(0.1, Math.min(100, this.vZoom * factor));
-      } else {
-        // Horizontal scroll → horizontal zoom (time).
-        const factor = e.deltaX > 0 ? 1.1 : 1 / 1.1;
+      if (e.ctrlKey) {
+        // Pinch/stretch gesture → zoom both axes (like a map).
+        // Pinch sends positive deltaY; invert so pinch = zoom in.
+        // Vertical zooms 3x slower than horizontal since the waveform is wider than tall.
+        const factor = e.deltaY > 0 ? 1 / 1.1 : 1.1;
+        const vFactor = e.deltaY > 0 ? 1 / 1.033 : 1.033;  // ~1/3 of horizontal rate
+        // Vertical zoom.
+        this.vZoom = Math.max(0.1, Math.min(100, this.vZoom * vFactor));
+        this.onNormaliseChange?.(false);
+        // Horizontal zoom, anchored on cursor position.
         const anchor = this.viewStart + e.offsetX * this.spp;
-        this.spp       = Math.max(0.1875, Math.min(20000, this.spp * factor));
+        this.spp       = Math.max(0.1875, Math.min(20000, this.spp / factor));
         this.viewStart = anchor - e.offsetX * this.spp;
         this.clampView();
         this.updateZoomDisplay();
+      } else if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        // Vertical scroll → vertical zoom (amplitude).
+        const factor = e.deltaY > 0 ? 1.1 : 1 / 1.1;
+        this.vZoom = Math.max(0.1, Math.min(100, this.vZoom * factor));
+        this.onNormaliseChange?.(false);
+      } else {
+        // Horizontal scroll → horizontal pan.
+        this.viewStart += e.deltaX * this.spp * 2;
+        this.clampView();
       }
       this.draw();
     }, { passive: false });

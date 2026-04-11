@@ -120,6 +120,9 @@ wrapToggle.addEventListener('change', () => {
 normaliseToggle.addEventListener('change', () => {
   waveform.setNormalise(normaliseToggle.checked);
 });
+waveform.setNormaliseCallback((checked) => {
+  normaliseToggle.checked = checked;
+});
 
 zoomInBtn   .addEventListener('click', () => waveform.zoomIn());
 zoomOutBtn  .addEventListener('click', () => waveform.zoomOut());
@@ -149,6 +152,7 @@ fileInput.addEventListener('change', async () => {
   if (!files || files.length === 0) return;
 
   // Reset all state.
+  waveform.resetZoom();
   tapes           = [];
   userMerges      = [];
   selByte         = null;
@@ -1143,6 +1147,14 @@ hexPanel.addEventListener('click', (e) => {
   focusedPanel = 'hex';
   const el = (e.target as Element).closest<HTMLElement>('[data-i]');
   if (el) selectByte(+el.dataset.i!);
+});
+hexPanel.addEventListener('dblclick', (e) => {
+  if (viewMode !== 'tape') return;
+  const el = (e.target as Element).closest<HTMLElement>('[data-i]');
+  if (el) {
+    selectByte(+el.dataset.i!);
+    waveform.zoomTo(4);  // 400% horizontal zoom
+  }
 });
 
 // Prevent Safari's swipe-back/forward navigation gesture from firing when the
