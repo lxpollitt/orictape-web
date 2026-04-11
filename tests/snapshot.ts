@@ -104,7 +104,7 @@ for (const filename of wavFiles) {
   const base     = basename(filename, '.wav');
 
   let programs: Program[];
-  let sampleRate = 44100;
+  let sampleRate = 48000;
   try {
     const buf     = readFileSync(filePath);
     const wav     = parseWavFile(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));

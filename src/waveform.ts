@@ -11,7 +11,7 @@ export class WaveformView {
 
   private samples:    Int16Array | null = null;
   private prog:       Program | null    = null;
-  private sampleRate  = 44100;
+  private sampleRate  = 48000;
   private bitIsError:    Uint8Array | null = null; // per-bit: 1 if part of a chkErr byte (waveform colouring)
   private bitIsParityErr: Uint8Array | null = null; // per-bit: 1 only for the parity bit of a chkErr byte (label colouring)
 
@@ -56,7 +56,7 @@ export class WaveformView {
     this.draw();
   }
 
-  setData(samples: Int16Array, prog: Program, sampleRate = 44100): void {
+  setData(samples: Int16Array, prog: Program, sampleRate = 48000): void {
     this.samples     = samples;
     this.prog        = prog;
     this.sampleRate  = sampleRate;

@@ -180,7 +180,7 @@ fileInput.addEventListener('change', async () => {
       tapes.push({
         filename: file.name,
         samples:  new Int16Array(0),
-        sampleRate: 44100,
+        sampleRate: 48000,
         programs,
         fromTap:  true,
       });

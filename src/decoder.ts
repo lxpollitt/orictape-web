@@ -150,35 +150,44 @@ export function readBitStreams(samples: Int16Array, sampleRate = 44100): BitStre
 
 function readBitStream(samples: Int16Array, startSample: number, sampleRate: number): { stream: BitStream; samplesRead: number } {
   // Cycle classification thresholds, all scaled with sample rate.
-  // At 44100 Hz the three expected full-cycle lengths are:
-  //   short  (2400 Hz) ≈ 18 samples  — bit 1 in both fast and slow format
-  //   medium (1600 Hz) ≈ 28 samples  — bit 0 in fast format only
-  //   long   (1200 Hz) ≈ 37 samples  — bit 0 (×4) in slow format only
+  //
+  // At 48000 Hz the three expected full-cycle lengths are:
+  //   short  (2400 Hz) ≈ 18 samples  - bit 1 in both fast and slow format
+  //   medium (1600 Hz) ≈ 28 samples  - bit 0 in fast format only
+  //   long   (1200 Hz) ≈ 37 samples  - bit 0 (×4) in slow format only
+  //
+  // Scaled to 44100 Hz (our scaling will round to nearest integer):
+  //   short  (2400 Hz) ≈ 18 (18.3750) samples  - bit 1 in both fast and slow format
+  //   medium (1600 Hz) ≈ 28 (27.5625) samples  - bit 0 in fast format only
+  //   long   (1200 Hz) ≈ 37 (36.7500) samples  - bit 0 (×4) in slow format only
+  //
+  const SHORT_MIN     = Math.round(16 * sampleRate / 48000);  // 15 at 44100 Hz
+  const SHORT_MAX     = Math.round(22 * sampleRate / 48000);  // 20 at 44100 Hz
+  const MEDIUM_MIN    = Math.round(26 * sampleRate / 48000);  // 24 at 44100 Hz
+  const MEDIUM_MAX    = Math.round(34 * sampleRate / 48000);  // 31 at 44100 Hz
+  const LONG_MIN      = Math.round(38 * sampleRate / 48000);  // 35 at 44100 Hz
+  const LONG_MAX      = Math.round(46 * sampleRate / 48000);  // 42 at 44100 Hz
+  
+  // Search window sizes for searching from current peak to next (opposite polarity) peak
+  //
+  // At 48000 Hz:
+  //   short 1/2 cycle  = 10
+  //   medium 1/2 cycle = 15
+  //   long 1/2 cycle   = 20
+  //   medium 3/4 cycle = 0.5*10+20 or 0.5*20+10 = 25 or 20
+  //   long 3/4 cycle   = 0.75*40 = 30
+  //
+  // Short search window = 16 -> 16/20 or 16/25 = 0.8 or 0.64 * 3/4 medium cycle 
+  // Long search window = 33 -> 33/30 = 1.1 * 3/4 long cycle 
   // 
-  //   short  (2400 Hz) ≈ 18.375 samples  — bit 1 in both fast and slow format
-  //   medium (1600 Hz) ≈ 27.5625 samples  — bit 0 in fast format only
-  //   long   (1200 Hz) ≈ 36.75 samples  — bit 0 (×4) in slow format only
-  //   short 1/2 cycle  = 9.1875
-  //   medium 1/2 cycle = 13.78125
-  //   long 1/2 cycle   = 18.375
-  //   medium 3/4 cycle = 0.5*9.1875+18.375=22.96875 or 0.5*18.375+9.1875=18.375
-  //   long 3/4 cycle   = 0.75*36.75 = 27.5625
-  //   short search window = 20 -> 20/18.375 or 20/22.96875 = 1.09 or 0.87* 3/4 medium cycle 
-  //   long search window = 44 -> 44/27.5625 = 1.6 * 3/4 long cycle 
-  //   long search window = 30 -> 30/27.5625 = 1.09 * 3/4 long cycle 
-  //    
-  const SHORT_MIN     = Math.round(15 * sampleRate / 44100);
-  const SHORT_MAX     = Math.round(20 * sampleRate / 44100);
-  const MEDIUM_MIN    = Math.round(24 * sampleRate / 44100);
-  const MEDIUM_MAX    = Math.round(31 * sampleRate / 44100);
-  const LONG_MIN      = Math.round(35 * sampleRate / 44100);
-  const LONG_MAX      = Math.round(42 * sampleRate / 44100);
-  const GAP_MIN       = Math.round(50 * sampleRate / 44100);
+  const SMALLEST_SEARCH_WINDOW = Math.round(16 * sampleRate / 48000);   // 15 at 44100 Hz
+  const LONGEST_SEARCH_WINDOW  = Math.round(33 * sampleRate / 48000);   // 30 at 44100 Hz
+  const TURNAROUND_PCT  = 10;  // % of peak-to-threshold distance to confirm signal has turned around from peak
+
+  // Gap and sync detection 
+  const GAP_MIN         = Math.round(54 * sampleRate / 48000);   // 50 at 44100 Hz
   // TODO: replace with dynamic based on overall file signal level, and differentiate between unclear low signal level and genuine noise floor to map to gap
   const NOISE_FLOOR            = 200; // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
-  const SMALLEST_SEARCH_WINDOW = Math.round(15 * sampleRate / 44100);
-  const LONGEST_SEARCH_WINDOW  = Math.round(30 * sampleRate / 44100);
-  const TURNAROUND_PCT         = 10;  // % of peak-to-threshold distance to confirm turn-around
   const MIN_SYNC_BITS = 100; // min continuous cycles before accepting a sync run
 
   // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
