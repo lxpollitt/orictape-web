@@ -127,10 +127,19 @@ export const KEYWORDS: string[] = [
 ];
 
 export function readBitStreams(samples: Int16Array, sampleRate = 44100): BitStream[] {
+  // Compute file-level peak amplitude once, used to scale noise floor thresholds
+  // to compensate for different ADC recording levels.
+  let fileMin = 0, fileMax = 0;
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i] < fileMin) fileMin = samples[i];
+    if (samples[i] > fileMax) fileMax = samples[i];
+  }
+  const filePeakAmplitude = fileMax - fileMin;
+
   const streams: BitStream[] = [];
   let startSample = 0;
   while (true) {
-    const { stream, samplesRead } = readBitStream(samples, startSample, sampleRate);
+    const { stream, samplesRead } = readBitStream(samples, startSample, sampleRate, filePeakAmplitude);
     if (samplesRead === 0) break;
     streams.push(stream);
     startSample += samplesRead;
@@ -148,7 +157,7 @@ export function readBitStreams(samples: Int16Array, sampleRate = 44100): BitStre
   return streams;
 }
 
-function readBitStream(samples: Int16Array, startSample: number, sampleRate: number): { stream: BitStream; samplesRead: number } {
+function readBitStream(samples: Int16Array, startSample: number, sampleRate: number, filePeakAmplitude: number): { stream: BitStream; samplesRead: number } {
   // Cycle classification thresholds, all scaled with sample rate.
   //
   // At 48000 Hz the three expected full-cycle lengths are:
@@ -185,10 +194,9 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const TURNAROUND_PCT  = 10;  // % of peak-to-threshold distance to confirm signal has turned around from peak
 
   // Triggers for unreadable, noisefloor, sync, and abandon etc
-  const MIN_UREADALBE_CYCLE_LENGTH = Math.round(55 * sampleRate / 48000);  // Must be > LONG_MAX && < 2*LONGEST_SEARCH_WINDOW
-  // TODO: replace with dynamic based on overall file signal level, and differentiate between unclear low signal level and genuine noise floor to map to gap
-  const NOISE_FLOOR       = 1000;  // min peak-to-peak amplitude for a valid cycle (<0.2% of full scale)
-  const SYNC_NOISE_FLOOR  = 1000; // min peak-to-peak amplitude for a valid sync cycle (~1.5% of full scale)
+  const MIN_UREADABLE_CYCLE_LENGTH = Math.round(55 * sampleRate / 48000);  // Must be > LONG_MAX && < 2*LONGEST_SEARCH_WINDOW
+  const NOISE_FLOOR       = Math.max(100, Math.round(filePeakAmplitude * 0.02));   // ~2% of file peak
+  const SYNC_NOISE_FLOOR  = Math.max(100, Math.round(filePeakAmplitude * 0.04));   // ~4% of file peak
   const MIN_SYNC_BITS     = 200;  // min continuous cycles before accepting a sync run
   const MAX_POOR_SIGNAL_CYCLES = 180; // max number of poor cycles to accept before terminating a post sync bitstream
 
@@ -301,7 +309,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     } else if (length < LONG_MIN) {
       // Unclear zone between medium and long — classify as nearest.
       cycleKind = (length - MEDIUM_MAX) <= (LONG_MIN - length) ? 'medium' : 'long';
-    } else if (length < MIN_UREADALBE_CYCLE_LENGTH) {
+    } else if (length < MIN_UREADABLE_CYCLE_LENGTH) {
       cycleKind = 'long'; 
     } else {
       cycleKind = 'unreadable';
@@ -314,7 +322,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
                 || (length > MEDIUM_MAX && length < LONG_MIN)    // medium/long boundary
                 || length > LONG_MAX;                            // long/gap boundary
 
-    return length < MIN_UREADBALE_CYCLE_LENGTH;
+    return length < MIN_UREADABLE_CYCLE_LENGTH;
   };
 
   /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit).
