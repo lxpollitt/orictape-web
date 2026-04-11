@@ -196,7 +196,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
 
   // Working state shared with readCycle (mirrors the Go closure pattern).
   let minVal = 0, maxVal = 0, threshold = 0;
-  let minIndex = 0, maxIndex = startSample, prevMaxIndex = startSample;
+  let minIndex = 0, maxIndex = startSample, nextMaxIndex = startSample;
   let belowIndex = 0, aboveIndex = startSample;
   let lengthBelow = 0, lengthAbove = 0, length = 0;
   let streamFirstSample = startSample;
@@ -211,65 +211,66 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   let quietCycles = 0;
 
   /** Measure one waveform cycle and classify it as short, medium, or long.
-   *  Returns true if the cycle exceeded GAP_MIN (gap in tape signal). */
+   *  Returns true if no usable signal is found (for section of ~cycle length). */
   const readCycle = (): boolean => {
-    // Find next minimum after the current max.
+    // The previous readCyle already had to find this cycle's maxIndex to workout the crossover point
+    maxIndex = nextMaxIndex;
+
+    // Find the cycle's minimum. Start serarching from the cyccle's max.
     // Always search at least SMALLEST_SEARCH_WINDOW samples, but extend up to
-    // LONGEST_SEARCH_WINDOW if the signal hasn't turned arond enough yet
-    // (accommodates long cycles without overshooting on short ones).
-    minVal = 32767;
-    minIndex = maxIndex + 1;
+    // LONGEST_SEARCH_WINDOW if the signal hasn't turned around enough yet
+    // for us to be confident we found the minimum.
+    // (Accommodates long cycles without overshooting on short ones, while
+    // also being resilient to zero offset wiggle.)
+    const minSearchShortestEnd = Math.min(maxIndex + SMALLEST_SEARCH_WINDOW, samples.length);
+    const minSearchLongestEnd  = Math.min(maxIndex + LONGEST_SEARCH_WINDOW, samples.length);
     let maxValSinceMin = -32768;
-    let turnaroundMin = 32767;  // recalculated only when minVal changes
-    const minSmallEnd = Math.min(maxIndex + SMALLEST_SEARCH_WINDOW, samples.length);
-    const minLongEnd  = Math.min(maxIndex + LONGEST_SEARCH_WINDOW, samples.length);
-    // TODO: this isn't a great way of coping with 0 signal? what if didn't find previous peak; is this ok?
-    minVal = maxVal; minIndex = minLongEnd; // Hacks to cope with zero signal, rather than retuning very short read cycles
-    for (let i = maxIndex + 1; i < minLongEnd; i++) {
+    let turnaroundThreshold = 32767;  // Recalculated each time minVal is updated
+    minVal = maxVal;
+    minIndex = minSearchLongestEnd;   // Move forwad by search window length if don't find a minVal
+    for (let i = maxIndex + 1; i < minSearchLongestEnd; i++) {
       if (samples[i] < minVal) {
         minVal = samples[i]; minIndex = i; maxValSinceMin = minVal;
-        turnaroundMin = minVal + ((maxVal - minVal) * TURNAROUND_PCT / 100);
+        turnaroundThreshold = minVal + ((maxVal - minVal) * TURNAROUND_PCT / 100);
       } else if (samples[i] > maxValSinceMin) {
         maxValSinceMin = samples[i];
       }
-      if (i >= minSmallEnd && maxValSinceMin >= turnaroundMin) break;
+      if (i >= minSearchShortestEnd && maxValSinceMin >= turnaroundThreshold) break;
     }
     if (minVal < streamMinVal) streamMinVal = minVal;
 
-    // Find the crossover point falling below threshold.
+    // Find the cycle's mid point (the crossover point between the high half of the cycle 
+    // and the low half of the cycle).
     threshold = (maxVal + minVal) >> 1;
     belowIndex = maxIndex + 1;
-    for (let i = maxIndex + 1; i < minLongEnd; i++) {
+    for (let i = maxIndex + 1; i < minSearchLongestEnd; i++) {
       if (samples[i] <= threshold) { belowIndex = i; break; }
     }
     lengthBelow = belowIndex - aboveIndex;
 
-    // Find next maximum after the current min.
+    // Find next maximum (the maximum in the first half of the next cycle).
     // Same adaptive window: at least SMALLEST, extend up to LONGEST.
-    prevMaxIndex = maxIndex;
-    maxVal = -32768;
-    maxIndex = minIndex + 1;
+    const maxSearchShortestEnd = Math.min(minIndex + SMALLEST_SEARCH_WINDOW, samples.length);
+    const maxSearchLongestEnd  = Math.min(minIndex + LONGEST_SEARCH_WINDOW, samples.length);
     let minValSinceMax = 32767;
-    let turnaroundMax = -32768;  // recalculated only when maxVal changes
-    const maxSmallEnd = Math.min(minIndex + SMALLEST_SEARCH_WINDOW, samples.length);
-    const maxLongEnd  = Math.min(minIndex + LONGEST_SEARCH_WINDOW, samples.length);
-    // TODO: this isn't a great way of coping with 0 signal? what if didn't find previous peak; is this ok?
-    maxVal = minVal; maxIndex = maxLongEnd; // Hacks to cope with zero signal, rather than retuning very short read cycles
-    for (let i = minIndex + 1; i < maxLongEnd; i++) {
+    turnaroundThreshold = -32768;   // Recalculated each time minVal is updated
+    maxVal = minVal; 
+    nextMaxIndex = maxSearchLongestEnd;   // Move forwad by search window length if don't find a minVal
+    for (let i = minIndex + 1; i < maxSearchLongestEnd; i++) {
       if (samples[i] > maxVal) {
-        maxVal = samples[i]; maxIndex = i; minValSinceMax = maxVal;
-        turnaroundMax = maxVal - ((maxVal - minVal) * TURNAROUND_PCT / 100);
+        maxVal = samples[i]; nextMaxIndex = i; minValSinceMax = maxVal;
+        turnaroundThreshold = maxVal - ((maxVal - minVal) * TURNAROUND_PCT / 100);
       } else if (samples[i] < minValSinceMax) {
         minValSinceMax = samples[i];
       }
-      if (i >= maxSmallEnd && minValSinceMax <= turnaroundMax) break;
+      if (i >= maxSearchShortestEnd && minValSinceMax <= turnaroundThreshold) break;
     }
     if (maxVal > streamMaxVal) streamMaxVal = maxVal;
 
     // Find the crossover point rising above threshold.
     threshold = (maxVal + minVal) >> 1;
     aboveIndex = minIndex + 1;
-    for (let i = minIndex + 1; i < maxLongEnd; i++) {
+    for (let i = minIndex + 1; i < maxSearchLongestEnd; i++) {
       if (samples[i] >= threshold) { aboveIndex = i; break; }
     }
     lengthAbove = aboveIndex - belowIndex;
@@ -344,7 +345,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       _bitFirstSample[bitCount] = aboveIndex - length;
       _bitLastSample[bitCount]  = aboveIndex - 1;
       _bitUnclear[bitCount] = cycleUnclear ? 1 : 0;
-      _bitMaxIndex[bitCount] = prevMaxIndex;
+      _bitMaxIndex[bitCount] = maxIndex;
       _bitMinIndex[bitCount] = minIndex;
       bitCount++;
     // }
@@ -473,21 +474,21 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   // for slow format re-decoding if needed.
   let mediumCycleCount = 0;
   let longCycleCount = 0;
-  let syncRunMaxIndex = maxIndex;
+  let syncRunMaxIndex = nextMaxIndex;
   let syncRunAboveIndex = aboveIndex;
   let syncRunMaxVal = maxVal;
   let syncRunThreshold = threshold;
-  while (maxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
+  while (nextMaxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
     bitCount = 0;  // reset without reallocating
     mediumCycleCount = 0;
     longCycleCount = 0;
     streamFirstSample = aboveIndex;
     // Save state at the start of this sync run attempt.
-    syncRunMaxIndex = maxIndex;
+    syncRunMaxIndex = nextMaxIndex;
     syncRunAboveIndex = aboveIndex;
     syncRunMaxVal = maxVal;
     syncRunThreshold = threshold;
-    while (maxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
+    while (nextMaxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
       if (readCycle()) break;
       if (maxVal - minVal < NOISE_FLOOR) break; // noise floor (silence, noise, or slow ramp)
       if (cycleKind === 'medium') mediumCycleCount++;
@@ -506,7 +507,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     // bit extraction.  Phase 1 consumed all cycles as fast-decoded bits
     // which are wrong for slow format.
     bitCount = 0;
-    maxIndex = syncRunMaxIndex;
+    nextMaxIndex = syncRunMaxIndex;
     aboveIndex = syncRunAboveIndex;
     maxVal = syncRunMaxVal;
     threshold = syncRunThreshold;
@@ -516,14 +517,14 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     slow1s = 0;
     slow0s = 0;
     slowBitUnclear = false;
-    while (maxIndex < samples.length) {
+    while (nextMaxIndex < samples.length) {
       if (readCycle()) break;
       pushBitSlow();
     }
   } else {
     // Fast format: Phase 2 — continue reading until a length-based gap.
     // Noise-floor drops mid-program produce garbled bits but don't split the stream.
-    while (maxIndex < samples.length) {
+    while (nextMaxIndex < samples.length) {
       if (readCycle()) break;
       pushBitFast();
     }
