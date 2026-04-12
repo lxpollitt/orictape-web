@@ -6,6 +6,8 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+import { flagSyntaxErrors } from './editor';
+
 // BitInfo is used by the UI when reading individual bits out of a BitStream.
 export interface BitInfo {
   v: 0 | 1;
@@ -45,6 +47,9 @@ export interface LineInfo {
    *  subsequence of line numbers in the program — i.e. it breaks the expected
    *  monotonic ordering, likely due to a corrupt line-number byte. */
   nonMonotonic?: boolean;
+  /** Set when re-tokenising the line's text produces different bytes than
+   *  the original — indicates the stored bytes aren't valid tokenised BASIC. */
+  syntaxError?: boolean;
 }
 
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
@@ -544,6 +549,7 @@ export function readPrograms(streams: BitStream[]): Program[] {
     if (prog.bytes.length > 0) {
       readProgramLines(prog);
       flagNonMonotonicLines(prog);
+      flagSyntaxErrors(prog);
       programs.push(prog);
     }
   }

@@ -354,7 +354,7 @@ function renderTabs(): void {
       btn.className  = `prog-tab${isActive ? ' active' : ''}`;
       btn.dataset.ti = String(ti);
       btn.dataset.pi = String(pi);
-      const hasErrors = prog.lines.some(l => l.lenErr || l.earlyEnd || l.unknownKeyword || l.nonMonotonic);
+      const hasErrors = prog.lines.some(l => l.lenErr || l.earlyEnd || l.unknownKeyword || l.nonMonotonic || l.syntaxError);
       const infoText  = prog.lines.length > 0
         ? `${prog.lines.length} line${prog.lines.length !== 1 ? 's' : ''}`
         : `${prog.bytes.length} byte${prog.bytes.length !== 1 ? 's' : ''}`;
@@ -641,7 +641,7 @@ function renderBasic(prog: Program): void {
     // Classify the line: 'err' if lenErr or any chkErr byte; 'warn' if only
     // unclear bytes or non-monotonic line number (no hard errors).
     const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-    const hasChkErr = line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || lineBytes.some(b => b?.chkErr);
+    const hasChkErr = line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError || lineBytes.some(b => b?.chkErr);
     const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
     const isMatch   = matchSet.has(i);
     const isCurrent = isMatch && searchMatchIdx >= 0 && searchMatches[searchMatchIdx] === i;
@@ -783,7 +783,7 @@ function renderBasicLineHtml(
 ): string {
   const line      = prog.lines[lineIdx];
   const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-  const hasChkErr  = line.lenErr || line.nonMonotonic || lineBytes.some(b => b?.chkErr);
+  const hasChkErr  = line.lenErr || line.nonMonotonic || line.syntaxError || lineBytes.some(b => b?.chkErr);
   const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
   const cls = [
     'basic-line',
@@ -1675,7 +1675,7 @@ function isErrByte(b: ByteInfo): boolean {
 
 function lineHasError(prog: Program, li: number): boolean {
   const line = prog.lines[li];
-  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic) return true;
+  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError) return true;
   for (let b = line.firstByte; b <= line.lastByte; b++) {
     const byte = prog.bytes[b];
     if (byte && isErrByte(byte)) return true;
@@ -2096,6 +2096,9 @@ function updateStatusBar(): void {
       if (line.unknownKeyword) {
         lineSegs.push(`<span class="sb-err">Unknown keyword byte</span>`);
       }
+      if (line.syntaxError) {
+        lineSegs.push(`<span class="sb-err">Tokenisation mismatch</span>`);
+      }
       if (line.nonMonotonic) {
         lineSegs.push(`<span class="sb-err">Non-monotonic line number</span>`);
       }
@@ -2145,7 +2148,7 @@ function updateMergedStatusBar(): void {
                     const prog = progs[src.tapeIdx];
                     const hasHardErr = prog && (() => {
                       const li = prog.lines[src.lineIdx];
-                      if (li.lenErr || li.earlyEnd || li.unknownKeyword || li.nonMonotonic) return true;
+                      if (li.lenErr || li.earlyEnd || li.unknownKeyword || li.nonMonotonic || li.syntaxError) return true;
                       for (let b = li.firstByte; b <= li.lastByte; b++) { if (prog.bytes[b]?.chkErr) return true; }
                       return false;
                     })();

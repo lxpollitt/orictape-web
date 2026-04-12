@@ -35,10 +35,56 @@
  */
 
 import { KEYWORDS } from './decoder';
+import type { Program } from './decoder';
 
 export interface ParsedLine {
   lineNum: number;
   bytes:   number[];   // line number (2 bytes LE) + content bytes (keyword tokens + ASCII) + null terminator
+}
+
+export interface SyntaxIssue {
+  byteOffset: number;  // offset within the line's bytes (relative to firstByte+2)
+  message:    string;
+}
+
+/**
+ * Check whether a decoded BASIC line's text re-tokenises to the same bytes.
+ * Returns null if the bytes match, or a SyntaxIssue describing the first mismatch.
+ *
+ * @param lineText  The line's element text joined (e.g. "100 PRINT \"Hello\"")
+ * @param originalBytes  The original bytes from firstByte+2 to lastByte (line number + content + null)
+ */
+export function checkLineSyntax(lineText: string, originalBytes: number[]): SyntaxIssue | null {
+  const parsed = parseLine(lineText);
+  if (!parsed) return { byteOffset: 0, message: 'Failed to parse line' };
+
+  for (let i = 0; i < Math.max(parsed.bytes.length, originalBytes.length); i++) {
+    if (parsed.bytes[i] !== originalBytes[i]) {
+      const origHex = i < originalBytes.length ? `0x${originalBytes[i].toString(16).padStart(2, '0')}` : 'missing';
+      const parsedHex = i < parsed.bytes.length ? `0x${parsed.bytes[i].toString(16).padStart(2, '0')}` : 'missing';
+      return { byteOffset: i, message: `Tokenisation mismatch at byte ${i}: original ${origHex}, expected ${parsedHex}` };
+    }
+  }
+  return null;
+}
+
+/**
+ * Check all lines in a program for syntax issues (re-tokenisation mismatches).
+ * Sets `syntaxError` flag on any line whose text doesn't round-trip to the same bytes.
+ */
+export function flagSyntaxErrors(prog: Program): void {
+  for (const line of prog.lines) {
+    const lineText = line.elements.join('');
+    // Extract original bytes: line number (2 bytes) + content + null terminator.
+    const originalBytes: number[] = [];
+    for (let b = line.firstByte + 2; b <= line.lastByte; b++) {
+      originalBytes.push(prog.bytes[b].v);
+    }
+    const issue = checkLineSyntax(lineText, originalBytes);
+    if (issue) {
+      line.syntaxError = true;
+    }
+  }
 }
 
 /**

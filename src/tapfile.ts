@@ -1,5 +1,6 @@
 import type { ByteInfo, BitStream, Program } from './decoder';
 import { readProgramLines, flagNonMonotonicLines } from './decoder';
+import { flagSyntaxErrors } from './editor';
 
 const TAP_META_MAGIC = 'ORICTAPE_META';
 
@@ -108,6 +109,7 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
 
     readProgramLines(prog);
     flagNonMonotonicLines(prog);
+    flagSyntaxErrors(prog);
 
     // Apply metadata flags to bytes if present.
     // Metadata indices are relative to the first header byte; offset them

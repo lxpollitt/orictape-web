@@ -306,7 +306,7 @@ export function mergeLineBytes(
  */
 function lineHasHardError(prog: Program, lineIdx: number): boolean {
   const line = prog.lines[lineIdx];
-  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic) return true;
+  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError) return true;
   for (let i = line.firstByte; i <= line.lastByte; i++) {
     if (prog.bytes[i]?.chkErr) return true;
   }
