@@ -5,7 +5,7 @@ import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo, LineStatus } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
-import { parseLine, applyLineEdit } from './editor';
+import { parseLine, applyLineEdit, deleteLineEdit } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -719,13 +719,20 @@ function exitEditMode(confirmed: boolean): void {
     const text = editInput.value;
     const prog = programs[activeProgIdx];
     if (prog && editingLine !== null && editingLine < prog.lines.length) {
-      const parsed = parseLine(text);
-      if (parsed) {
-        applyLineEdit(prog, editingLine, parsed);
-        // Re-render hex view to reflect changed bytes.
+      const trimmed = text.trim();
+      if (trimmed === '') {
+        // Empty input — delete the line.
+        deleteLineEdit(prog, editingLine);
+        selByte = null;
         renderHex(prog);
-        // Clear waveform selection — edited bytes have no waveform backing.
         waveform.selectByte(null);
+      } else {
+        const parsed = parseLine(trimmed);
+        if (parsed) {
+          applyLineEdit(prog, editingLine, parsed);
+          renderHex(prog);
+          waveform.selectByte(null);
+        }
       }
     }
   }

@@ -89,6 +89,54 @@ export function flagSyntaxErrors(prog: Program): void {
 }
 
 /**
+ * Delete a BASIC line from a program.
+ * Removes the line's bytes from prog.bytes, removes the LineInfo entry,
+ * shifts subsequent line indices, recalculates next-line pointers, and
+ * re-runs post-processing flags.
+ */
+export function deleteLineEdit(prog: Program, lineIdx: number): void {
+  const line = prog.lines[lineIdx];
+  const oldFirst = line.firstByte;
+  const oldLast  = line.lastByte;
+  const oldLen   = oldLast - oldFirst + 1;
+
+  // Remove the bytes from the byte stream.
+  prog.bytes.splice(oldFirst, oldLen);
+
+  // Remove the line from the lines array.
+  prog.lines.splice(lineIdx, 1);
+
+  // Shift all subsequent lines' byte indices.
+  for (let li = lineIdx; li < prog.lines.length; li++) {
+    prog.lines[li].firstByte -= oldLen;
+    prog.lines[li].lastByte  -= oldLen;
+    prog.lines[li].expectedLastByte -= oldLen;
+  }
+
+  // Recalculate next-line pointers throughout the program.
+  const startAddr = prog.header.startAddr;
+  const firstLineOffset = prog.lines.length > 0 ? prog.lines[0].firstByte : 0;
+
+  for (let li = 0; li < prog.lines.length; li++) {
+    const l = prog.lines[li];
+    let ptrValue: number;
+    if (li < prog.lines.length - 1) {
+      const nextLineByteOffset = prog.lines[li + 1].firstByte - firstLineOffset;
+      ptrValue = startAddr + nextLineByteOffset;
+    } else {
+      ptrValue = 0x0000;
+    }
+    prog.bytes[l.firstByte].v     = ptrValue & 0xFF;
+    prog.bytes[l.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
+  }
+
+  // Re-run all post-processing flags.
+  flagNonMonotonicLines(prog);
+  flagSyntaxErrors(prog);
+  flagElementErrors(prog);
+}
+
+/**
  * Apply an edit to a BASIC line in a program.
  * Replaces the line's bytes in prog.bytes, updates all line indices,
  * recalculates next-line pointers, and re-runs post-processing flags.
