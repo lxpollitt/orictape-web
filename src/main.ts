@@ -663,7 +663,13 @@ function renderBasic(prog: Program): void {
 
 // ── Inline BASIC line editing ─────────────────────────────────────────────────
 
-function enterEditMode(lineIdx: number): void {
+/**
+ * Enter edit mode on a BASIC line.
+ * @param lineIdx   Index into prog.lines
+ * @param replaceElem  If set, replace the element at this index with `insertChar`
+ * @param insertChar   The character to insert (replacing the selected element)
+ */
+function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: string): void {
   const prog = programs[activeProgIdx];
   if (!prog || lineIdx < 0 || lineIdx >= prog.lines.length) return;
 
@@ -707,8 +713,23 @@ function enterEditMode(lineIdx: number): void {
   lineEl.textContent = '';
   lineEl.appendChild(ta);
   editInput = ta as unknown as HTMLInputElement;  // reuse the same state variable
-  ta.focus();
-  ta.select();
+
+  if (replaceElem !== undefined && replaceElem >= 0 && replaceElem < line.elements.length && insertChar !== undefined) {
+    // Calculate the character range of the target element in the text.
+    let charStart = 0;
+    for (let ei = 0; ei < replaceElem; ei++) charStart += line.elements[ei].length;
+    const charEnd = charStart + line.elements[replaceElem].length;
+
+    // Replace the element text with the typed character.
+    ta.value = lineText.slice(0, charStart) + insertChar + lineText.slice(charEnd);
+    ta.focus();
+    // Position cursor after the inserted character.
+    ta.selectionStart = ta.selectionEnd = charStart + insertChar.length;
+  } else {
+    ta.focus();
+    ta.select();
+  }
+
   autoSize();  // initial sizing
 }
 
@@ -1914,6 +1935,24 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
       }
     }
     return;
+  }
+
+  // Printable character or Delete: start editing the selected BASIC line,
+  // replacing the selected element (tape view, BASIC panel focused).
+  if ((e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete')
+      && !e.metaKey && !e.ctrlKey && !e.altKey
+      && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+    const prog2 = programs[activeProgIdx];
+    if (prog2) {
+      const li2 = prog2.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
+      if (li2 >= 0) {
+        const ei2 = elemIdxForByte(prog2.lines[li2], selByte!);
+        e.preventDefault();
+        const insertChar = e.key.length === 1 ? e.key : '';  // Delete/Backspace = remove element
+        enterEditMode(li2, ei2 >= 0 ? ei2 : undefined, insertChar);
+        return;
+      }
+    }
   }
 
   // Don't let nav keys fire while the search input has focus.
