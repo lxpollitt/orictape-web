@@ -665,8 +665,9 @@ export class WaveformView {
           const stream = this.sampleToStream(sample);
           if (stream && this.clickedStream === stream && this.onStreamSelect) {
             // Second click on the same already-highlighted stream — navigate to it.
-            this.onStreamSelect(stream.progIdx);
             this.clickedStream = null;
+            this.clickedSample = 0;
+            this.onStreamSelect(stream.progIdx);
           } else {
             // First click — highlight the stream and show info.
             this.clickedStream = stream;
@@ -687,6 +688,7 @@ export class WaveformView {
         const stream = this.sampleToStream(sample);
         if (stream && this.onStreamSelect) {
           this.clickedStream = null;
+          this.clickedSample = 0;
           this.onStreamSelect(stream.progIdx);
         }
       }
