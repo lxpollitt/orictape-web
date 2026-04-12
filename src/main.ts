@@ -81,6 +81,8 @@ let selMergeElem: number | null            = null;
 let searchMatches:  number[]               = [];   // line indices of current matches
 let searchMatchIdx: number                 = -1;   // index into searchMatches
 let wrapMode      = true;
+let editingLine:    number | null          = null;  // line index being edited, or null
+let editInput:      HTMLInputElement | null = null;  // the inline edit input element
 /** Which panel most recently received focus — drives keyboard navigation. */
 let focusedPanel: 'hex' | 'basic' | null  = null;
 
@@ -666,6 +668,77 @@ function renderBasic(prog: Program): void {
   if (selLine >= 0) {
     basicPanel.querySelector<HTMLElement>(`[data-li="${selLine}"]`)
       ?.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+// ── Inline BASIC line editing ─────────────────────────────────────────────────
+
+function enterEditMode(lineIdx: number): void {
+  const prog = programs[activeProgIdx];
+  if (!prog || lineIdx < 0 || lineIdx >= prog.lines.length) return;
+
+  editingLine = lineIdx;
+  const line = prog.lines[lineIdx];
+  const lineText = line.elements.join('');
+
+  // Find the line div and replace its content with a textarea.
+  const lineEl = basicPanel.querySelector<HTMLElement>(`[data-li="${lineIdx}"]`);
+  if (!lineEl) return;
+
+  const ta = document.createElement('textarea');
+  ta.value = lineText;
+  ta.className = 'basic-edit-input';
+  ta.autocomplete = 'off';
+  ta.spellcheck = false;
+  ta.rows = 1;
+
+  // Auto-size height to fit content.
+  const autoSize = () => {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  };
+  ta.addEventListener('input', autoSize);
+
+  ta.addEventListener('blur', () => {
+    if (editingLine !== null) exitEditMode(true);
+  });
+
+  ta.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      exitEditMode(true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      exitEditMode(false);
+    }
+    e.stopPropagation();  // prevent navigation keys from bubbling
+  });
+
+  lineEl.textContent = '';
+  lineEl.appendChild(ta);
+  editInput = ta as unknown as HTMLInputElement;  // reuse the same state variable
+  ta.focus();
+  ta.select();
+  autoSize();  // initial sizing
+}
+
+function exitEditMode(confirmed: boolean): void {
+  if (editingLine === null || !editInput) return;
+
+  if (confirmed) {
+    const text = editInput.value;
+    console.log(`Edit line ${editingLine}: "${text}"`);
+    // TODO: parse text into BASIC tokens and update prog.bytes/lines
+  }
+
+  editingLine = null;
+  editInput = null;
+
+  // Re-render to restore the normal line display.
+  const prog = programs[activeProgIdx];
+  if (prog) {
+    renderBasic(prog);
+    updateStatusBar();
   }
 }
 
@@ -1808,6 +1881,9 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
 const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 
 document.addEventListener('keydown', (e: KeyboardEvent) => {
+  // Don't let any keys fire while the edit input has focus — it handles its own keys.
+  if (editInput && document.activeElement === editInput) return;
+
   // Cmd/Ctrl+F: open search bar (tape view only).
   if (e.key === 'f' && (e.metaKey || e.ctrlKey)) {
     if (viewMode === 'tape' && programs[activeProgIdx]) {
@@ -1816,6 +1892,20 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     }
     return;
   }
+
+  // Enter: start editing the selected BASIC line (tape view only).
+  if (e.key === 'Enter' && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+    const prog = programs[activeProgIdx];
+    if (prog) {
+      const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
+      if (li >= 0) {
+        e.preventDefault();
+        enterEditMode(li);
+      }
+    }
+    return;
+  }
+
   // Don't let nav keys fire while the search input has focus.
   if (document.activeElement === searchInput) return;
   if (!NAV_KEYS.has(e.key)) return;

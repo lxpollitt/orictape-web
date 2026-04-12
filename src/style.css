@@ -452,6 +452,23 @@ header h1 {
 .basic-line .elem.elem-warn  { color: var(--yellow); text-decoration: underline; text-underline-offset: 15%; }
 .basic-line .elem.sel        { background: #2a5a2a; box-shadow: inset 0 0 0 1px var(--green); }
 
+.basic-edit-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 2px;
+  font: inherit;
+  font-size: inherit;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--bright);
+  border: 1px solid var(--green);
+  border-radius: 2px;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+}
+.basic-wrap .basic-edit-input { max-width: 39ch; word-break: break-all; }
+
 /* ── Status bar ─────────────────────────────────────────────────────────────── */
 #statusbar {
   display: flex;
