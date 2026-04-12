@@ -4,6 +4,7 @@ import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
+import { parseLine } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -727,8 +728,23 @@ function exitEditMode(confirmed: boolean): void {
 
   if (confirmed) {
     const text = editInput.value;
-    console.log(`Edit line ${editingLine}: "${text}"`);
-    // TODO: parse text into BASIC tokens and update prog.bytes/lines
+    const prog = programs[activeProgIdx];
+    // Extract original line bytes (line number + content + terminator, excluding the 2-byte next-line pointer).
+    let originalBytes: number[] | undefined;
+    if (prog && editingLine !== null && editingLine < prog.lines.length) {
+      const line = prog.lines[editingLine];
+      originalBytes = [];
+      for (let b = line.firstByte + 2; b <= line.lastByte; b++) {
+        originalBytes.push(prog.bytes[b].v);
+      }
+    }
+    const parsed = parseLine(text, originalBytes);
+    if (parsed) {
+      console.log(`Edit line ${editingLine}: lineNum=${parsed.lineNum}, bytes=[${parsed.bytes.map(b => b.toString(16).padStart(2, '0')).join(' ')}]`);
+      // TODO: apply parsed bytes to prog.bytes/lines
+    } else {
+      console.log(`Edit line ${editingLine}: parse failed for "${text}"`);
+    }
   }
 
   editingLine = null;
