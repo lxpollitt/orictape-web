@@ -6,7 +6,7 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-import { flagSyntaxErrors } from './editor';
+import { flagSyntaxErrors, checkLineSyntax } from './editor';
 
 // BitInfo is used by the UI when reading individual bits out of a BitStream.
 export interface BitInfo {
@@ -50,6 +50,9 @@ export interface LineInfo {
   /** Set when re-tokenising the line's text produces different bytes than
    *  the original — indicates the stored bytes aren't valid tokenised BASIC. */
   syntaxError?: boolean;
+  /** Per-element error severity. Null/undefined = no element-level issues.
+   *  When present, one entry per element: 'error', 'warning', or null (clean). */
+  elementErrors?: ('error' | 'warning' | null)[];
 }
 
 // ── Line health utilities ────────────────────────────────────────────────────
@@ -164,6 +167,79 @@ export function programSummary(prog: Program): { label: string; count: number; s
   if (errorLines > 0)   result.push({ label: 'errors', count: errorLines, severity: 'error' });
   if (warningLines > 0) result.push({ label: 'warnings', count: warningLines, severity: 'warning' });
   return result;
+}
+
+/**
+ * Populate per-element error severities on each line in a program.
+ * Consolidates all element-level error detection into one pass:
+ *   - Non-monotonic line number (element 0) → 'error'
+ *   - [UNKNOWN_KEYWORD] element → 'error'
+ *   - Syntax mismatch at this element's byte → 'error'
+ *   - Underlying byte has chkErr → 'error'
+ *   - Underlying byte has unclear → 'warning'
+ *
+ * Only allocates the elementErrors array if at least one element has an issue.
+ * Must be called after flagNonMonotonicLines and flagSyntaxErrors.
+ */
+export function flagElementErrors(prog: Program): void {
+  for (let li = 0; li < prog.lines.length; li++) {
+    const line = prog.lines[li];
+    const errors: ('error' | 'warning' | null)[] = new Array(line.elements.length).fill(null);
+    let hasAny = false;
+
+    // Determine syntax mismatch byte offset (if any).
+    let syntaxMismatchByte = -1;
+    if (line.syntaxError) {
+      const lineText = line.elements.join('');
+      const originalBytes: number[] = [];
+      for (let b = line.firstByte + 2; b <= line.lastByte; b++) {
+        originalBytes.push(prog.bytes[b].v);
+      }
+      const issue = checkLineSyntax(lineText, originalBytes);
+      if (issue) syntaxMismatchByte = issue.byteOffset;
+    }
+
+    for (let ei = 0; ei < line.elements.length; ei++) {
+      const el = line.elements[ei];
+      let severity: 'error' | 'warning' | null = null;
+
+      // Non-monotonic line number.
+      if (ei === 0 && line.nonMonotonic) {
+        severity = 'error';
+      }
+
+      // Unknown keyword.
+      if (el === '[UNKNOWN_KEYWORD]') {
+        severity = 'error';
+      }
+
+      // Syntax mismatch: map byte offset to element index.
+      // Byte offset 0-1 = line number (element 0), offset N+2 = element N+1 content byte.
+      if (syntaxMismatchByte >= 0) {
+        const mismatchEi = syntaxMismatchByte <= 1 ? 0 : syntaxMismatchByte - 1;
+        if (ei === mismatchEi) severity = 'error';
+      }
+
+      // Byte-level flags (only if no harder error already set).
+      if (!severity) {
+        if (ei === 0) {
+          const b2 = prog.bytes[line.firstByte + 2];
+          const b3 = prog.bytes[line.firstByte + 3];
+          if (b2?.chkErr || b3?.chkErr)       severity = 'error';
+          else if (b2?.unclear || b3?.unclear) severity = 'warning';
+        } else {
+          const b = prog.bytes[line.firstByte + 3 + ei];
+          if (b?.chkErr)       severity = 'error';
+          else if (b?.unclear) severity = 'warning';
+        }
+      }
+
+      errors[ei] = severity;
+      if (severity) hasAny = true;
+    }
+
+    line.elementErrors = hasAny ? errors : undefined;
+  }
 }
 
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
@@ -664,6 +740,7 @@ export function readPrograms(streams: BitStream[]): Program[] {
       readProgramLines(prog);
       flagNonMonotonicLines(prog);
       flagSyntaxErrors(prog);
+      flagElementErrors(prog);
       programs.push(prog);
     }
   }

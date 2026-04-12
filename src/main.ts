@@ -491,22 +491,6 @@ function elemIdxForByte(line: { firstByte: number; lastByte: number }, byteIdx: 
   return -1;
 }
 
-/**
- * Return the CSS error class for element `ei` of a BASIC line based on the
- * byte(s) it corresponds to — independent of whether the element is selected.
- * Element 0 = line-number field (2 bytes at offsets +2,+3 from firstByte).
- * Element ei ≥ 1 = single content byte at offset ei+3 from firstByte.
- */
-function elemErrorClass(prog: Program, firstByte: number, ei: number): string {
-  const offsets = ei === 0 ? [2, 3] : [ei + 3];
-  let chkErr = false, unclear = false;
-  for (const off of offsets) {
-    const b = prog.bytes[firstByte + off];
-    if (b?.chkErr)       chkErr   = true;
-    else if (b?.unclear) unclear  = true;
-  }
-  return chkErr ? 'elem-err' : unclear ? 'elem-warn' : '';
-}
 
 // ── BASIC search ─────────────────────────────────────────────────────────────
 
@@ -658,10 +642,8 @@ function renderBasic(prog: Program): void {
     ].join(' ');
 
     const elemsHtml = line.elements.map((el, ei) => {
-      // Error class is always applied so errors are visible without selecting.
-      const errCls = el === '[UNKNOWN_KEYWORD]' ? 'elem-err'
-        : (ei === 0 && line.nonMonotonic) ? 'elem-err'
-        : elemErrorClass(prog, line.firstByte, ei);
+      const elemSev = line.elementErrors?.[ei];
+      const errCls = elemSev === 'error' ? 'elem-err' : elemSev === 'warning' ? 'elem-warn' : '';
       const selCls = (i === selLine && ei === selElem) ? ' sel' : '';
       return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
     }).join('');
@@ -795,9 +777,8 @@ function renderBasicLineHtml(
     ...(extraClass ? [extraClass] : []),
   ].join(' ');
   const elems = line.elements.map((el, ei) => {
-    const errCls = el === '[UNKNOWN_KEYWORD]' ? 'elem-err'
-      : (ei === 0 && line.nonMonotonic) ? 'elem-err'
-      : elemErrorClass(prog, line.firstByte, ei);
+    const elemSev = line.elementErrors?.[ei];
+    const errCls = elemSev === 'error' ? 'elem-err' : elemSev === 'warning' ? 'elem-warn' : '';
     const selCls = ei === selElem ? ' sel' : '';
     return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
   }).join('');
@@ -1452,7 +1433,8 @@ function mergeColSource(col: 0|1|2, mli: number): { prog: Program; lineIdx: numb
 function mergeColElemHasError(col: 0|1|2, mli: number, ei: number): boolean {
   const s = mergeColSource(col, mli);
   if (!s) return false;
-  return elemErrorClass(s.prog, s.prog.lines[s.lineIdx].firstByte, ei) !== '';
+  const line = s.prog.lines[s.lineIdx];
+  return line.elementErrors?.[ei] != null;
 }
 
 /**
