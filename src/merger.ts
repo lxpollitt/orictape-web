@@ -1,4 +1,5 @@
 import type { Program } from './decoder';
+import { lineHasHardError, lineHealth } from './decoder';
 
 // ── Source references ─────────────────────────────────────────────────────────
 // We store indices rather than copies of data. All raw data lives in
@@ -300,32 +301,14 @@ export function mergeLineBytes(
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/**
- * Returns true if the line has hard errors (chkErr bytes, structural errors).
- * Unclear-only lines return false.
- */
-function lineHasHardError(prog: Program, lineIdx: number): boolean {
-  const line = prog.lines[lineIdx];
-  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError) return true;
-  for (let i = line.firstByte; i <= line.lastByte; i++) {
-    if (prog.bytes[i]?.chkErr) return true;
-  }
-  return false;
-}
+
 
 /**
- * Returns true only if every byte in the line is free of checksum errors,
- * unclear bits, and length mismatches.  Both errors AND warnings count as
- * not-clean so that "agree on corrupt data" is correctly flagged as an issue.
+ * Returns true only if the line is completely clean (no errors, no unclear bytes).
+ * Delegates to lineHealth from decoder.ts.
  */
 export function isLineClean(prog: Program, lineIdx: number): boolean {
-  const line = prog.lines[lineIdx];
-  if (line.lenErr) return false;
-  for (let i = line.firstByte; i <= line.lastByte; i++) {
-    const b = prog.bytes[i];
-    if (b?.chkErr || b?.unclear) return false;
-  }
-  return true;
+  return lineHealth(prog, lineIdx) === 'clean';
 }
 
 /**

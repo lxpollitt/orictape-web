@@ -2,7 +2,8 @@ import './style.css';
 import { parseWavFile } from './wavfile';
 import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
-import type { Program, LineInfo, ByteInfo } from './decoder';
+import type { Program, LineInfo, ByteInfo, LineStatus } from './decoder';
+import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
 import { parseLine } from './editor';
 import {
@@ -354,12 +355,16 @@ function renderTabs(): void {
       btn.className  = `prog-tab${isActive ? ' active' : ''}`;
       btn.dataset.ti = String(ti);
       btn.dataset.pi = String(pi);
-      const hasErrors = prog.lines.some(l => l.lenErr || l.earlyEnd || l.unknownKeyword || l.nonMonotonic || l.syntaxError);
+      const health = programHealth(prog);
+      const hasErrors = health === 'error';
       const infoText  = prog.lines.length > 0
         ? `${prog.lines.length} line${prog.lines.length !== 1 ? 's' : ''}`
         : `${prog.bytes.length} byte${prog.bytes.length !== 1 ? 's' : ''}`;
-      const badgesHtml =
-        (hasErrors ? '<span class="badge badge-err">errors</span>' : '');
+      const badgesHtml = hasErrors
+        ? '<span class="badge badge-err">errors</span>'
+        : health === 'warning'
+          ? '<span class="badge badge-warn">warnings</span>'
+          : '';
       btn.innerHTML =
         `<div class="prog-tab-name"><span class="prog-num">${pi + 1}</span>${escHtml(prog.name || `Prog ${pi + 1}`)}</div>` +
         `<div class="prog-tab-info">${infoText}</div>` +
@@ -638,11 +643,9 @@ function renderBasic(prog: Program): void {
 
   const matchSet = new Set(searchMatches);
   basicPanel.innerHTML = prog.lines.map((line, i) => {
-    // Classify the line: 'err' if lenErr or any chkErr byte; 'warn' if only
-    // unclear bytes or non-monotonic line number (no hard errors).
-    const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-    const hasChkErr = line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError || lineBytes.some(b => b?.chkErr);
-    const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
+    const health = lineHealth(prog, i);
+    const hasChkErr  = health === 'error';
+    const hasUnclear = health === 'warning';
     const isMatch   = matchSet.has(i);
     const isCurrent = isMatch && searchMatchIdx >= 0 && searchMatches[searchMatchIdx] === i;
     const lineClass = [
@@ -782,9 +785,9 @@ function renderBasicLineHtml(
   selElem: number | null = null,
 ): string {
   const line      = prog.lines[lineIdx];
-  const lineBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-  const hasChkErr  = line.lenErr || line.nonMonotonic || line.syntaxError || lineBytes.some(b => b?.chkErr);
-  const hasUnclear = !hasChkErr && lineBytes.some(b => b?.unclear);
+  const health    = lineHealth(prog, lineIdx);
+  const hasChkErr  = health === 'error';
+  const hasUnclear = health === 'warning';
   const cls = [
     'basic-line',
     ...(hasChkErr  ? ['err']  : []),
@@ -1674,13 +1677,7 @@ function isErrByte(b: ByteInfo): boolean {
 }
 
 function lineHasError(prog: Program, li: number): boolean {
-  const line = prog.lines[li];
-  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError) return true;
-  for (let b = line.firstByte; b <= line.lastByte; b++) {
-    const byte = prog.bytes[b];
-    if (byte && isErrByte(byte)) return true;
-  }
-  return false;
+  return lineHealth(prog, li) !== 'clean';
 }
 
 /** Number of bytes per visual row in the current hex grid, measured from DOM.
@@ -2054,7 +2051,10 @@ function updateStatusBar(): void {
       const startSec    = Math.floor(refSample / tape.sampleRate);
       const base        = tape.filename.replace(/\.wav$/i, '');
       const name        = prog.name || '(unnamed)';
-      statusBar.innerHTML = `<span class="sb-dim">${escHtml(base)}_${escHtml(name)}_${startSec}s</span>`;
+      const summary = programSummary(prog);
+      const summaryParts = summary.map(s => `${s.count} ${s.label}`).join(' · ');
+      const pipe = '  <span class="sb-dim">│</span>  ';
+      statusBar.innerHTML = `<span class="sb-dim">${escHtml(base)}_${escHtml(name)}_${startSec}s</span>${pipe}<span class="sb-dim">${summaryParts}</span>`;
     } else {
       statusBar.innerHTML = '<span class="sb-dim">Click a byte or BASIC line to inspect.</span>';
     }
@@ -2084,23 +2084,10 @@ function updateStatusBar(): void {
     if (li < 0) {
       lineSegs.push(describeProgRegion(prog, selByte!));
     } else {
-      const line = prog.lines[li];
       lineSegs.push(`Line ${li + 1}`);
-      if (line.earlyEnd) {
-        lineSegs.push(`<span class="sb-err">Unexpected end of program · null pointer before header end address</span>`);
-      } else if (line.lenErr) {
-        const expected = line.expectedLastByte - line.firstByte + 1;
-        const actual   = line.lastByte         - line.firstByte + 1;
-        lineSegs.push(`<span class="sb-err">Line length error (expected ${expected} bytes, found ${actual})</span>`);
-      }
-      if (line.unknownKeyword) {
-        lineSegs.push(`<span class="sb-err">Unknown keyword byte</span>`);
-      }
-      if (line.syntaxError) {
-        lineSegs.push(`<span class="sb-err">Tokenisation mismatch</span>`);
-      }
-      if (line.nonMonotonic) {
-        lineSegs.push(`<span class="sb-err">Non-monotonic line number</span>`);
+      for (const s of lineStatuses(prog, li)) {
+        const cls = s.severity === 'error' ? 'sb-err' : 'sb-warn';
+        lineSegs.push(`<span class="${cls}">${s.message}</span>`);
       }
     }
     sections.push(lineSegs.join(dot));
@@ -2146,12 +2133,7 @@ function updateMergedStatusBar(): void {
                     const progs = mergeProgs();
                     const src = bestSource(line, progs);
                     const prog = progs[src.tapeIdx];
-                    const hasHardErr = prog && (() => {
-                      const li = prog.lines[src.lineIdx];
-                      if (li.lenErr || li.earlyEnd || li.unknownKeyword || li.nonMonotonic || li.syntaxError) return true;
-                      for (let b = li.firstByte; b <= li.lastByte; b++) { if (prog.bytes[b]?.chkErr) return true; }
-                      return false;
-                    })();
+                    const hasHardErr = prog && lineHasHardError(prog, src.lineIdx);
                     const cls = hasHardErr ? 'sb-err' : 'sb-warn';
                     const errWord = hasHardErr ? 'errors' : 'unclear';
                     return line.status === 'consensus'

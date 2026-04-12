@@ -52,6 +52,120 @@ export interface LineInfo {
   syntaxError?: boolean;
 }
 
+// ── Line health utilities ────────────────────────────────────────────────────
+
+export type LineSeverity = 'error' | 'warning' | 'clean';
+
+export interface LineStatus {
+  message:  string;
+  severity: 'error' | 'warning';
+}
+
+/**
+ * Determine the overall health of a line: 'error', 'warning', or 'clean'.
+ * Considers both line-level flags and byte-level flags.
+ */
+export function lineHealth(prog: Program, lineIdx: number): LineSeverity {
+  const line = prog.lines[lineIdx];
+  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError) return 'error';
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    const b = prog.bytes[i];
+    if (b?.chkErr) return 'error';
+  }
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    const b = prog.bytes[i];
+    if (b?.unclear) return 'warning';
+  }
+  return 'clean';
+}
+
+/**
+ * Return true if the line has any hard error (chkErr bytes, structural issues).
+ * Unclear-only lines return false.
+ */
+export function lineHasHardError(prog: Program, lineIdx: number): boolean {
+  return lineHealth(prog, lineIdx) === 'error';
+}
+
+/**
+ * Return a list of status messages for a line, describing each issue found.
+ * Used by the status bar and other UI elements that need to display error details.
+ */
+export function lineStatuses(prog: Program, lineIdx: number): LineStatus[] {
+  const line = prog.lines[lineIdx];
+  const statuses: LineStatus[] = [];
+
+  if (line.earlyEnd) {
+    statuses.push({ message: 'Unexpected end of program · null pointer before header end address', severity: 'error' });
+  }
+  if (line.lenErr) {
+    const expected = line.expectedLastByte - line.firstByte + 1;
+    const actual   = line.lastByte         - line.firstByte + 1;
+    statuses.push({ message: `Line length error (expected ${expected} bytes, found ${actual})`, severity: 'error' });
+  }
+  if (line.unknownKeyword) {
+    statuses.push({ message: 'Unknown keyword byte', severity: 'error' });
+  }
+  if (line.nonMonotonic) {
+    statuses.push({ message: 'Non-monotonic line number', severity: 'error' });
+  }
+  if (line.syntaxError) {
+    statuses.push({ message: 'Tokenisation mismatch', severity: 'error' });
+  }
+
+  // Byte-level issues (summarised, not per-byte).
+  let chkErrCount = 0;
+  let unclearCount = 0;
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    const b = prog.bytes[i];
+    if (b?.chkErr)       chkErrCount++;
+    else if (b?.unclear) unclearCount++;
+  }
+  if (chkErrCount > 0) {
+    statuses.push({ message: `${chkErrCount} checksum error byte${chkErrCount !== 1 ? 's' : ''}`, severity: 'error' });
+  }
+  if (unclearCount > 0) {
+    statuses.push({ message: `${unclearCount} unclear byte${unclearCount !== 1 ? 's' : ''}`, severity: 'warning' });
+  }
+
+  return statuses;
+}
+
+/**
+ * Determine the highest severity across all lines in a program.
+ */
+export function programHealth(prog: Program): LineSeverity {
+  let worst: LineSeverity = 'clean';
+  for (let i = 0; i < prog.lines.length; i++) {
+    const h = lineHealth(prog, i);
+    if (h === 'error') return 'error';
+    if (h === 'warning') worst = 'warning';
+  }
+  return worst;
+}
+
+/**
+ * Summarise error/warning counts across all lines in a program.
+ * Returns a compact array of { label, count, severity } suitable for display.
+ */
+export function programSummary(prog: Program): { label: string; count: number; severity: LineSeverity }[] {
+  let errorLines = 0;
+  let warningLines = 0;
+  let cleanLines = 0;
+  for (let i = 0; i < prog.lines.length; i++) {
+    const h = lineHealth(prog, i);
+    if (h === 'error') errorLines++;
+    else if (h === 'warning') warningLines++;
+    else cleanLines++;
+  }
+  const result: { label: string; count: number; severity: LineSeverity }[] = [];
+  result.push({ label: 'lines', count: prog.lines.length, severity: 'clean' });
+  if (cleanLines > 0)   result.push({ label: 'clean', count: cleanLines, severity: 'clean' });
+  if (errorLines > 0)   result.push({ label: 'errors', count: errorLines, severity: 'error' });
+  if (warningLines > 0) result.push({ label: 'warnings', count: warningLines, severity: 'warning' });
+  return result;
+}
+
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
 // This is ~10x more memory-efficient than an array of BitInfo objects and
 // reduces GC pressure significantly for large tape recordings.
