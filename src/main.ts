@@ -731,7 +731,10 @@ function exitEditMode(confirmed: boolean): void {
         if (parsed) {
           applyLineEdit(prog, editingLine, parsed);
           renderHex(prog);
-          waveform.selectByte(null);
+          // Clear waveform selection only if the selected byte is now edited.
+          if (selByte !== null && prog.bytes[selByte]?.edited) {
+            waveform.selectByte(null);
+          }
         }
       }
     }

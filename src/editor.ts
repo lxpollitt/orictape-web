@@ -137,9 +137,10 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
 }
 
 /**
- * Apply an edit to a BASIC line in a program.
- * Replaces the line's bytes in prog.bytes, updates all line indices,
- * recalculates next-line pointers, and re-runs post-processing flags.
+ * Apply an edit to a BASIC line in a program using LCS-based minimal diff.
+ * Preserves original ByteInfo entries (with waveform references, error flags)
+ * for bytes that didn't change. Only creates new edited ByteInfo entries for
+ * bytes that actually differ.
  *
  * @param prog     The program to modify (mutated in place)
  * @param lineIdx  Index into prog.lines of the line being edited
@@ -151,26 +152,69 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   const oldLast  = line.lastByte;
   const oldLen   = oldLast - oldFirst + 1;
 
-  // Build the full line bytes: next-line pointer (2 bytes placeholder) + parsed bytes
-  // (line number + content + null terminator).
-  // The pointer will be recalculated below.
+  // Build the full new line bytes: pointer placeholder (2 bytes) + parsed bytes.
   const newContentBytes = parsed.bytes;  // lineNum(2) + content + 0x00
-  const newLineBytes: number[] = [0x00, 0x00, ...newContentBytes];  // placeholder ptr + content
+  const newLineBytes: number[] = [0x00, 0x00, ...newContentBytes];
   const newLen = newLineBytes.length;
   const delta = newLen - oldLen;
 
-  // Create ByteInfo entries for the new bytes.
-  const newByteInfos: ByteInfo[] = newLineBytes.map(v => ({
-    v,
-    firstBit: 0,
-    lastBit:  0,
-    unclear:  false,
-    chkErr:   false,
-    edited:   true,
-  }));
+  // Extract old byte values (skipping the 2-byte pointer — we always recalculate it).
+  // Compare from offset 2 onwards.
+  const oldValues: number[] = [];
+  for (let i = oldFirst + 2; i <= oldLast; i++) oldValues.push(prog.bytes[i].v);
+  const newValues = newContentBytes;  // already excludes the pointer
 
-  // Splice: remove old bytes, insert new ones.
-  prog.bytes.splice(oldFirst, oldLen, ...newByteInfos);
+  // LCS on the content bytes (excluding pointer) to find minimal diff.
+  const n = oldValues.length;
+  const m = newValues.length;
+  const dp: Uint16Array[] = new Array(n + 1);
+  for (let i = 0; i <= n; i++) dp[i] = new Uint16Array(m + 1);
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      dp[i][j] = oldValues[i - 1] === newValues[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+
+  // Backtrack to build the merged byte array.
+  // For matched bytes: preserve the original ByteInfo.
+  // For changed/inserted bytes: create new ByteInfo with edited=true.
+  // For deleted bytes: skip (don't include).
+  const mergedContent: ByteInfo[] = [];
+  let oi = n, ni = m;
+  // Build in reverse, then reverse at the end.
+  const reverseContent: ByteInfo[] = [];
+  while (oi > 0 || ni > 0) {
+    if (oi > 0 && ni > 0 && oldValues[oi - 1] === newValues[ni - 1]) {
+      // Match — preserve original ByteInfo.
+      reverseContent.push(prog.bytes[oldFirst + 2 + (oi - 1)]);
+      oi--; ni--;
+    } else if (ni > 0 && (oi === 0 || dp[oi][ni - 1] >= dp[oi - 1][ni])) {
+      // Insertion in new — create edited byte.
+      reverseContent.push({
+        v: newValues[ni - 1],
+        firstBit: 0, lastBit: 0,
+        unclear: false, chkErr: false,
+        edited: true,
+      });
+      ni--;
+    } else {
+      // Deletion from old — skip.
+      oi--;
+    }
+  }
+  reverseContent.reverse();
+
+  // Build the full merged line: pointer (2 bytes, preserved from original) + merged content.
+  const mergedLine: ByteInfo[] = [
+    { ...prog.bytes[oldFirst],     edited: undefined },  // pointer byte 0 (value recalculated below)
+    { ...prog.bytes[oldFirst + 1], edited: undefined },  // pointer byte 1
+    ...reverseContent,
+  ];
+
+  // Splice the merged line into prog.bytes.
+  prog.bytes.splice(oldFirst, oldLen, ...mergedLine);
 
   // Shift all subsequent lines' byte indices by delta.
   for (let li = lineIdx + 1; li < prog.lines.length; li++) {
@@ -180,39 +224,31 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   }
 
   // Update the edited line's byte range.
-  line.lastByte = oldFirst + newLen - 1;
+  line.lastByte = oldFirst + mergedLine.length - 1;
   line.expectedLastByte = line.lastByte;
   line.lenErr = false;
 
   // Recalculate next-line pointers throughout the program.
-  // The pointer at each line's firstByte+0,+1 is the memory address of the
-  // NEXT line (or 0x0000 for the last line). Memory addresses start at startAddr.
   const startAddr = prog.header.startAddr;
-  // Find the byte offset of the first line's content relative to the header.
   const firstLineOffset = prog.lines[0].firstByte;
 
   for (let li = 0; li < prog.lines.length; li++) {
     const l = prog.lines[li];
     let ptrValue: number;
     if (li < prog.lines.length - 1) {
-      // Point to the next line's memory address.
       const nextLineByteOffset = prog.lines[li + 1].firstByte - firstLineOffset;
       ptrValue = startAddr + nextLineByteOffset;
     } else {
-      // Last line: pointer = 0x0000 (end of program).
       ptrValue = 0x0000;
     }
-    // Write the pointer (little-endian) into the byte stream.
     prog.bytes[l.firstByte].v     = ptrValue & 0xFF;
     prog.bytes[l.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
   }
 
   // Update the edited line's elements and line number from the parsed data.
-  // Re-decode elements from the new bytes (simplest way to get elements right).
   const elements: string[] = [];
   const lineNumStr = `${parsed.lineNum} `;
   elements.push(lineNumStr);
-  // Walk content bytes (after the 2-byte line number, before the null terminator).
   for (let i = 2; i < newContentBytes.length - 1; i++) {
     const b = newContentBytes[i];
     if (b < 128) {
