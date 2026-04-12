@@ -700,9 +700,10 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   });
 
   ta.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
-      exitEditMode(true);
+      const direction = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
+      exitEditMode(true, direction);
     } else if (e.key === 'Escape') {
       e.preventDefault();
       exitEditMode(false);
@@ -733,8 +734,16 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   autoSize();  // initial sizing
 }
 
-function exitEditMode(confirmed: boolean): void {
+/**
+ * Exit edit mode, optionally applying the edit and navigating to an adjacent line.
+ * @param confirmed  true = apply the edit, false = discard
+ * @param direction  -1 = move to previous line, 1 = next line, 0 = stay (default)
+ */
+function exitEditMode(confirmed: boolean, direction = 0): void {
   if (editingLine === null || !editInput) return;
+
+  const prevEditingLine = editingLine;
+  const cursorPos = editInput ? (editInput as HTMLTextAreaElement).selectionStart ?? 0 : 0;
 
   if (confirmed) {
     const text = editInput.value;
@@ -768,6 +777,22 @@ function exitEditMode(confirmed: boolean): void {
   const prog = programs[activeProgIdx];
   if (prog) {
     renderBasic(prog);
+
+    // Navigate to adjacent line if requested.
+    if (direction !== 0 && prog.lines.length > 0) {
+      const targetLi = Math.max(0, Math.min(prog.lines.length - 1, prevEditingLine + direction));
+      const targetLine = prog.lines[targetLi];
+      // Map the cursor position from the edit to an element index on the target line.
+      let targetEi = 0;
+      let charCount = 0;
+      for (let ei = 0; ei < targetLine.elements.length; ei++) {
+        charCount += targetLine.elements[ei].length;
+        if (charCount > cursorPos) { targetEi = ei; break; }
+        targetEi = ei;
+      }
+      selectByte(byteForElem(targetLine, targetEi));
+    }
+
     updateStatusBar();
   }
 }
