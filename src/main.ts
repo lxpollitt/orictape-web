@@ -700,15 +700,32 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   });
 
   ta.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if (e.key === 'Enter') {
       e.preventDefault();
-      const direction = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
-      exitEditMode(true, direction);
+      exitEditMode(true);
     } else if (e.key === 'Escape') {
       e.preventDefault();
       exitEditMode(false);
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      // Capture cursor position before the browser moves it.
+      // After a minimal timeout, check if the cursor hit a boundary
+      // (moved to 0 for Up, or value.length for Down).
+      const posBefore = ta.selectionStart;
+      const direction = e.key === 'ArrowUp' ? -1 : 1;
+      e.stopPropagation();  // prevent global handler from double-processing
+      setTimeout(() => {
+        if (editingLine === null) return;  // already exited
+        const atBoundary = direction === -1
+          ? ta.selectionStart === 0
+          : ta.selectionStart === ta.value.length;
+        if (atBoundary) {
+          ta.selectionStart = ta.selectionEnd = posBefore;
+          exitEditMode(true, direction);
+        }
+      }, 0);
+      return;
     }
-    e.stopPropagation();  // prevent navigation keys from bubbling
+    e.stopPropagation();
   });
 
   lineEl.textContent = '';
@@ -778,19 +795,25 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
   if (prog) {
     renderBasic(prog);
 
-    // Navigate to adjacent line if requested.
-    if (direction !== 0 && prog.lines.length > 0) {
-      const targetLi = Math.max(0, Math.min(prog.lines.length - 1, prevEditingLine + direction));
-      const targetLine = prog.lines[targetLi];
-      // Map the cursor position from the edit to an element index on the target line.
+    // Map cursor position to element on the edited line, then optionally navigate.
+    if (prevEditingLine >= 0 && prevEditingLine < prog.lines.length) {
+      const editedLine = prog.lines[prevEditingLine];
+      // Find which element the cursor was in.
       let targetEi = 0;
       let charCount = 0;
-      for (let ei = 0; ei < targetLine.elements.length; ei++) {
-        charCount += targetLine.elements[ei].length;
+      for (let ei = 0; ei < editedLine.elements.length; ei++) {
+        charCount += editedLine.elements[ei].length;
         if (charCount > cursorPos) { targetEi = ei; break; }
         targetEi = ei;
       }
-      selectByte(byteForElem(targetLine, targetEi));
+      // Select that element on the edited line (puts it in the DOM with .sel).
+      selectByte(byteForElem(editedLine, targetEi));
+
+      // If navigating up/down, use the existing visual navigation from this position.
+      if (direction !== 0) {
+        const key = direction === -1 ? 'ArrowUp' : 'ArrowDown';
+        navigateBasic(key, false, prog);
+      }
     }
 
     updateStatusBar();
