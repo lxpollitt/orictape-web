@@ -5,7 +5,7 @@ import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo, LineStatus } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
-import { parseLine } from './editor';
+import { parseLine, applyLineEdit } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -331,7 +331,10 @@ progTabs.addEventListener('click', (e) => {
   if (viewMode === 'tape' && selByte !== null) {
     hexPanel.querySelector<HTMLElement>(`[data-i="${selByte}"]`)
       ?.scrollIntoView({ block: 'nearest' });
-    if (leftSamples && !tapes[activeTapeIdx]?.fromTap) waveform.selectByte(selByte);
+    if (leftSamples && !tapes[activeTapeIdx]?.fromTap) {
+      const byte = programs[activeProgIdx]?.bytes[selByte];
+      waveform.selectByte(byte?.edited ? null : selByte);
+    }
   }
 });
 
@@ -477,6 +480,7 @@ function renderHex(prog: Program): void {
     if (i < firstContent || i >= lastContent) cls.push('hb-pre');
     if (b.chkErr)                        cls.push('hb-err');
     else if (b.unclear)                  cls.push('hb-unclear');
+    if (b.edited)                        cls.push('hb-edited');
     if (i >= lineFirst && i <= lineLast) cls.push('hb-line');
     if (i === selByte)                   cls.push('hb-sel');
     html += `<span class="${cls.join(' ')}" data-i="${i}">${b.v.toString(16).padStart(2, '0')}</span>`;
@@ -714,21 +718,15 @@ function exitEditMode(confirmed: boolean): void {
   if (confirmed) {
     const text = editInput.value;
     const prog = programs[activeProgIdx];
-    // Extract original line bytes (line number + content + terminator, excluding the 2-byte next-line pointer).
-    let originalBytes: number[] | undefined;
     if (prog && editingLine !== null && editingLine < prog.lines.length) {
-      const line = prog.lines[editingLine];
-      originalBytes = [];
-      for (let b = line.firstByte + 2; b <= line.lastByte; b++) {
-        originalBytes.push(prog.bytes[b].v);
+      const parsed = parseLine(text);
+      if (parsed) {
+        applyLineEdit(prog, editingLine, parsed);
+        // Re-render hex view to reflect changed bytes.
+        renderHex(prog);
+        // Clear waveform selection — edited bytes have no waveform backing.
+        waveform.selectByte(null);
       }
-    }
-    const parsed = parseLine(text, originalBytes);
-    if (parsed) {
-      console.log(`Edit line ${editingLine}: lineNum=${parsed.lineNum}, bytes=[${parsed.bytes.map(b => b.toString(16).padStart(2, '0')).join(' ')}]`);
-      // TODO: apply parsed bytes to prog.bytes/lines
-    } else {
-      console.log(`Edit line ${editingLine}: parse failed for "${text}"`);
     }
   }
 
@@ -1001,6 +999,7 @@ function renderMergedHex(merged: MergedProgram): void {
     const cls = ['hb',
       ...(b.chkErr  ? ['hb-err']     : []),
       ...(b.unclear ? ['hb-unclear'] : []),
+      ...(b.edited  ? ['hb-edited']  : []),
     ].join(' ');
     html += `<span class="${cls}">${b.v.toString(16).padStart(2, '0')}</span>`;
   }
@@ -1376,7 +1375,13 @@ function selectByte(i: number): void {
     }
   }
 
-  waveform.selectByte(i);
+  // Don't navigate the waveform for edited bytes (no waveform backing).
+  const byte = prog?.bytes[i];
+  if (byte?.edited) {
+    waveform.selectByte(null);
+  } else {
+    waveform.selectByte(i);
+  }
   updateStatusBar();
 }
 

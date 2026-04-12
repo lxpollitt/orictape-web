@@ -35,7 +35,8 @@
  */
 
 import { KEYWORDS } from './decoder';
-import type { Program } from './decoder';
+import type { Program, ByteInfo } from './decoder';
+import { flagNonMonotonicLines, flagElementErrors } from './decoder';
 
 export interface ParsedLine {
   lineNum: number;
@@ -85,6 +86,102 @@ export function flagSyntaxErrors(prog: Program): void {
       line.syntaxError = true;
     }
   }
+}
+
+/**
+ * Apply an edit to a BASIC line in a program.
+ * Replaces the line's bytes in prog.bytes, updates all line indices,
+ * recalculates next-line pointers, and re-runs post-processing flags.
+ *
+ * @param prog     The program to modify (mutated in place)
+ * @param lineIdx  Index into prog.lines of the line being edited
+ * @param parsed   The parsed line from parseLine()
+ */
+export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine): void {
+  const line = prog.lines[lineIdx];
+  const oldFirst = line.firstByte;
+  const oldLast  = line.lastByte;
+  const oldLen   = oldLast - oldFirst + 1;
+
+  // Build the full line bytes: next-line pointer (2 bytes placeholder) + parsed bytes
+  // (line number + content + null terminator).
+  // The pointer will be recalculated below.
+  const newContentBytes = parsed.bytes;  // lineNum(2) + content + 0x00
+  const newLineBytes: number[] = [0x00, 0x00, ...newContentBytes];  // placeholder ptr + content
+  const newLen = newLineBytes.length;
+  const delta = newLen - oldLen;
+
+  // Create ByteInfo entries for the new bytes.
+  const newByteInfos: ByteInfo[] = newLineBytes.map(v => ({
+    v,
+    firstBit: 0,
+    lastBit:  0,
+    unclear:  false,
+    chkErr:   false,
+    edited:   true,
+  }));
+
+  // Splice: remove old bytes, insert new ones.
+  prog.bytes.splice(oldFirst, oldLen, ...newByteInfos);
+
+  // Shift all subsequent lines' byte indices by delta.
+  for (let li = lineIdx + 1; li < prog.lines.length; li++) {
+    prog.lines[li].firstByte += delta;
+    prog.lines[li].lastByte  += delta;
+    prog.lines[li].expectedLastByte += delta;
+  }
+
+  // Update the edited line's byte range.
+  line.lastByte = oldFirst + newLen - 1;
+  line.expectedLastByte = line.lastByte;
+  line.lenErr = false;
+
+  // Recalculate next-line pointers throughout the program.
+  // The pointer at each line's firstByte+0,+1 is the memory address of the
+  // NEXT line (or 0x0000 for the last line). Memory addresses start at startAddr.
+  const startAddr = prog.header.startAddr;
+  // Find the byte offset of the first line's content relative to the header.
+  const firstLineOffset = prog.lines[0].firstByte;
+
+  for (let li = 0; li < prog.lines.length; li++) {
+    const l = prog.lines[li];
+    let ptrValue: number;
+    if (li < prog.lines.length - 1) {
+      // Point to the next line's memory address.
+      const nextLineByteOffset = prog.lines[li + 1].firstByte - firstLineOffset;
+      ptrValue = startAddr + nextLineByteOffset;
+    } else {
+      // Last line: pointer = 0x0000 (end of program).
+      ptrValue = 0x0000;
+    }
+    // Write the pointer (little-endian) into the byte stream.
+    prog.bytes[l.firstByte].v     = ptrValue & 0xFF;
+    prog.bytes[l.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
+  }
+
+  // Update the edited line's elements and line number from the parsed data.
+  // Re-decode elements from the new bytes (simplest way to get elements right).
+  const elements: string[] = [];
+  const lineNumStr = `${parsed.lineNum} `;
+  elements.push(lineNumStr);
+  // Walk content bytes (after the 2-byte line number, before the null terminator).
+  for (let i = 2; i < newContentBytes.length - 1; i++) {
+    const b = newContentBytes[i];
+    if (b < 128) {
+      elements.push(String.fromCharCode(b));
+    } else if ((b - 128) < KEYWORDS.length) {
+      elements.push(KEYWORDS[b - 128]);
+    } else {
+      elements.push('[UNKNOWN_KEYWORD]');
+    }
+  }
+  line.v = elements.join('');
+  line.elements = elements;
+
+  // Re-run all post-processing flags.
+  flagNonMonotonicLines(prog);
+  flagSyntaxErrors(prog);
+  flagElementErrors(prog);
 }
 
 /**
