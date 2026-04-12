@@ -85,6 +85,7 @@ let searchMatchIdx: number                 = -1;   // index into searchMatches
 let wrapMode      = true;
 let editingLine:    number | null          = null;  // line index being edited, or null
 let editInput:      HTMLInputElement | null = null;  // the inline edit input element
+let editIsNewLine   = false;                         // true if editing a newly inserted line
 /** Which panel most recently received focus — drives keyboard navigation. */
 let focusedPanel: 'hex' | 'basic' | null  = null;
 
@@ -664,6 +665,70 @@ function renderBasic(prog: Program): void {
 // ── Inline BASIC line editing ─────────────────────────────────────────────────
 
 /**
+ * Insert a blank line into the program and immediately enter edit mode on it.
+ * The line has line number 0 and no content until the user types something.
+ * If the user cancels (Escape) or leaves it empty, the line is deleted.
+ */
+function insertNewLine(prog: Program, insertAt: number): void {
+  // Determine where to insert in the byte stream.
+  // Insert before the target line's bytes, or at the end if inserting past the last line.
+  const bytePos = insertAt < prog.lines.length
+    ? prog.lines[insertAt].firstByte
+    : (prog.lines.length > 0 ? prog.lines[prog.lines.length - 1].lastByte + 1 : 0);
+
+  // Minimal line: next-line pointer (2 bytes) + line number 0 (2 bytes) + null terminator (1 byte).
+  const newBytes: ByteInfo[] = [
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // ptr lo
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // ptr hi
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // linenum lo
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // linenum hi
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // null terminator
+  ];
+  prog.bytes.splice(bytePos, 0, ...newBytes);
+
+  // Shift all lines at or after insertAt.
+  for (let li = insertAt; li < prog.lines.length; li++) {
+    prog.lines[li].firstByte += 5;
+    prog.lines[li].lastByte  += 5;
+    prog.lines[li].expectedLastByte += 5;
+  }
+
+  // Create the new LineInfo entry (empty — user will type the line number and content).
+  const newLine: LineInfo = {
+    v: '',
+    elements: [],
+    firstByte: bytePos,
+    lastByte: bytePos + 4,
+    expectedLastByte: bytePos + 4,
+    lenErr: false,
+    memAddr: 0,
+  };
+  prog.lines.splice(insertAt, 0, newLine);
+
+  // Recalculate next-line pointers.
+  const startAddr = prog.header.startAddr;
+  const firstLineOffset = prog.lines[0].firstByte;
+  for (let li = 0; li < prog.lines.length; li++) {
+    const l = prog.lines[li];
+    let ptrValue: number;
+    if (li < prog.lines.length - 1) {
+      const nextLineByteOffset = prog.lines[li + 1].firstByte - firstLineOffset;
+      ptrValue = startAddr + nextLineByteOffset;
+    } else {
+      ptrValue = 0x0000;
+    }
+    prog.bytes[l.firstByte].v     = ptrValue & 0xFF;
+    prog.bytes[l.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
+  }
+
+  // Render and enter edit mode on the new line.
+  renderHex(prog);
+  renderBasic(prog);
+  editIsNewLine = true;
+  enterEditMode(insertAt);
+}
+
+/**
  * Enter edit mode on a BASIC line.
  * @param lineIdx   Index into prog.lines
  * @param replaceElem  If set, replace the element at this index with `insertChar`
@@ -672,6 +737,11 @@ function renderBasic(prog: Program): void {
 function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: string): void {
   const prog = programs[activeProgIdx];
   if (!prog || lineIdx < 0 || lineIdx >= prog.lines.length) return;
+
+  // Clear any previous selection highlighting.
+  basicPanel.querySelector('.basic-line.sel')?.classList.remove('sel');
+  basicPanel.querySelector('.elem.sel')?.classList.remove('sel');
+  selByte = null;
 
   editingLine = lineIdx;
   const line = prog.lines[lineIdx];
@@ -702,7 +772,28 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   ta.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault();
+      const prog = programs[activeProgIdx];
+      const curPos = ta.selectionStart;
+      const textBefore = ta.value.slice(0, curPos);
+      const textAfter  = ta.value.slice(curPos);
+      const savedLineIdx = editingLine!;
+      const lineCountBefore = prog ? prog.lines.length : 0;
+      // Save the current line with text before cursor.
+      ta.value = textBefore;
       exitEditMode(true);
+      // Insert a new line after the saved line and enter edit mode on it.
+      // If the save deleted the line (was empty), adjust the insert position.
+      if (prog) {
+        const deleted = prog.lines.length < lineCountBefore;
+        const insertIdx = deleted ? savedLineIdx : savedLineIdx + 1;
+        insertNewLine(prog, insertIdx);
+        // Pre-fill with text after cursor (if any).
+        if (editInput && textAfter.length > 0) {
+          editInput.value = textAfter;
+          (editInput as HTMLTextAreaElement).selectionStart = 0;
+          (editInput as HTMLTextAreaElement).selectionEnd = 0;
+        }
+      }
     } else if (e.key === 'Escape') {
       e.preventDefault();
       exitEditMode(false);
@@ -774,7 +865,9 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
         renderHex(prog);
         waveform.selectByte(null);
       } else {
-        const parsed = parseLine(trimmed);
+        let parsed = parseLine(trimmed);
+        // If no line number found, default to line number 0.
+        if (!parsed) parsed = parseLine('0 ' + trimmed);
         if (parsed) {
           applyLineEdit(prog, editingLine, parsed);
           renderHex(prog);
@@ -785,10 +878,22 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
         }
       }
     }
+  } else {
+    // Cancelled — if this was a new line insertion, delete it.
+    if (editIsNewLine) {
+      const prog = programs[activeProgIdx];
+      if (prog && editingLine !== null && editingLine < prog.lines.length) {
+        deleteLineEdit(prog, editingLine);
+        selByte = null;
+        renderHex(prog);
+        waveform.selectByte(null);
+      }
+    }
   }
 
   editingLine = null;
   editInput = null;
+  editIsNewLine = false;
 
   // Re-render to restore the normal line display.
   const prog = programs[activeProgIdx];
@@ -1972,14 +2077,14 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     return;
   }
 
-  // Enter: start editing the selected BASIC line (tape view only).
+  // Enter: insert a new blank line after the selected line and edit it (tape view only).
   if (e.key === 'Enter' && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
     const prog = programs[activeProgIdx];
     if (prog) {
       const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
       if (li >= 0) {
         e.preventDefault();
-        enterEditMode(li);
+        insertNewLine(prog, li + 1);
       }
     }
     return;
