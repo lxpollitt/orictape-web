@@ -200,6 +200,22 @@ export function computeLcs(newValues: number[], oldValues: number[]): LcsMatch[]
 }
 
 /**
+ * Replace a range of bytes in the byte stream with merged bytes.
+ * Returns the delta (new length minus old length) so the caller
+ * can adjust line indices as needed.
+ */
+function spliceMergedBytes(
+  byteStream: ByteInfo[],
+  replaceStart: number,
+  replaceEnd: number,
+  merged: ByteInfo[],
+): number {
+  const oldCount = replaceEnd - replaceStart + 1;
+  byteStream.splice(replaceStart, oldCount, ...merged);
+  return merged.length - oldCount;
+}
+
+/**
  * Build a merged ByteInfo array from new byte values and LCS matches.
  * For matched positions, preserves the original ByteInfo; for unmatched
  * positions, creates fresh edited ByteInfo entries.
@@ -315,9 +331,8 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   }
 
   // Splice the merged line into prog.bytes.
-  prog.bytes.splice(oldFirst, oldBytesToReplace, ...mergedLine);
-
-  const delta = mergedLine.length - oldBytesToReplace;
+  const replaceEnd = oldFirst + oldBytesToReplace - 1;
+  const delta = spliceMergedBytes(prog.bytes, oldFirst, replaceEnd, mergedLine);
 
   // Shift all subsequent lines' byte indices by delta.
   for (let li = lineIdx + 1; li < prog.lines.length; li++) {
