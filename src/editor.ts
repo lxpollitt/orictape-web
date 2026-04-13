@@ -199,6 +199,43 @@ export function computeLcs(newValues: number[], oldValues: number[]): LcsMatch[]
   return matches;
 }
 
+/**
+ * Build a merged ByteInfo array from new byte values and LCS matches.
+ * For matched positions, preserves the original ByteInfo; for unmatched
+ * positions, creates fresh edited ByteInfo entries.
+ *
+ * The filter (newIdxFirst/newIdxLast) selects which portion of the
+ * matches and newValues to process.
+ */
+function buildMergedBytes(
+  newValues: number[],
+  oldBytes: ByteInfo[],
+  matches: LcsMatch[],
+  newIdxFirst: number,
+  newIdxLast: number,
+): ByteInfo[] {
+  const result: ByteInfo[] = [];
+  let matchIdx = 0;
+  // Advance past matches before our range.
+  while (matchIdx < matches.length && matches[matchIdx].newIdx < newIdxFirst) matchIdx++;
+  for (let ni = newIdxFirst; ni <= newIdxLast; ni++) {
+    if (matchIdx < matches.length && matches[matchIdx].newIdx === ni) {
+      // Match — preserve original ByteInfo.
+      result.push(oldBytes[matches[matchIdx].oldIdx]);
+      matchIdx++;
+    } else {
+      // No match — create edited byte.
+      result.push({
+        v: newValues[ni],
+        firstBit: 0, lastBit: 0,
+        unclear: false, chkErr: false,
+        edited: true,
+      });
+    }
+  }
+  return result;
+}
+
 export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine, keepTrailingBytes = false): SplitResult | null {
   const line = prog.lines[lineIdx];
   const oldFirst = line.firstByte;
@@ -207,6 +244,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   // Extract old byte values (skipping the 2-byte pointer — we always recalculate it).
   const oldValues: number[] = [];
   for (let i = oldFirst + 2; i <= oldLast; i++) oldValues.push(prog.bytes[i].v);
+  const oldBytes = prog.bytes.slice(oldFirst + 2, oldLast + 1);
 
   // New content bytes: lineNum(2) + content + 0x00.
   // When keepTrailingBytes, strip the terminator from new bytes before LCS
@@ -220,26 +258,10 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   const matches = computeLcs(newValues, oldValues);
 
   // Build merged byte array from the LCS matches.
-  const mergedContent: ByteInfo[] = [];
-  const matchedOldIndices: number[] = [];
-  let matchIdx = 0;
-  for (let ni = 0; ni < newValues.length; ni++) {
-    if (matchIdx < matches.length && matches[matchIdx].newIdx === ni) {
-      // Match — preserve original ByteInfo.
-      const oi = matches[matchIdx].oldIdx;
-      mergedContent.push(prog.bytes[oldFirst + 2 + oi]);
-      matchedOldIndices.push(oi);
-      matchIdx++;
-    } else {
-      // No match — create edited byte.
-      mergedContent.push({
-        v: newValues[ni],
-        firstBit: 0, lastBit: 0,
-        unclear: false, chkErr: false,
-        edited: true,
-      });
-    }
-  }
+  const mergedContent = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
+
+  // Collect matched old indices for trailing byte detection.
+  const matchedOldIndices = matches.map(m => m.oldIdx);
 
   // Determine truly trailing bytes: old bytes after the last LCS-matched position.
   // These are the bytes that belong to the second half of a split.
