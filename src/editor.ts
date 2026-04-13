@@ -234,72 +234,55 @@ function buildMergedBytes(
 }
 
 export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine): void {
+  // Validate parameters.
+  if (lineIdx < 0 || lineIdx >= prog.lines.length) {
+    console.warn('applyLineEdit: invalid lineIdx', lineIdx);
+    return;
+  }
   const line = prog.lines[lineIdx];
   const oldFirst = line.firstByte;
   const oldLast  = line.lastByte;
 
-  // Extract old byte values and ByteInfo (skipping the 2-byte pointer — we always recalculate it).
+  // --- Compute the merged bytes for the edited line ---
+
+  // Extract old byte values and ByteInfo (skipping the 2-byte pointer).
   const oldValues: number[] = [];
   for (let i = oldFirst + 2; i <= oldLast; i++) oldValues.push(prog.bytes[i].v);
   const oldBytes = prog.bytes.slice(oldFirst + 2, oldLast + 1);
 
-  // New content bytes: lineNum(2) + content + 0x00.
+  // LCS between new content bytes and old content bytes.
   const newValues = parsed.bytes;
-
-  // LCS on the content bytes (excluding pointer) to find minimal diff.
   const matches = computeLcs(newValues, oldValues);
-
-  // Build merged byte array from the LCS matches.
   const mergedContent = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
 
-  // Build the full merged line: pointer (2 bytes, preserved from original) + merged content.
-  const mergedLine: ByteInfo[] = [
-    { ...prog.bytes[oldFirst],     edited: undefined },  // pointer byte 0
-    { ...prog.bytes[oldFirst + 1], edited: undefined },  // pointer byte 1
-    ...mergedContent,
-  ];
-
-  // Splice the merged line into prog.bytes.
-  const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, mergedLine);
-
-  // Shift all subsequent lines' byte indices by delta.
-  for (let li = lineIdx + 1; li < prog.lines.length; li++) {
-    prog.lines[li].firstByte += delta;
-    prog.lines[li].lastByte  += delta;
-    prog.lines[li].expectedLastByte += delta;
-  }
-
-  // Update the edited line's byte range.
-  line.lastByte = oldFirst + mergedLine.length - 1;
-  line.expectedLastByte = line.lastByte;
-  line.lenErr = false;
-
-  // Update next-line pointers in the byte stream.
-  // Edited line: set to correct value (its content changed).
+  // Build the next-line pointer for the edited line.
+  let ptrValue: number;
   if (lineIdx < prog.lines.length - 1) {
     const startAddr = prog.header.startAddr;
     const firstLineOffset = prog.lines[0].firstByte;
     const nextLineByteOffset = prog.lines[lineIdx + 1].firstByte - firstLineOffset;
-    const ptrValue = startAddr + nextLineByteOffset;
-    prog.bytes[line.firstByte].v     = ptrValue & 0xFF;
-    prog.bytes[line.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
+    ptrValue = startAddr + nextLineByteOffset;
   } else {
-    prog.bytes[line.firstByte].v     = 0x00;
-    prog.bytes[line.firstByte + 1].v = 0x00;
+    ptrValue = 0x0000;
   }
-  // Lines after: offset existing pointer values by delta to preserve original errors.
-  for (let li = lineIdx + 1; li < prog.lines.length; li++) {
-    const l = prog.lines[li];
-    const oldPtr = prog.bytes[l.firstByte].v | (prog.bytes[l.firstByte + 1].v << 8);
-    const newPtr = oldPtr + delta;
-    prog.bytes[l.firstByte].v     = newPtr & 0xFF;
-    prog.bytes[l.firstByte + 1].v = (newPtr >> 8) & 0xFF;
-  }
+
+  // Assemble full line: pointer (2 bytes) + merged content.
+  const mergedLine: ByteInfo[] = [
+    { ...prog.bytes[oldFirst],     edited: undefined, v: ptrValue & 0xFF },
+    { ...prog.bytes[oldFirst + 1], edited: undefined, v: (ptrValue >> 8) & 0xFF },
+    ...mergedContent,
+  ];
+
+  // --- Splice edited line into the byte stream and update its line info ---
+
+  const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, mergedLine);
+  line.lastByte = oldFirst + mergedLine.length - 1;
+  line.expectedLastByte = line.lastByte;
+  line.lenErr = false;
 
   // Update the edited line's elements and line number from the parsed data.
   const elements: string[] = [];
-  const lineNumStr = `${parsed.lineNum} `;
-  elements.push(lineNumStr);
+  elements.push(`${parsed.lineNum} `);
   for (let i = 2; i < newValues.length - 1; i++) {
     const b = newValues[i];
     if (b < 128) {
@@ -312,6 +295,21 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   }
   line.v = elements.join('');
   line.elements = elements;
+
+  // --- Adjust subsequent lines: byte stream pointers then line info ---
+
+  for (let li = lineIdx + 1; li < prog.lines.length; li++) {
+    const l = prog.lines[li];
+    // Offset existing pointer values in the byte stream by delta.
+    const oldPtr = prog.bytes[l.firstByte + delta].v | (prog.bytes[l.firstByte + delta + 1].v << 8);
+    const newPtr = oldPtr + delta;
+    prog.bytes[l.firstByte + delta].v     = newPtr & 0xFF;
+    prog.bytes[l.firstByte + delta + 1].v = (newPtr >> 8) & 0xFF;
+    // Update line info.
+    l.firstByte += delta;
+    l.lastByte  += delta;
+    l.expectedLastByte += delta;
+  }
 
   // Re-run all post-processing flags.
   flagNonMonotonicLines(prog);
