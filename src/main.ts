@@ -5,7 +5,7 @@ import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
-import { applyLineEdit, splitLineWithEdits, deleteLineEdit } from './editor';
+import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -807,6 +807,36 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
     } else if (e.key === 'Escape') {
       e.preventDefault();
       exitEditMode(false);
+    } else if (e.key === 'Backspace' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+      // Backspace at start of line: join with previous line.
+      const prog = programs[activeProgIdx];
+      if (!prog || editingLine === null || editingLine === 0) return;
+      e.preventDefault();
+      const savedLineIdx = editingLine;
+      const curText = ta.value;
+
+      // Exit edit mode without saving (joinLinesWithEdit handles the merge).
+      editingLine = null;
+      editInput = null;
+      editIsNewLine = false;
+
+      const joinPoint = joinLinesWithEdit(prog, savedLineIdx, curText, -1);
+
+      renderHex(prog);
+      if (selByte !== null && prog.bytes[selByte]?.edited) {
+        waveform.selectByte(null);
+      }
+      renderBasic(prog);
+
+      // Enter edit mode on the surviving line (previous line) with cursor at join point.
+      if (joinPoint !== null) {
+        const survivorIdx = savedLineIdx - 1;
+        enterEditMode(survivorIdx);
+        if (editInput) {
+          const eta = editInput as HTMLTextAreaElement;
+          eta.selectionStart = eta.selectionEnd = joinPoint;
+        }
+      }
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       // Capture cursor position before the browser moves it.
       // After a minimal timeout, check if the cursor hit a boundary

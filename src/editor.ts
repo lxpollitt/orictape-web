@@ -513,7 +513,133 @@ export function splitLineWithEdits(
   return lineIdx + 1;
 }
 
+/**
+ * Join two adjacent BASIC lines into one.
+ * Concatenates their text, tokenises the result, uses LCS against both
+ * lines' original bytes to optimally preserve them, then splices the
+ * merged line into the byte stream.
+ *
+ * @param lineIdx    The line currently being edited
+ * @param editedText Current textarea content for the edited line
+ * @param direction  -1 = join with previous line, 1 = join with next line
+ * @returns          Cursor position (character offset) at the join point, or null on failure
+ */
+export function joinLinesWithEdit(
+  prog: Program,
+  lineIdx: number,
+  editedText: string,
+  direction: -1 | 1,
+): number | null {
+  // Validate parameters.
+  if (lineIdx < 0 || lineIdx >= prog.lines.length) {
+    console.warn('joinLinesWithEdit: invalid lineIdx', lineIdx);
+    return null;
+  }
+  const neighbourIdx = lineIdx + direction;
+  if (neighbourIdx < 0 || neighbourIdx >= prog.lines.length) {
+    console.warn('joinLinesWithEdit: no neighbour line at', neighbourIdx);
+    return null;
+  }
 
+  // Determine the combined text and join point.
+  const neighbourLine = prog.lines[neighbourIdx];
+  const neighbourText = neighbourLine.elements.join('');
+  let combinedText: string;
+  let joinPoint: number;
+  if (direction === -1) {
+    // Backspace: neighbour text comes first.
+    combinedText = neighbourText + editedText;
+    joinPoint = neighbourText.length;
+  } else {
+    // Delete: edited text comes first.
+    combinedText = editedText + neighbourText;
+    joinPoint = editedText.length;
+  }
+
+  // Parse the combined text.
+  const parsed = parseLine(combinedText) || parseLine('0 ' + combinedText);
+  if (!parsed) {
+    console.warn('joinLinesWithEdit: failed to parse combined text', combinedText);
+    return null;
+  }
+
+  // First line keeps the merged result; second line will be removed.
+  // (The first line in the stream is always the survivor.)
+  const firstIdx = Math.min(lineIdx, neighbourIdx);
+  const secondIdx = Math.max(lineIdx, neighbourIdx);
+  const first = prog.lines[firstIdx];
+  const second = prog.lines[secondIdx];
+
+  const oldBytes: ByteInfo[] = [
+    ...prog.bytes.slice(first.firstByte + 2, first.lastByte + 1),
+    ...prog.bytes.slice(second.firstByte, second.lastByte + 1),
+  ];
+  const oldValues = oldBytes.map(b => b.v);
+
+  // LCS between tokenised combined text and the concatenated original bytes.
+  const newValues = parsed.bytes;
+  const matches = computeLcs(newValues, oldValues);
+  const mergedContent = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
+
+  // Build the next-line pointer for the merged line.
+  // Calculate based on where the next line will be after the splice:
+  // this line's start + 2 (pointer bytes) + merged content length.
+  let ptrValue: number;
+  const afterIdx = secondIdx + 1;
+  if (afterIdx < prog.lines.length) {
+    const startAddr = prog.header.startAddr;
+    const firstLineOffset = prog.lines[0].firstByte;
+    ptrValue = startAddr + (first.firstByte + 2 + mergedContent.length - firstLineOffset);
+  } else {
+    ptrValue = 0x0000;
+  }
+
+  // Assemble full line: pointer (2 bytes) + merged content.
+  const mergedLine: ByteInfo[] = [
+    { ...prog.bytes[first.firstByte],     edited: undefined, v: ptrValue & 0xFF },
+    { ...prog.bytes[first.firstByte + 1], edited: undefined, v: (ptrValue >> 8) & 0xFF },
+    ...mergedContent,
+  ];
+
+  // Splice: replace both lines' byte ranges with the single merged line.
+  const spliceEnd = second.lastByte;
+  const delta = spliceMergedBytes(prog.bytes, first.firstByte, spliceEnd, mergedLine);
+
+  // Update the first (surviving) line's info.
+  first.firstByte = first.firstByte;
+  first.lastByte = first.firstByte + mergedLine.length - 1;
+  first.expectedLastByte = first.lastByte;
+  first.lenErr = false;
+
+  // Build elements for the merged line.
+  const elements: string[] = [];
+  elements.push(`${parsed.lineNum} `);
+  for (let i = 2; i < newValues.length - 1; i++) {
+    const b = newValues[i];
+    if (b < 128) {
+      elements.push(String.fromCharCode(b));
+    } else if ((b - 128) < KEYWORDS.length) {
+      elements.push(KEYWORDS[b - 128]);
+    } else {
+      elements.push('[UNKNOWN_KEYWORD]');
+    }
+  }
+  first.v = elements.join('');
+  first.elements = elements;
+
+  // Remove the second (deleted) line from prog.lines.
+  prog.lines.splice(secondIdx, 1);
+
+  // Adjust subsequent lines (from secondIdx onwards, since second was removed).
+  adjustLineOffsets(prog, delta, secondIdx);
+
+  // Re-run all post-processing flags.
+  flagNonMonotonicLines(prog);
+  flagSyntaxErrors(prog);
+  flagElementErrors(prog);
+
+  return joinPoint;
+}
 
 /**
  * Parse a BASIC line from user text into a line number and tokenised byte array.
