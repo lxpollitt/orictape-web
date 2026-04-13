@@ -35,7 +35,7 @@
  */
 
 import { KEYWORDS } from './decoder';
-import type { Program, ByteInfo } from './decoder';
+import type { Program, ByteInfo, LineInfo } from './decoder';
 import { flagNonMonotonicLines, flagElementErrors } from './decoder';
 
 export interface ParsedLine {
@@ -424,8 +424,104 @@ export function splitLineWithEdits(
     secondContent: hexBI(secondContent),
   });
 
-  // TODO: step 3 — assemble full bytes, splice, update line info.
-  return null;
+  // --- Assemble full bytes for both lines and splice ---
+
+  const startAddr = prog.header.startAddr;
+  const firstLineOffset = prog.lines[0].firstByte;
+
+  // First line's pointer: points to where the second new line will start.
+  // That's oldFirst + 2 (ptr) + firstContent.length + 2 (ptr for second line).
+  const secondLineStart = oldFirst + 2 + firstContent.length + 2;
+  const ptr1Offset = secondLineStart - firstLineOffset;
+  const ptr1Value = startAddr + ptr1Offset;
+
+  // Second line's pointer: points to wherever the next line after the original starts.
+  let ptr2Value: number;
+  if (lineIdx < prog.lines.length - 1) {
+    const nextLineByteOffset = prog.lines[lineIdx + 1].firstByte - firstLineOffset;
+    ptr2Value = startAddr + nextLineByteOffset;
+  } else {
+    ptr2Value = 0x0000;
+  }
+
+  // Build pointer ByteInfo entries (fresh objects, not shared).
+  const makePtr = (v: number): ByteInfo[] => [
+    { ...prog.bytes[oldFirst],     edited: undefined, v: v & 0xFF },
+    { ...prog.bytes[oldFirst + 1], edited: undefined, v: (v >> 8) & 0xFF },
+  ];
+
+  const fullMerged: ByteInfo[] = [
+    ...makePtr(ptr1Value),
+    ...firstContent,
+    ...makePtr(ptr2Value),
+    ...secondContent,
+  ];
+
+  // Single splice replaces the original line's bytes with both new lines.
+  const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, fullMerged);
+
+  // --- Update the first (edited) line's info ---
+
+  const firstLineEnd = oldFirst + 2 + firstContent.length - 1;
+  line.lastByte = firstLineEnd;
+  line.expectedLastByte = firstLineEnd;
+  line.lenErr = false;
+
+  // Build elements for the first line.
+  const firstElements: string[] = [];
+  firstElements.push(`${parsedFirst.lineNum} `);
+  for (let i = 2; i < parsedFirst.bytes.length - 1; i++) {
+    const b = parsedFirst.bytes[i];
+    if (b < 128) {
+      firstElements.push(String.fromCharCode(b));
+    } else if ((b - 128) < KEYWORDS.length) {
+      firstElements.push(KEYWORDS[b - 128]);
+    } else {
+      firstElements.push('[UNKNOWN_KEYWORD]');
+    }
+  }
+  line.v = firstElements.join('');
+  line.elements = firstElements;
+
+  // --- Create the second line's LineInfo and insert it ---
+
+  const secondLineFirstByte = firstLineEnd + 1;  // starts right after first line
+  const secondLineLastByte = secondLineFirstByte + 2 + secondContent.length - 1;
+
+  const secondElements: string[] = [];
+  secondElements.push(`${parsedSecond.lineNum} `);
+  for (let i = 2; i < parsedSecond.bytes.length - 1; i++) {
+    const b = parsedSecond.bytes[i];
+    if (b < 128) {
+      secondElements.push(String.fromCharCode(b));
+    } else if ((b - 128) < KEYWORDS.length) {
+      secondElements.push(KEYWORDS[b - 128]);
+    } else {
+      secondElements.push('[UNKNOWN_KEYWORD]');
+    }
+  }
+
+  const newLine: LineInfo = {
+    v: secondElements.join(''),
+    elements: secondElements,
+    firstByte: secondLineFirstByte,
+    lastByte: secondLineLastByte,
+    expectedLastByte: secondLineLastByte,
+    lenErr: false,
+    memAddr: 0,
+  };
+  prog.lines.splice(lineIdx + 1, 0, newLine);
+
+  // --- Adjust subsequent lines (after the two new lines) ---
+
+  adjustLineOffsets(prog, delta, lineIdx + 2);
+
+  // Re-run all post-processing flags.
+  flagNonMonotonicLines(prog);
+  flagSyntaxErrors(prog);
+  flagElementErrors(prog);
+
+  return lineIdx + 1;
 }
 
 

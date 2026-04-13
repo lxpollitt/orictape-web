@@ -778,30 +778,26 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
       const textBefore = ta.value.slice(0, curPos);
       const textAfter  = ta.value.slice(curPos);
       const savedLineIdx = editingLine;
-      const trimmedBefore = textBefore.trim();
-
-      // Debug: log LCS results for the split, then early exit.
-      splitLineWithEdits(prog, savedLineIdx, textBefore, textAfter);
-      return;
-
-      // Save the first half of the split.
-      applyLineEdit(prog, savedLineIdx, trimmedBefore);
-      renderHex(prog);
-      if (selByte !== null && prog.bytes[selByte]?.edited) {
-        waveform.selectByte(null);
-      }
+      const newLineIdx = splitLineWithEdits(prog, savedLineIdx, textBefore, textAfter);
 
       editingLine = null;
       editInput = null;
       editIsNewLine = false;
 
-      // TODO: replace with splitLineWithEdits once implemented.
+      renderHex(prog);
+      if (selByte !== null && prog.bytes[selByte]?.edited) {
+        waveform.selectByte(null);
+      }
       renderBasic(prog);
-      insertNewLine(prog, savedLineIdx + 1);
-      if (editInput && textAfter.length > 0) {
-        editInput.value = textAfter;
-        (editInput as HTMLTextAreaElement).selectionStart = 0;
-        (editInput as HTMLTextAreaElement).selectionEnd = 0;
+
+      // Enter edit mode on the new second line.
+      if (newLineIdx !== null) {
+        enterEditMode(newLineIdx);
+        if (editInput) {
+          const eta = editInput as HTMLTextAreaElement;
+          eta.value = textAfter;
+          eta.selectionStart = eta.selectionEnd = 0;
+        }
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
