@@ -274,20 +274,26 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   line.expectedLastByte = line.lastByte;
   line.lenErr = false;
 
-  // Recalculate next-line pointers throughout the program.
-  const startAddr = prog.header.startAddr;
-  const firstLineOffset = prog.lines[0].firstByte;
-  for (let li = 0; li < prog.lines.length; li++) {
+  // Update next-line pointers in the byte stream.
+  // Edited line: set to correct value (its content changed).
+  if (lineIdx < prog.lines.length - 1) {
+    const startAddr = prog.header.startAddr;
+    const firstLineOffset = prog.lines[0].firstByte;
+    const nextLineByteOffset = prog.lines[lineIdx + 1].firstByte - firstLineOffset;
+    const ptrValue = startAddr + nextLineByteOffset;
+    prog.bytes[line.firstByte].v     = ptrValue & 0xFF;
+    prog.bytes[line.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
+  } else {
+    prog.bytes[line.firstByte].v     = 0x00;
+    prog.bytes[line.firstByte + 1].v = 0x00;
+  }
+  // Lines after: offset existing pointer values by delta to preserve original errors.
+  for (let li = lineIdx + 1; li < prog.lines.length; li++) {
     const l = prog.lines[li];
-    let ptrValue: number;
-    if (li < prog.lines.length - 1) {
-      const nextLineByteOffset = prog.lines[li + 1].firstByte - firstLineOffset;
-      ptrValue = startAddr + nextLineByteOffset;
-    } else {
-      ptrValue = 0x0000;
-    }
-    prog.bytes[l.firstByte].v     = ptrValue & 0xFF;
-    prog.bytes[l.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
+    const oldPtr = prog.bytes[l.firstByte].v | (prog.bytes[l.firstByte + 1].v << 8);
+    const newPtr = oldPtr + delta;
+    prog.bytes[l.firstByte].v     = newPtr & 0xFF;
+    prog.bytes[l.firstByte + 1].v = (newPtr >> 8) & 0xFF;
   }
 
   // Update the edited line's elements and line number from the parsed data.
