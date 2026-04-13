@@ -770,7 +770,8 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   });
 
   ta.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      // Ctrl+Enter: split line at cursor.
       e.preventDefault();
       const prog = programs[activeProgIdx];
       if (!prog || editingLine === null) return;
@@ -799,6 +800,10 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
           eta.selectionStart = eta.selectionEnd = 0;
         }
       }
+    } else if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+      // Enter: save and exit edit mode.
+      e.preventDefault();
+      exitEditMode(true);
     } else if (e.key === 'Escape') {
       e.preventDefault();
       exitEditMode(false);
@@ -828,17 +833,22 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   lineEl.appendChild(ta);
   editInput = ta as unknown as HTMLInputElement;  // reuse the same state variable
 
-  if (replaceElem !== undefined && replaceElem >= 0 && replaceElem < line.elements.length && insertChar !== undefined) {
+  if (replaceElem !== undefined && replaceElem >= 0 && replaceElem < line.elements.length) {
     // Calculate the character range of the target element in the text.
     let charStart = 0;
     for (let ei = 0; ei < replaceElem; ei++) charStart += line.elements[ei].length;
     const charEnd = charStart + line.elements[replaceElem].length;
 
-    // Replace the element text with the typed character.
-    ta.value = lineText.slice(0, charStart) + insertChar + lineText.slice(charEnd);
-    ta.focus();
-    // Position cursor after the inserted character.
-    ta.selectionStart = ta.selectionEnd = charStart + insertChar.length;
+    if (insertChar !== undefined) {
+      // Replace the element text with the typed character.
+      ta.value = lineText.slice(0, charStart) + insertChar + lineText.slice(charEnd);
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = charStart + insertChar.length;
+    } else {
+      // Position cursor at the end of the selected element (no replacement).
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = charEnd;
+    }
   } else {
     ta.focus();
     ta.select();
@@ -907,7 +917,7 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
       let charCount = 0;
       for (let ei = 0; ei < editedLine.elements.length; ei++) {
         charCount += editedLine.elements[ei].length;
-        if (charCount > cursorPos) { targetEi = ei; break; }
+        if (charCount >= cursorPos) { targetEi = ei; break; }
         targetEi = ei;
       }
       // Select that element on the edited line (puts it in the DOM with .sel).
@@ -2076,8 +2086,22 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     return;
   }
 
-  // Enter: insert a new blank line after the selected line and edit it (tape view only).
-  if (e.key === 'Enter' && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+  // Enter: enter edit mode on the selected line, cursor at end of selected element (tape view only).
+  if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+    const prog = programs[activeProgIdx];
+    if (prog) {
+      const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
+      if (li >= 0) {
+        e.preventDefault();
+        const ei = elemIdxForByte(prog.lines[li], selByte!);
+        enterEditMode(li, ei >= 0 ? ei : undefined);
+      }
+    }
+    return;
+  }
+
+  // Ctrl+Enter: insert a new blank line after the selected line and edit it (tape view only).
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
     const prog = programs[activeProgIdx];
     if (prog) {
       const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
