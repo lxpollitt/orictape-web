@@ -5,7 +5,7 @@ import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
-import { applyLineEdit, deleteLineEdit } from './editor';
+import { applyLineEdit, splitLineWithEdits, deleteLineEdit } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -780,6 +780,10 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
       const savedLineIdx = editingLine;
       const trimmedBefore = textBefore.trim();
 
+      // Debug: log LCS results for the split, then early exit.
+      splitLineWithEdits(prog, savedLineIdx, textBefore, textAfter);
+      return;
+
       // Save the first half of the split.
       applyLineEdit(prog, savedLineIdx, trimmedBefore);
       renderHex(prog);
@@ -862,15 +866,14 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
     const text = editInput.value;
     const prog = programs[activeProgIdx];
     if (prog && editingLine !== null && editingLine < prog.lines.length) {
-      const trimmed = text.trim();
-      if (trimmed === '') {
+      if (text.trim() === '') {
         // Empty input — delete the line.
         deleteLineEdit(prog, editingLine);
         selByte = null;
         renderHex(prog);
         waveform.selectByte(null);
       } else {
-        applyLineEdit(prog, editingLine, trimmed);
+        applyLineEdit(prog, editingLine, text);
         renderHex(prog);
         // Clear waveform selection only if the selected byte is now edited.
         if (selByte !== null && prog.bytes[selByte]?.edited) {

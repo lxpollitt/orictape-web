@@ -41,6 +41,7 @@ import { flagNonMonotonicLines, flagElementErrors } from './decoder';
 export interface ParsedLine {
   lineNum: number;
   bytes:   number[];   // line number (2 bytes LE) + content bytes (keyword tokens + ASCII) + null terminator
+  hasDummyLineNumber: boolean;  // true if line number was not parsed from text (defaulted to 0)
 }
 
 export interface SyntaxIssue {
@@ -239,8 +240,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
     console.warn('applyLineEdit: invalid lineIdx', lineIdx);
     return;
   }
-  const trimmed = text.trim();
-  const parsed = parseLine(trimmed) || parseLine('0 ' + trimmed);
+  const parsed = parseLine(text) || parseLine('0 ' + text);
   if (!parsed) {
     console.warn('applyLineEdit: failed to parse text', text);
     return;
@@ -324,6 +324,81 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
 }
 
 /**
+ * Split a BASIC line into two at a text boundary.
+ * Tokenises both halves, uses LCS against the original bytes to
+ * optimally partition them, then splices both lines into the byte stream.
+ *
+ * Returns the index of the newly created second line, or null on failure.
+ */
+export function splitLineWithEdits(
+  prog: Program,
+  lineIdx: number,
+  firstText: string,
+  secondText: string,
+): number | null {
+  // Validate parameters.
+  if (lineIdx < 0 || lineIdx >= prog.lines.length) {
+    console.warn('splitLineWithEdits: invalid lineIdx', lineIdx);
+    return null;
+  }
+
+  // Parse both halves.
+  const parsedFirst = parseLine(firstText) || parseLine('0 ' + firstText);
+  if (!parsedFirst) {
+    console.warn('splitLineWithEdits: failed to parse firstText', firstText);
+    return null;
+  }
+  // If cursor was at the start (firstText empty), the second part is the whole line —
+  // try parsing with a line number first to match original line number bytes.
+  // Otherwise, the second part is mid-line content with no line number expected.
+  const parsedSecond = firstText === ''
+    ? (parseLine(secondText) || parseLine(secondText, true))
+    : parseLine(secondText, true);
+  if (!parsedSecond) {
+    console.warn('splitLineWithEdits: failed to parse secondText', secondText);
+    return null;
+  }
+
+  // Concatenate the two halves' content bytes (excluding pointers) for a single LCS.
+  // Exclude dummy line number bytes from the concatenation so they can't steal LCS matches.
+  const firstForLcs = parsedFirst.hasDummyLineNumber ? parsedFirst.bytes.slice(2) : parsedFirst.bytes;
+  const secondForLcs = parsedSecond.hasDummyLineNumber ? parsedSecond.bytes.slice(2) : parsedSecond.bytes;
+  const concatenated = [...firstForLcs, ...secondForLcs];
+  const splitPoint = firstForLcs.length;   // index where second half starts in concatenated
+
+  // Extract old line byte values (skipping the 2-byte pointer).
+  const line = prog.lines[lineIdx];
+  const oldFirst = line.firstByte;
+  const oldLast = line.lastByte;
+  const oldValues: number[] = [];
+  for (let i = oldFirst + 2; i <= oldLast; i++) oldValues.push(prog.bytes[i].v);
+
+  // LCS across the full concatenation against the original bytes.
+  const matches = computeLcs(concatenated, oldValues);
+
+  // Debug: log the LCS results for verification.
+  const hex = (arr: number[]) => arr.map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+  console.log('splitLineWithEdits LCS:', {
+    firstText,
+    secondText,
+    firstForLcs: hex(firstForLcs),
+    secondForLcs: hex(secondForLcs),
+    oldValues: hex(oldValues),
+    splitPoint,
+    matches,
+    matchesInFirst: matches.filter(m => m.newIdx < splitPoint).length
+      + ' — ' + hex(matches.filter(m => m.newIdx < splitPoint).map(m => concatenated[m.newIdx])),
+    matchesInSecond: matches.filter(m => m.newIdx >= splitPoint).length
+      + ' — ' + hex(matches.filter(m => m.newIdx >= splitPoint).map(m => concatenated[m.newIdx])),
+  });
+
+  // TODO: steps 2 and 3 — buildMergedBytes, splice, update line info.
+  return null;
+}
+
+
+
+/**
  * Parse a BASIC line from user text into a line number and tokenised byte array.
  *
  * Input format: "100 PRINT \"Hello\"" — line number, space, then content.
@@ -332,14 +407,23 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
  * If originalBytes is provided, compares the parsed output against the original
  * and logs the result to the console (for testing during development).
  */
-export function parseLine(text: string, originalBytes?: number[]): ParsedLine | null {
-  // Extract line number from the start.
-  const match = text.match(/^(\d+)\s?/);
-  if (!match) return null;
-  const lineNum = parseInt(match[1], 10);
-  if (isNaN(lineNum) || lineNum < 0 || lineNum > 65535) return null;
+export function parseLine(text: string, noLineNumber?: boolean, originalBytes?: number[]): ParsedLine | null {
+  let lineNum: number;
+  let content: string;
 
-  const content = text.slice(match[0].length);
+  if (noLineNumber) {
+    // Tokenise the entire text as content, no line number expected.
+    lineNum = 0;
+    content = text;
+  } else {
+    // Extract line number from the start.
+    const match = text.match(/^(\d+)\s?/);
+    if (!match) return null;
+    lineNum = parseInt(match[1], 10);
+    if (isNaN(lineNum) || lineNum < 0 || lineNum > 65535) return null;
+    content = text.slice(match[0].length);
+  }
+
   const contentBytes = tokenise(content);
 
   // Build full line bytes: line number (2 bytes LE) + content + null terminator.
@@ -369,7 +453,7 @@ export function parseLine(text: string, originalBytes?: number[]): ParsedLine | 
     }
   }
 
-  return { lineNum, bytes };
+  return { lineNum, bytes, hasDummyLineNumber: !!noLineNumber };
 }
 
 /**
