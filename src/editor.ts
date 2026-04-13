@@ -273,12 +273,13 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   const mergedContent = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
 
   // Build the next-line pointer for the edited line.
+  // Calculate based on where the next line will be after the splice:
+  // this line's start + 2 (pointer bytes) + merged content length.
   let ptrValue: number;
   if (lineIdx < prog.lines.length - 1) {
     const startAddr = prog.header.startAddr;
     const firstLineOffset = prog.lines[0].firstByte;
-    const nextLineByteOffset = prog.lines[lineIdx + 1].firstByte - firstLineOffset;
-    ptrValue = startAddr + nextLineByteOffset;
+    ptrValue = startAddr + (oldFirst + 2 + mergedContent.length - firstLineOffset);
   } else {
     ptrValue = 0x0000;
   }
