@@ -392,7 +392,27 @@ export function splitLineWithEdits(
       + ' — ' + hex(matches.filter(m => m.newIdx >= splitPoint).map(m => concatenated[m.newIdx])),
   });
 
-  // TODO: steps 2 and 3 — buildMergedBytes, splice, update line info.
+  // Build merged ByteInfo arrays for each half.
+  const oldBytes = prog.bytes.slice(oldFirst + 2, oldLast + 1);
+  const firstMerged = buildMergedBytes(concatenated, oldBytes, matches, 0, splitPoint - 1);
+  const secondMerged = buildMergedBytes(concatenated, oldBytes, matches, splitPoint, concatenated.length - 1);
+
+  // Prepend dummy line number bytes for halves that didn't have a parsed line number.
+  const dummyLineNumBytes: ByteInfo[] = [
+    { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },
+    { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },
+  ];
+  const firstContent = parsedFirst.hasDummyLineNumber ? [...dummyLineNumBytes, ...firstMerged] : firstMerged;
+  const secondContent = parsedSecond.hasDummyLineNumber ? [...dummyLineNumBytes, ...secondMerged] : secondMerged;
+
+  // Debug: log the merged results for verification.
+  const hexBI = (arr: ByteInfo[]) => arr.map(b => (b.edited ? '*' : '') + '0x' + b.v.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+  console.log('splitLineWithEdits merged:', {
+    firstContent: hexBI(firstContent),
+    secondContent: hexBI(secondContent),
+  });
+
+  // TODO: step 3 — assemble full bytes, splice, update line info.
   return null;
 }
 
