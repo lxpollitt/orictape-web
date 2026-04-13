@@ -770,8 +770,8 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   });
 
   ta.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      // Ctrl+Enter: split line at cursor.
+    if (e.key === 'Enter' && e.shiftKey) {
+      // Shift+Enter: split line at cursor.
       e.preventDefault();
       const prog = programs[activeProgIdx];
       if (!prog || editingLine === null) return;
@@ -800,7 +800,7 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
           eta.selectionStart = eta.selectionEnd = 0;
         }
       }
-    } else if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+    } else if (e.key === 'Enter' && !e.shiftKey) {
       // Enter: save and exit edit mode.
       e.preventDefault();
       exitEditMode(true);
@@ -2087,7 +2087,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 
   // Enter: enter edit mode on the selected line, cursor at end of selected element (tape view only).
-  if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+  if (e.key === 'Enter' && !e.shiftKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
     const prog = programs[activeProgIdx];
     if (prog) {
       const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
@@ -2100,8 +2100,8 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     return;
   }
 
-  // Ctrl+Enter: insert a new blank line after the selected line and edit it (tape view only).
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+  // Shift+Enter: insert a new blank line after the selected line and edit it (tape view only).
+  if (e.key === 'Enter' && e.shiftKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
     const prog = programs[activeProgIdx];
     if (prog) {
       const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
