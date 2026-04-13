@@ -90,6 +90,45 @@ export function flagSyntaxErrors(prog: Program): void {
 }
 
 /**
+ * TODO: development aid — comment out when not debugging editing.
+ * Recalculate lenErr for all lines by comparing each line's next-line pointer
+ * against where the next line actually starts in the byte stream.
+ */
+function flagLenErrors(prog: Program): void {
+  for (let li = 0; li < prog.lines.length; li++) {
+    const line = prog.lines[li];
+    if (li === 0) {
+      // First line's pointer is not checked (same as initial decode).
+      line.lenErr = false;
+      line.expectedLastByte = line.lastByte;
+      continue;
+    }
+    // Read the previous line's pointer to find where this line should start.
+    const prev = prog.lines[li - 1];
+    const ptr = prog.bytes[prev.firstByte].v | (prog.bytes[prev.firstByte + 1].v << 8);
+    const startAddr = prog.header.startAddr;
+    const firstLineOffset = prog.lines[0].firstByte;
+    const expectedStart = (ptr - startAddr) + firstLineOffset;
+    prev.expectedLastByte = expectedStart - 1;
+    prev.lenErr = (expectedStart !== line.firstByte);
+  }
+  // Last line: pointer should be 0x0000.
+  if (prog.lines.length > 0) {
+    const last = prog.lines[prog.lines.length - 1];
+    const ptr = prog.bytes[last.firstByte].v | (prog.bytes[last.firstByte + 1].v << 8);
+    if (ptr === 0x0000) {
+      last.lenErr = false;
+      last.expectedLastByte = last.lastByte;
+    } else {
+      last.lenErr = true;
+      const startAddr = prog.header.startAddr;
+      const firstLineOffset = prog.lines[0].firstByte;
+      last.expectedLastByte = (ptr - startAddr) + firstLineOffset - 1;
+    }
+  }
+}
+
+/**
  * Delete a BASIC line from a program.
  * Removes the line's bytes from prog.bytes, removes the LineInfo entry,
  * shifts subsequent line indices, recalculates next-line pointers, and
@@ -120,6 +159,7 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
   adjustLineOffsets(prog, delta, lineIdx);
 
   // Re-run all post-processing flags.
+  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
   flagNonMonotonicLines(prog);
   flagSyntaxErrors(prog);
   flagElementErrors(prog);
@@ -319,6 +359,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   adjustLineOffsets(prog, delta, lineIdx + 1);
 
   // Re-run all post-processing flags.
+  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
   flagNonMonotonicLines(prog);
   flagSyntaxErrors(prog);
   flagElementErrors(prog);
@@ -419,16 +460,14 @@ export function splitLineWithEdits(
   const firstLineOffset = prog.lines[0].firstByte;
 
   // First line's pointer: points to where the second new line will start.
-  // That's oldFirst + 2 (ptr) + firstContent.length + 2 (ptr for second line).
-  const secondLineStart = oldFirst + 2 + firstContent.length + 2;
-  const ptr1Offset = secondLineStart - firstLineOffset;
-  const ptr1Value = startAddr + ptr1Offset;
+  // That's oldFirst + 2 (ptr1) + firstContent.length (which already includes line number bytes).
+  const ptr1Value = startAddr + (oldFirst + 2 + firstContent.length - firstLineOffset);
 
-  // Second line's pointer: points to wherever the next line after the original starts.
+  // Second line's pointer: points to where the line after both new lines will start.
+  // That's oldFirst + 2 (ptr1) + firstContent + 2 (ptr2) + secondContent.
   let ptr2Value: number;
   if (lineIdx < prog.lines.length - 1) {
-    const nextLineByteOffset = prog.lines[lineIdx + 1].firstByte - firstLineOffset;
-    ptr2Value = startAddr + nextLineByteOffset;
+    ptr2Value = startAddr + (oldFirst + 2 + firstContent.length + 2 + secondContent.length - firstLineOffset);
   } else {
     ptr2Value = 0x0000;
   }
@@ -506,6 +545,7 @@ export function splitLineWithEdits(
   adjustLineOffsets(prog, delta, lineIdx + 2);
 
   // Re-run all post-processing flags.
+  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
   flagNonMonotonicLines(prog);
   flagSyntaxErrors(prog);
   flagElementErrors(prog);
@@ -634,6 +674,7 @@ export function joinLinesWithEdit(
   adjustLineOffsets(prog, delta, secondIdx);
 
   // Re-run all post-processing flags.
+  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
   flagNonMonotonicLines(prog);
   flagSyntaxErrors(prog);
   flagElementErrors(prog);
