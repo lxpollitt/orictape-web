@@ -460,10 +460,10 @@ header h1 {
   font: inherit;
   font-size: inherit;
   line-height: 1.5;
-  background: var(--bg);
+  background: #1e3a1e;
   color: var(--bright);
-  border: 1px solid var(--green);
-  border-radius: 2px;
+  border: none;
+  border-radius: 0;
   outline: none;
   resize: none;
   overflow: hidden;
