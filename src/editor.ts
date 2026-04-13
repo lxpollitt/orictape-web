@@ -198,6 +198,29 @@ function spliceMergedBytes(
 }
 
 /**
+ * Adjust a range of lines' byte stream pointers and line info by a delta.
+ * For each line: offsets the next-line pointer value in the byte stream,
+ * then shifts firstByte/lastByte/expectedLastByte.
+ */
+function adjustLineOffsets(prog: Program, delta: number, firstLineIdx: number, lastLineIdx?: number): void {
+  if (delta === 0) return;
+  const last = lastLineIdx ?? prog.lines.length - 1;
+  for (let li = firstLineIdx; li <= last; li++) {
+    const l = prog.lines[li];
+    // Offset existing pointer values in the byte stream by delta.
+    // Note: line info not yet updated, so use l.firstByte + delta to find the bytes post-splice.
+    const oldPtr = prog.bytes[l.firstByte + delta].v | (prog.bytes[l.firstByte + delta + 1].v << 8);
+    const newPtr = oldPtr + delta;
+    prog.bytes[l.firstByte + delta].v     = newPtr & 0xFF;
+    prog.bytes[l.firstByte + delta + 1].v = (newPtr >> 8) & 0xFF;
+    // Update line info.
+    l.firstByte += delta;
+    l.lastByte  += delta;
+    l.expectedLastByte += delta;
+  }
+}
+
+/**
  * Build a merged ByteInfo array from new byte values and LCS matches.
  * For matched positions, preserves the original ByteInfo; for unmatched
  * positions, creates fresh edited ByteInfo entries.
@@ -304,18 +327,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
 
   // --- Adjust subsequent lines: byte stream pointers then line info ---
 
-  for (let li = lineIdx + 1; li < prog.lines.length; li++) {
-    const l = prog.lines[li];
-    // Offset existing pointer values in the byte stream by delta.
-    const oldPtr = prog.bytes[l.firstByte + delta].v | (prog.bytes[l.firstByte + delta + 1].v << 8);
-    const newPtr = oldPtr + delta;
-    prog.bytes[l.firstByte + delta].v     = newPtr & 0xFF;
-    prog.bytes[l.firstByte + delta + 1].v = (newPtr >> 8) & 0xFF;
-    // Update line info.
-    l.firstByte += delta;
-    l.lastByte  += delta;
-    l.expectedLastByte += delta;
-  }
+  adjustLineOffsets(prog, delta, lineIdx + 1);
 
   // Re-run all post-processing flags.
   flagNonMonotonicLines(prog);
@@ -398,12 +410,12 @@ export function splitLineWithEdits(
   const secondMerged = buildMergedBytes(concatenated, oldBytes, matches, splitPoint, concatenated.length - 1);
 
   // Prepend dummy line number bytes for halves that didn't have a parsed line number.
-  const dummyLineNumBytes: ByteInfo[] = [
+  const makeDummyLineNum = (): ByteInfo[] => [
     { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },
     { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },
   ];
-  const firstContent = parsedFirst.hasDummyLineNumber ? [...dummyLineNumBytes, ...firstMerged] : firstMerged;
-  const secondContent = parsedSecond.hasDummyLineNumber ? [...dummyLineNumBytes, ...secondMerged] : secondMerged;
+  const firstContent = parsedFirst.hasDummyLineNumber ? [...makeDummyLineNum(), ...firstMerged] : firstMerged;
+  const secondContent = parsedSecond.hasDummyLineNumber ? [...makeDummyLineNum(), ...secondMerged] : secondMerged;
 
   // Debug: log the merged results for verification.
   const hexBI = (arr: ByteInfo[]) => arr.map(b => (b.edited ? '*' : '') + '0x' + b.v.toString(16).toUpperCase().padStart(2, '0')).join(' ');
