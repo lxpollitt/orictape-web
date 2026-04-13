@@ -2,10 +2,10 @@ import './style.css';
 import { parseWavFile } from './wavfile';
 import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
-import type { Program, LineInfo, ByteInfo, LineStatus } from './decoder';
+import type { Program, LineInfo, ByteInfo } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
-import { readProgramLines, readProgramBytes, flagNonMonotonicLines, flagElementErrors, KEYWORDS } from './decoder';
-import { parseLine, applyLineEdit, deleteLineEdit, flagSyntaxErrors } from './editor';
+import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
+import { parseLine, applyLineEdit, deleteLineEdit } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -785,7 +785,7 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
       let parsed = parseLine(textToSave);
       if (!parsed) parsed = parseLine('0 ' + textToSave);
       if (parsed) {
-        const splitResult = applyLineEdit(prog, savedLineIdx, parsed, true);
+        applyLineEdit(prog, savedLineIdx, parsed);
         renderHex(prog);
         if (selByte !== null && prog.bytes[selByte]?.edited) {
           waveform.selectByte(null);
@@ -795,91 +795,13 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
         editInput = null;
         editIsNewLine = false;
 
-        if (splitResult && splitResult.trailingCount > 0) {
-          // Trailing bytes exist — insert a 2-byte pointer before them to form the new line.
-          const ptrPos = splitResult.trailingStart;
-          const ptrBytes: ByteInfo[] = [
-            { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },
-            { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },
-          ];
-          prog.bytes.splice(ptrPos, 0, ...ptrBytes);
-
-          // Shift subsequent lines by 2 (the inserted pointer bytes).
-          for (let li = savedLineIdx + 1; li < prog.lines.length; li++) {
-            prog.lines[li].firstByte += 2;
-            prog.lines[li].lastByte  += 2;
-            prog.lines[li].expectedLastByte += 2;
-          }
-
-          // Create LineInfo for the new line.
-          const newLastByte = ptrPos + 2 + splitResult.trailingCount - 1;
-          // Build elements from the trailing bytes (no line number prefix —
-          // user will type it as part of editing).
-          const newElements: string[] = [];
-          for (let i = ptrPos + 2; i <= newLastByte; i++) {
-            const bv = prog.bytes[i].v;
-            if (bv === 0) break;  // terminator
-            if (bv < 128) {
-              newElements.push(String.fromCharCode(bv));
-            } else if ((bv - 128) < KEYWORDS.length) {
-              newElements.push(KEYWORDS[bv - 128]);
-            } else {
-              newElements.push('[UNKNOWN_KEYWORD]');
-            }
-          }
-          const newLine: LineInfo = {
-            v: newElements.join(''),
-            elements: newElements,
-            firstByte: ptrPos,
-            lastByte: newLastByte,
-            expectedLastByte: newLastByte,
-            lenErr: false,
-            memAddr: 0,
-          };
-          prog.lines.splice(savedLineIdx + 1, 0, newLine);
-
-          // Recalculate next-line pointers.
-          const startAddr = prog.header.startAddr;
-          const firstLineOffset = prog.lines[0].firstByte;
-          for (let li = 0; li < prog.lines.length; li++) {
-            const l = prog.lines[li];
-            let ptrValue: number;
-            if (li < prog.lines.length - 1) {
-              const nextLineByteOffset = prog.lines[li + 1].firstByte - firstLineOffset;
-              ptrValue = startAddr + nextLineByteOffset;
-            } else {
-              ptrValue = 0x0000;
-            }
-            prog.bytes[l.firstByte].v     = ptrValue & 0xFF;
-            prog.bytes[l.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
-          }
-
-          // Re-run flags and render.
-          flagNonMonotonicLines(prog);
-          flagSyntaxErrors(prog);
-          flagElementErrors(prog);
-          renderHex(prog);
-          renderBasic(prog);
-
-          // Enter edit mode on the new line (Escape saves, not deletes).
-          // Pre-fill with the text after the cursor from the original edit,
-          // not from the trailing bytes (which may differ due to re-tokenisation).
-          editIsNewLine = false;
-          enterEditMode(savedLineIdx + 1);
-          if (editInput) {
-            const eta = editInput as HTMLTextAreaElement;
-            eta.value = textAfter;
-            eta.selectionStart = eta.selectionEnd = 0;
-          }
-        } else {
-          // No trailing bytes — just insert a blank new line.
-          renderBasic(prog);
-          insertNewLine(prog, savedLineIdx + 1);
-          if (editInput && textAfter.length > 0) {
-            editInput.value = textAfter;
-            (editInput as HTMLTextAreaElement).selectionStart = 0;
-            (editInput as HTMLTextAreaElement).selectionEnd = 0;
-          }
+        // TODO: replace with splitLineWithEdits once implemented.
+        renderBasic(prog);
+        insertNewLine(prog, savedLineIdx + 1);
+        if (editInput && textAfter.length > 0) {
+          editInput.value = textAfter;
+          (editInput as HTMLTextAreaElement).selectionStart = 0;
+          (editInput as HTMLTextAreaElement).selectionEnd = 0;
         }
       }
     } else if (e.key === 'Escape') {

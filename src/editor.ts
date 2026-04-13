@@ -137,29 +137,10 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
 }
 
 /**
- * Result of applyLineEdit when keepTrailingBytes is true and there are
- * meaningful trailing bytes from the original line.
- */
-export interface SplitResult {
-  /** Byte index in prog.bytes where the trailing content starts
-   *  (immediately after the saved first-half line). */
-  trailingStart: number;
-  /** Number of trailing content bytes (original bytes preserved in place). */
-  trailingCount: number;
-}
-
-/**
  * Apply an edit to a BASIC line in a program using LCS-based minimal diff.
  * Preserves original ByteInfo entries (with waveform references, error flags)
  * for bytes that didn't change. Only creates new edited ByteInfo entries for
  * bytes that actually differ.
- *
- * @param prog     The program to modify (mutated in place)
- * @param lineIdx  Index into prog.lines of the line being edited
- * @param parsed   The parsed line from parseLine()
- * @param keepTrailingBytes  If true, don't delete trailing unmatched original bytes.
- *                           Used for line splitting — returns info about the trailing bytes.
- * @returns  SplitResult if keepTrailingBytes and there are meaningful trailing bytes, else null.
  */
 /** A single LCS match: newValues[newIdx] matched oldValues[oldIdx]. */
 export type LcsMatch = { newIdx: number; oldIdx: number };
@@ -252,60 +233,24 @@ function buildMergedBytes(
   return result;
 }
 
-export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine, keepTrailingBytes = false): SplitResult | null {
+export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine): void {
   const line = prog.lines[lineIdx];
   const oldFirst = line.firstByte;
   const oldLast  = line.lastByte;
 
-  // Extract old byte values (skipping the 2-byte pointer — we always recalculate it).
+  // Extract old byte values and ByteInfo (skipping the 2-byte pointer — we always recalculate it).
   const oldValues: number[] = [];
   for (let i = oldFirst + 2; i <= oldLast; i++) oldValues.push(prog.bytes[i].v);
   const oldBytes = prog.bytes.slice(oldFirst + 2, oldLast + 1);
 
   // New content bytes: lineNum(2) + content + 0x00.
-  // When keepTrailingBytes, strip the terminator from new bytes before LCS
-  // so it doesn't anchor to the original's terminator.
-  const fullNewContent = parsed.bytes;
-  const newValues = keepTrailingBytes
-    ? fullNewContent.slice(0, -1)  // strip trailing 0x00
-    : fullNewContent;
+  const newValues = parsed.bytes;
 
   // LCS on the content bytes (excluding pointer) to find minimal diff.
   const matches = computeLcs(newValues, oldValues);
 
   // Build merged byte array from the LCS matches.
   const mergedContent = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
-
-  // Collect matched old indices for trailing byte detection.
-  const matchedOldIndices = matches.map(m => m.oldIdx);
-
-  // Determine truly trailing bytes: old bytes after the last LCS-matched position.
-  // These are the bytes that belong to the second half of a split.
-  let splitResult: SplitResult | null = null;
-  if (keepTrailingBytes) {
-    const lastMatchedOldIdx = matchedOldIndices.length > 0
-      ? matchedOldIndices[matchedOldIndices.length - 1]
-      : -1;
-    const trailingStartIdx = lastMatchedOldIdx + 1;  // relative to oldFirst+2
-    const trailingCount = oldValues.length - trailingStartIdx;
-
-    if (trailingCount > 0) {
-      const trailingAbsStart = oldFirst + 2 + trailingStartIdx;
-      // Meaningful trailing = more than 1 byte, or 1 byte that isn't 0x00.
-      const hasContent = trailingCount > 1
-        || prog.bytes[trailingAbsStart].v !== 0x00;
-      if (hasContent) {
-        // Add an edited 0x00 terminator to the first half.
-        mergedContent.push({
-          v: 0x00, firstBit: 0, lastBit: 0,
-          unclear: false, chkErr: false, edited: true,
-        });
-      } else {
-        // Trailing is just the original terminator — include it in the merge.
-        mergedContent.push(prog.bytes[trailingAbsStart]);
-      }
-    }
-  }
 
   // Build the full merged line: pointer (2 bytes, preserved from original) + merged content.
   const mergedLine: ByteInfo[] = [
@@ -314,25 +259,8 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
     ...mergedContent,
   ];
 
-  // How many old bytes to replace: for a split with trailing bytes, don't consume them.
-  let oldBytesToReplace = oldLast - oldFirst + 1;  // default: whole line
-  if (keepTrailingBytes) {
-    const lastMatchedOldIdx = matchedOldIndices.length > 0
-      ? matchedOldIndices[matchedOldIndices.length - 1]
-      : -1;
-    const trailingStartIdx = lastMatchedOldIdx + 1;
-    const trailingCount = oldValues.length - trailingStartIdx;
-    const trailingAbsStart = oldFirst + 2 + trailingStartIdx;
-    const hasContent = trailingCount > 0
-      && (trailingCount > 1 || prog.bytes[trailingAbsStart].v !== 0x00);
-    if (hasContent) {
-      oldBytesToReplace = trailingAbsStart - oldFirst;  // up to but not including trailing bytes
-    }
-  }
-
   // Splice the merged line into prog.bytes.
-  const replaceEnd = oldFirst + oldBytesToReplace - 1;
-  const delta = spliceMergedBytes(prog.bytes, oldFirst, replaceEnd, mergedLine);
+  const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, mergedLine);
 
   // Shift all subsequent lines' byte indices by delta.
   for (let li = lineIdx + 1; li < prog.lines.length; li++) {
@@ -346,29 +274,9 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   line.expectedLastByte = line.lastByte;
   line.lenErr = false;
 
-  // Compute split result if applicable.
-  if (keepTrailingBytes) {
-    const lastMatchedOldIdx2 = matchedOldIndices.length > 0
-      ? matchedOldIndices[matchedOldIndices.length - 1]
-      : -1;
-    const trailingCount2 = oldValues.length - (lastMatchedOldIdx2 + 1);
-    if (trailingCount2 > 0) {
-      const trailingAbsStart2 = line.lastByte + 1;
-      const hasContent2 = trailingCount2 > 1
-        || prog.bytes[trailingAbsStart2]?.v !== 0x00;
-      if (hasContent2) {
-        splitResult = {
-          trailingStart: trailingAbsStart2,
-          trailingCount: trailingCount2,
-        };
-      }
-    }
-  }
-
   // Recalculate next-line pointers throughout the program.
   const startAddr = prog.header.startAddr;
   const firstLineOffset = prog.lines[0].firstByte;
-
   for (let li = 0; li < prog.lines.length; li++) {
     const l = prog.lines[li];
     let ptrValue: number;
@@ -386,9 +294,8 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   const elements: string[] = [];
   const lineNumStr = `${parsed.lineNum} `;
   elements.push(lineNumStr);
-  // Walk content bytes — use fullNewContent (with terminator) for element building.
-  for (let i = 2; i < fullNewContent.length - 1; i++) {
-    const b = fullNewContent[i];
+  for (let i = 2; i < newValues.length - 1; i++) {
+    const b = newValues[i];
     if (b < 128) {
       elements.push(String.fromCharCode(b));
     } else if ((b - 128) < KEYWORDS.length) {
@@ -404,8 +311,6 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   flagNonMonotonicLines(prog);
   flagSyntaxErrors(prog);
   flagElementErrors(prog);
-
-  return splitResult;
 }
 
 /**
