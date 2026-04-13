@@ -5,7 +5,7 @@ import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
-import { parseLine, applyLineEdit, deleteLineEdit } from './editor';
+import { applyLineEdit, deleteLineEdit } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -780,29 +780,24 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
       const savedLineIdx = editingLine;
       const trimmedBefore = textBefore.trim();
 
-      // Save first half with keepTrailingBytes to preserve original bytes for second half.
-      const textToSave = trimmedBefore || '0';
-      let parsed = parseLine(textToSave);
-      if (!parsed) parsed = parseLine('0 ' + textToSave);
-      if (parsed) {
-        applyLineEdit(prog, savedLineIdx, parsed);
-        renderHex(prog);
-        if (selByte !== null && prog.bytes[selByte]?.edited) {
-          waveform.selectByte(null);
-        }
+      // Save the first half of the split.
+      applyLineEdit(prog, savedLineIdx, trimmedBefore);
+      renderHex(prog);
+      if (selByte !== null && prog.bytes[selByte]?.edited) {
+        waveform.selectByte(null);
+      }
 
-        editingLine = null;
-        editInput = null;
-        editIsNewLine = false;
+      editingLine = null;
+      editInput = null;
+      editIsNewLine = false;
 
-        // TODO: replace with splitLineWithEdits once implemented.
-        renderBasic(prog);
-        insertNewLine(prog, savedLineIdx + 1);
-        if (editInput && textAfter.length > 0) {
-          editInput.value = textAfter;
-          (editInput as HTMLTextAreaElement).selectionStart = 0;
-          (editInput as HTMLTextAreaElement).selectionEnd = 0;
-        }
+      // TODO: replace with splitLineWithEdits once implemented.
+      renderBasic(prog);
+      insertNewLine(prog, savedLineIdx + 1);
+      if (editInput && textAfter.length > 0) {
+        editInput.value = textAfter;
+        (editInput as HTMLTextAreaElement).selectionStart = 0;
+        (editInput as HTMLTextAreaElement).selectionEnd = 0;
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
@@ -875,16 +870,11 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
         renderHex(prog);
         waveform.selectByte(null);
       } else {
-        let parsed = parseLine(trimmed);
-        // If no line number found, default to line number 0.
-        if (!parsed) parsed = parseLine('0 ' + trimmed);
-        if (parsed) {
-          applyLineEdit(prog, editingLine, parsed);
-          renderHex(prog);
-          // Clear waveform selection only if the selected byte is now edited.
-          if (selByte !== null && prog.bytes[selByte]?.edited) {
-            waveform.selectByte(null);
-          }
+        applyLineEdit(prog, editingLine, trimmed);
+        renderHex(prog);
+        // Clear waveform selection only if the selected byte is now edited.
+        if (selByte !== null && prog.bytes[selByte]?.edited) {
+          waveform.selectByte(null);
         }
       }
     }

@@ -233,10 +233,16 @@ function buildMergedBytes(
   return result;
 }
 
-export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine): void {
+export function applyLineEdit(prog: Program, lineIdx: number, text: string): void {
   // Validate parameters.
   if (lineIdx < 0 || lineIdx >= prog.lines.length) {
     console.warn('applyLineEdit: invalid lineIdx', lineIdx);
+    return;
+  }
+  const trimmed = text.trim();
+  const parsed = parseLine(trimmed) || parseLine('0 ' + trimmed);
+  if (!parsed) {
+    console.warn('applyLineEdit: failed to parse text', text);
     return;
   }
   const line = prog.lines[lineIdx];
