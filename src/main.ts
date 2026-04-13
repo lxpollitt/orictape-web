@@ -2100,14 +2100,38 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     return;
   }
 
-  // Shift+Enter: insert a new blank line after the selected line and edit it (tape view only).
+  // Shift+Enter: split the line before the selected element (tape view only).
   if (e.key === 'Enter' && e.shiftKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
     const prog = programs[activeProgIdx];
     if (prog) {
       const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
       if (li >= 0) {
         e.preventDefault();
-        insertNewLine(prog, li + 1);
+        const line = prog.lines[li];
+        const ei = elemIdxForByte(line, selByte!);
+        // Split at the start of the selected element.
+        const lineText = line.elements.join('');
+        let charStart = 0;
+        if (ei >= 0) {
+          for (let i = 0; i < ei; i++) charStart += line.elements[i].length;
+        }
+        const textBefore = lineText.slice(0, charStart);
+        const textAfter = lineText.slice(charStart);
+        const newLineIdx = splitLineWithEdits(prog, li, textBefore, textAfter);
+        renderHex(prog);
+        if (selByte !== null && prog.bytes[selByte]?.edited) {
+          waveform.selectByte(null);
+        }
+        renderBasic(prog);
+        // Enter edit mode on the new second line.
+        if (newLineIdx !== null) {
+          enterEditMode(newLineIdx);
+          if (editInput) {
+            const eta = editInput as HTMLTextAreaElement;
+            eta.value = textAfter;
+            eta.selectionStart = eta.selectionEnd = 0;
+          }
+        }
       }
     }
     return;
