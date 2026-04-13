@@ -96,10 +96,17 @@ export function flagSyntaxErrors(prog: Program): void {
  * re-runs post-processing flags.
  */
 export function deleteLineEdit(prog: Program, lineIdx: number): void {
+  // Validate parameters.
+  if (lineIdx < 0 || lineIdx >= prog.lines.length) {
+    console.warn('deleteLineEdit: invalid lineIdx', lineIdx);
+    return;
+  }
+
   const line = prog.lines[lineIdx];
   const oldFirst = line.firstByte;
   const oldLast  = line.lastByte;
   const oldLen   = oldLast - oldFirst + 1;
+  const delta = -oldLen;
 
   // Remove the bytes from the byte stream.
   prog.bytes.splice(oldFirst, oldLen);
@@ -107,29 +114,10 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
   // Remove the line from the lines array.
   prog.lines.splice(lineIdx, 1);
 
-  // Shift all subsequent lines' byte indices.
-  for (let li = lineIdx; li < prog.lines.length; li++) {
-    prog.lines[li].firstByte -= oldLen;
-    prog.lines[li].lastByte  -= oldLen;
-    prog.lines[li].expectedLastByte -= oldLen;
-  }
-
-  // Recalculate next-line pointers throughout the program.
-  const startAddr = prog.header.startAddr;
-  const firstLineOffset = prog.lines.length > 0 ? prog.lines[0].firstByte : 0;
-
-  for (let li = 0; li < prog.lines.length; li++) {
-    const l = prog.lines[li];
-    let ptrValue: number;
-    if (li < prog.lines.length - 1) {
-      const nextLineByteOffset = prog.lines[li + 1].firstByte - firstLineOffset;
-      ptrValue = startAddr + nextLineByteOffset;
-    } else {
-      ptrValue = 0x0000;
-    }
-    prog.bytes[l.firstByte].v     = ptrValue & 0xFF;
-    prog.bytes[l.firstByte + 1].v = (ptrValue >> 8) & 0xFF;
-  }
+  // Adjust subsequent lines' byte stream pointers and line info.
+  // (The predecessor line's pointer doesn't need adjusting — the new next line
+  // now starts at oldFirst, which is where the deleted line was.)
+  adjustLineOffsets(prog, delta, lineIdx);
 
   // Re-run all post-processing flags.
   flagNonMonotonicLines(prog);
