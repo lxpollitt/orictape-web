@@ -161,6 +161,44 @@ export interface SplitResult {
  *                           Used for line splitting — returns info about the trailing bytes.
  * @returns  SplitResult if keepTrailingBytes and there are meaningful trailing bytes, else null.
  */
+/** A single LCS match: newValues[newIdx] matched oldValues[oldIdx]. */
+export type LcsMatch = { newIdx: number; oldIdx: number };
+
+/**
+ * Compute the Longest Common Subsequence between two byte arrays.
+ * Returns matches in forward order (lowest indices first).
+ * Pure function — no knowledge of Program, ByteInfo, or lines.
+ */
+export function computeLcs(newValues: number[], oldValues: number[]): LcsMatch[] {
+  const n = oldValues.length;
+  const m = newValues.length;
+  const dp: Uint16Array[] = new Array(n + 1);
+  for (let i = 0; i <= n; i++) dp[i] = new Uint16Array(m + 1);
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      dp[i][j] = oldValues[i - 1] === newValues[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+
+  // Backtrack to collect matches in reverse, then reverse.
+  const matches: LcsMatch[] = [];
+  let oi = n, ni = m;
+  while (oi > 0 && ni > 0) {
+    if (oldValues[oi - 1] === newValues[ni - 1]) {
+      matches.push({ newIdx: ni - 1, oldIdx: oi - 1 });
+      oi--; ni--;
+    } else if (dp[oi][ni - 1] >= dp[oi - 1][ni]) {
+      ni--;
+    } else {
+      oi--;
+    }
+  }
+  matches.reverse();
+  return matches;
+}
+
 export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine, keepTrailingBytes = false): SplitResult | null {
   const line = prog.lines[lineIdx];
   const oldFirst = line.firstByte;
@@ -179,45 +217,29 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
     : fullNewContent;
 
   // LCS on the content bytes (excluding pointer) to find minimal diff.
-  const n = oldValues.length;
-  const m = newValues.length;
-  const dp: Uint16Array[] = new Array(n + 1);
-  for (let i = 0; i <= n; i++) dp[i] = new Uint16Array(m + 1);
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      dp[i][j] = oldValues[i - 1] === newValues[j - 1]
-        ? dp[i - 1][j - 1] + 1
-        : Math.max(dp[i - 1][j], dp[i][j - 1]);
-    }
-  }
+  const matches = computeLcs(newValues, oldValues);
 
-  // Backtrack to build the merged byte array.
-  // Track which old byte indices were matched by the LCS.
-  const reverseContent: ByteInfo[] = [];
-  const matchedOldIndices: number[] = [];  // old byte indices (relative to oldFirst+2) that were matched
-  let oi = n, ni = m;
-  while (oi > 0 || ni > 0) {
-    if (oi > 0 && ni > 0 && oldValues[oi - 1] === newValues[ni - 1]) {
+  // Build merged byte array from the LCS matches.
+  const mergedContent: ByteInfo[] = [];
+  const matchedOldIndices: number[] = [];
+  let matchIdx = 0;
+  for (let ni = 0; ni < newValues.length; ni++) {
+    if (matchIdx < matches.length && matches[matchIdx].newIdx === ni) {
       // Match — preserve original ByteInfo.
-      reverseContent.push(prog.bytes[oldFirst + 2 + (oi - 1)]);
-      matchedOldIndices.push(oi - 1);
-      oi--; ni--;
-    } else if (ni > 0 && (oi === 0 || dp[oi][ni - 1] >= dp[oi - 1][ni])) {
-      // Insertion in new — create edited byte.
-      reverseContent.push({
-        v: newValues[ni - 1],
+      const oi = matches[matchIdx].oldIdx;
+      mergedContent.push(prog.bytes[oldFirst + 2 + oi]);
+      matchedOldIndices.push(oi);
+      matchIdx++;
+    } else {
+      // No match — create edited byte.
+      mergedContent.push({
+        v: newValues[ni],
         firstBit: 0, lastBit: 0,
         unclear: false, chkErr: false,
         edited: true,
       });
-      ni--;
-    } else {
-      // Deletion from old — skip.
-      oi--;
     }
   }
-  reverseContent.reverse();
-  matchedOldIndices.reverse();
 
   // Determine truly trailing bytes: old bytes after the last LCS-matched position.
   // These are the bytes that belong to the second half of a split.
@@ -227,7 +249,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
       ? matchedOldIndices[matchedOldIndices.length - 1]
       : -1;
     const trailingStartIdx = lastMatchedOldIdx + 1;  // relative to oldFirst+2
-    const trailingCount = n - trailingStartIdx;
+    const trailingCount = oldValues.length - trailingStartIdx;
 
     if (trailingCount > 0) {
       const trailingAbsStart = oldFirst + 2 + trailingStartIdx;
@@ -236,13 +258,13 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
         || prog.bytes[trailingAbsStart].v !== 0x00;
       if (hasContent) {
         // Add an edited 0x00 terminator to the first half.
-        reverseContent.push({
+        mergedContent.push({
           v: 0x00, firstBit: 0, lastBit: 0,
           unclear: false, chkErr: false, edited: true,
         });
       } else {
         // Trailing is just the original terminator — include it in the merge.
-        reverseContent.push(prog.bytes[trailingAbsStart]);
+        mergedContent.push(prog.bytes[trailingAbsStart]);
       }
     }
   }
@@ -251,7 +273,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
   const mergedLine: ByteInfo[] = [
     { ...prog.bytes[oldFirst],     edited: undefined },  // pointer byte 0
     { ...prog.bytes[oldFirst + 1], edited: undefined },  // pointer byte 1
-    ...reverseContent,
+    ...mergedContent,
   ];
 
   // How many old bytes to replace: for a split with trailing bytes, don't consume them.
@@ -261,7 +283,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
       ? matchedOldIndices[matchedOldIndices.length - 1]
       : -1;
     const trailingStartIdx = lastMatchedOldIdx + 1;
-    const trailingCount = n - trailingStartIdx;
+    const trailingCount = oldValues.length - trailingStartIdx;
     const trailingAbsStart = oldFirst + 2 + trailingStartIdx;
     const hasContent = trailingCount > 0
       && (trailingCount > 1 || prog.bytes[trailingAbsStart].v !== 0x00);
@@ -292,7 +314,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, parsed: ParsedLine
     const lastMatchedOldIdx2 = matchedOldIndices.length > 0
       ? matchedOldIndices[matchedOldIndices.length - 1]
       : -1;
-    const trailingCount2 = n - (lastMatchedOldIdx2 + 1);
+    const trailingCount2 = oldValues.length - (lastMatchedOldIdx2 + 1);
     if (trailingCount2 > 0) {
       const trailingAbsStart2 = line.lastByte + 1;
       const hasContent2 = trailingCount2 > 1
