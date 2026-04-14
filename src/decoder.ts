@@ -667,6 +667,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     while (nextMaxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
       if (!readCycle()) break;
       if (maxVal - minVal < SYNC_NOISE_FLOOR) break; // noise floor (silence, noise, or slow ramp)
+      // TS can't see that readCycle() mutates cycleKind via closure — ignore the narrowing warning.
       if (cycleKind === 'medium') mediumCycleCount++;
       else if (cycleKind === 'long') longCycleCount++;
       pushBitFast();
