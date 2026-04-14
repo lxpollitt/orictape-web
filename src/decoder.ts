@@ -958,45 +958,28 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     }
     const nextLineStart = rawLineStart - correctionOffset;
 
-    const elements: string[] = [];
-    const lineNum = getByte() + 256 * getByte();
-    const lineNumStr = `${lineNum} `;
-    elements.push(lineNumStr);
-    let line = lineNumStr;
+    // Read line number (2 bytes) and content bytes (until 0x00 terminator)
+    // to advance nextByte. Track unknownKeyword flag.
+    getByte(); getByte();  // line number bytes
     let unknownKeyword = false;
-
-    byteSequenceSyntaxChecker(0x00, true);  // reset syntax checker for this line
     while (true) {
       const b = getByte();
       if (b === 0) break;
-      const syntax = byteSequenceSyntaxChecker(b);
-      let element: string;
-      if (syntax.severity !== 'ok') {
-        // Byte is unexpected in this context — escape it to preserve round-tripping.
-        element = `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
-        if (b >= 0x80) unknownKeyword = true;
-      } else if (b >= 0x20 && b <= 0x7E) {
-        element = String.fromCharCode(b);
-      } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
-        element = KEYWORDS[b - 0x80];
-      } else {
-        // Shouldn't reach here if syntax checker is comprehensive, but safety net.
-        element = `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
-      }
-      elements.push(element);
-      line += element;
+      if (b >= 0x80 && (b - 0x80) >= KEYWORDS.length) unknownKeyword = true;
     }
 
-    prog.lines.push({
-      v: line,
-      elements,
+    const lineInfo: LineInfo = {
+      v: '',
+      elements: [],
       firstByte: lineStart,
       lastByte:  nextByte - 1,
       expectedLastByte: nextLineStart - 1,
       lenErr: nextLineStart !== nextByte,
       unknownKeyword: unknownKeyword || undefined,
       memAddr: lineMemAddr,
-    });
+    };
+    prog.lines.push(lineInfo);
+    buildLineElements(lineInfo, prog.bytes);
     correctionOffset += nextLineStart - nextByte;
     // rawLineStart is the memory address of the *next* line.
     lineMemAddr = rawLineStart;
@@ -1012,11 +995,6 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     firstLine.expectedLastByte = firstLine.lastByte;
   }
 
-  // Run syntax checker over all lines to set elements and elementErrors.
-  // This also escapes non-round-tripping bytes (e.g. literal = in code mode).
-  for (const l of prog.lines) {
-    buildLineElements(l, prog.bytes);
-  }
 }
 
 /**
