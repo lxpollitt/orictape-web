@@ -84,7 +84,7 @@ let searchMatches:  number[]               = [];   // line indices of current ma
 let searchMatchIdx: number                 = -1;   // index into searchMatches
 let wrapMode      = true;
 let editingLine:    number | null          = null;  // line index being edited, or null
-let editInput:      HTMLInputElement | null = null;  // the inline edit input element
+let editInput:      HTMLTextAreaElement | null = null;  // the inline edit textarea element
 let editIsNewLine   = false;                         // true if editing a newly inserted line
 /** Which panel most recently received focus — drives keyboard navigation. */
 let focusedPanel: 'hex' | 'basic' | null  = null;
@@ -909,7 +909,7 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
 
   lineEl.textContent = '';
   lineEl.appendChild(ta);
-  editInput = ta as unknown as HTMLInputElement;  // reuse the same state variable
+  editInput = ta;
 
   if (replaceElem !== undefined && replaceElem >= 0 && replaceElem < line.elements.length) {
     // Calculate the character range of the target element in the text.
