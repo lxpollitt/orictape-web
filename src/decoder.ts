@@ -6,7 +6,7 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-import { flagSyntaxErrors, checkLineSyntax, byteSequenceSyntaxChecker } from './editor';
+import { flagSyntaxErrors, byteSequenceSyntaxChecker } from './editor';
 
 // BitInfo is used by the UI when reading individual bits out of a BitStream.
 export interface BitInfo {
@@ -178,9 +178,13 @@ export function programSummary(prog: Program): { label: string; count: number; s
  */
 export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
   const elements: string[] = [];
+  const errors: ('error' | 'warning' | null)[] = [];
+  let hasAnyError = false;
+
   // Line number from bytes: firstByte+2 (lo) and firstByte+3 (hi).
   const lineNum = bytes[line.firstByte + 2].v + bytes[line.firstByte + 3].v * 256;
   elements.push(`${lineNum} `);
+  errors.push(null);  // line number element — syntax checker doesn't cover this
 
   // Content bytes: firstByte+4 to lastByte (lastByte is the 0x00 terminator).
   byteSequenceSyntaxChecker(0x00, true);  // reset
@@ -190,16 +194,23 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
     const syntax = byteSequenceSyntaxChecker(b);
     if (syntax.severity !== 'ok') {
       elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
+      errors.push(syntax.severity);
+      hasAnyError = true;
     } else if (b >= 0x20 && b <= 0x7E) {
       elements.push(String.fromCharCode(b));
+      errors.push(null);
     } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
       elements.push(KEYWORDS[b - 0x80]);
+      errors.push(null);
     } else {
       elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
+      errors.push('error');
+      hasAnyError = true;
     }
   }
   line.v = elements.join('');
   line.elements = elements;
+  line.elementErrors = hasAnyError ? errors : undefined;
 }
 
 /**
@@ -217,41 +228,18 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
 export function flagElementErrors(prog: Program): void {
   for (let li = 0; li < prog.lines.length; li++) {
     const line = prog.lines[li];
-    const errors: ('error' | 'warning' | null)[] = new Array(line.elements.length).fill(null);
-    let hasAny = false;
-
-    // Determine syntax mismatch byte offset (if any).
-    let syntaxMismatchByte = -1;
-    if (line.syntaxError) {
-      const lineText = line.elements.join('');
-      const originalBytes: number[] = [];
-      for (let b = line.firstByte + 2; b <= line.lastByte; b++) {
-        originalBytes.push(prog.bytes[b].v);
-      }
-      const issue = checkLineSyntax(lineText, originalBytes);
-      if (issue) syntaxMismatchByte = issue.byteOffset;
-    }
+    // Start from syntax-level errors set by buildLineElements, or a fresh array.
+    const errors: ('error' | 'warning' | null)[] = line.elementErrors
+      ? [...line.elementErrors]
+      : new Array(line.elements.length).fill(null);
+    let hasAny = errors.some(e => e !== null);
 
     for (let ei = 0; ei < line.elements.length; ei++) {
-      const el = line.elements[ei];
-      let severity: 'error' | 'warning' | null = null;
+      let severity = errors[ei];
 
       // Non-monotonic line number.
-      if (ei === 0 && line.nonMonotonic) {
+      if (ei === 0 && line.nonMonotonic && severity !== 'error') {
         severity = 'error';
-      }
-
-      // Escaped byte token «0xNN» — error for unknown keywords (0x80+), warning for non-printable chars.
-      if (el.startsWith('«0x') && el.endsWith('»') && el.length === 6) {
-        const byteVal = parseInt(el.slice(3, 5), 16);
-        severity = byteVal >= 0x80 ? 'error' : 'warning';
-      }
-
-      // Syntax mismatch: map byte offset to element index.
-      // Byte offset 0-1 = line number (element 0), offset N+2 = element N+1 content byte.
-      if (syntaxMismatchByte >= 0) {
-        const mismatchEi = syntaxMismatchByte <= 1 ? 0 : syntaxMismatchByte - 1;
-        if (ei === mismatchEi) severity = 'error';
       }
 
       // Byte-level flags (only if no harder error already set).
@@ -1022,6 +1010,12 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     prog.header.startAddr = ptr - (firstLine.lastByte - firstLine.firstByte + 1);
     firstLine.lenErr = false;
     firstLine.expectedLastByte = firstLine.lastByte;
+  }
+
+  // Run syntax checker over all lines to set elements and elementErrors.
+  // This also escapes non-round-tripping bytes (e.g. literal = in code mode).
+  for (const l of prog.lines) {
+    buildLineElements(l, prog.bytes);
   }
 }
 
