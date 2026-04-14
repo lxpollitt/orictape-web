@@ -92,39 +92,21 @@ export function flagSyntaxErrors(prog: Program): void {
 /**
  * TODO: development aid — comment out when not debugging editing.
  * Recalculate lenErr for all lines by comparing each line's next-line pointer
- * against where the next line actually starts in the byte stream.
+ * against where its content ends.
  */
 function flagLenErrors(prog: Program): void {
+  if (prog.lines.length === 0) return;
+  // Converts a memory address to a byte index: byteIdx = memAddr + addrToByte.
+  // Adjusted after each length error to account for gaps in the byte stream.
+  let addrToByte = prog.lines[0].firstByte - prog.header.startAddr;
+
   for (let li = 0; li < prog.lines.length; li++) {
     const line = prog.lines[li];
-    if (li === 0) {
-      // First line's pointer is not checked (same as initial decode).
-      line.lenErr = false;
-      line.expectedLastByte = line.lastByte;
-      continue;
-    }
-    // Read the previous line's pointer to find where this line should start.
-    const prev = prog.lines[li - 1];
-    const ptr = prog.bytes[prev.firstByte].v | (prog.bytes[prev.firstByte + 1].v << 8);
-    const startAddr = prog.header.startAddr;
-    const firstLineOffset = prog.lines[0].firstByte;
-    const expectedStart = (ptr - startAddr) + firstLineOffset;
-    prev.expectedLastByte = expectedStart - 1;
-    prev.lenErr = (expectedStart !== line.firstByte);
-  }
-  // Last line: pointer should be 0x0000.
-  if (prog.lines.length > 0) {
-    const last = prog.lines[prog.lines.length - 1];
-    const ptr = prog.bytes[last.firstByte].v | (prog.bytes[last.firstByte + 1].v << 8);
-    if (ptr === 0x0000) {
-      last.lenErr = false;
-      last.expectedLastByte = last.lastByte;
-    } else {
-      last.lenErr = true;
-      const startAddr = prog.header.startAddr;
-      const firstLineOffset = prog.lines[0].firstByte;
-      last.expectedLastByte = (ptr - startAddr) + firstLineOffset - 1;
-    }
+    const ptr = prog.bytes[line.firstByte].v | (prog.bytes[line.firstByte + 1].v << 8);
+    const nextLineBytePos = ptr + addrToByte;
+    const errorAmount = nextLineBytePos - (line.lastByte + 1);
+    line.lenErr = (errorAmount !== 0);
+    if (errorAmount !== 0) addrToByte -= errorAmount;
   }
 }
 
