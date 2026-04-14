@@ -2101,11 +2101,8 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
       // since in that case there is no more specific location to point at.
       let landed = false;
       for (let ei = 0; ei < line.elements.length; ei++) {
-        const b = byteForElem(line, ei);
-        // Element 0 covers two bytes (line-number field); check both.
-        const check = ei === 0 ? [b, b + 1] : [b];
-        if (check.some(idx => { const by = prog.bytes[idx]; return by && isErrByte(by); })) {
-          selectByte(b);
+        if (line.elementErrors?.[ei]) {
+          selectByte(byteForElem(line, ei));
           landed = true;
           break;
         }
@@ -2131,8 +2128,7 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
     ? (step < 0 ? curLine.elements.length - 1 : 0)
     : curEi + step;
   for (let ei = curStart; ei >= 0 && ei < curLine.elements.length; ei += step) {
-    const b = byteForElem(curLine, ei);
-    if (prog.bytes[b] && isErrByte(prog.bytes[b])) { selectByte(b); return; }
+    if (curLine.elementErrors?.[ei]) { selectByte(byteForElem(curLine, ei)); return; }
   }
 
   // Remaining lines.
@@ -2140,8 +2136,7 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
     const l     = lines[lj];
     const start = step < 0 ? l.elements.length - 1 : 0;
     for (let ei = start; ei >= 0 && ei < l.elements.length; ei += step) {
-      const b = byteForElem(l, ei);
-      if (prog.bytes[b] && isErrByte(prog.bytes[b])) { selectByte(b); return; }
+      if (l.elementErrors?.[ei]) { selectByte(byteForElem(l, ei)); return; }
     }
   }
   // No error element found — go to the first/last element as end-of-search feedback.
