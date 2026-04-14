@@ -325,12 +325,12 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   elements.push(`${parsed.lineNum} `);
   for (let i = 2; i < newValues.length - 1; i++) {
     const b = newValues[i];
-    if (b < 128) {
+    if (b >= 0x20 && b <= 0x7E) {
       elements.push(String.fromCharCode(b));
-    } else if ((b - 128) < KEYWORDS.length) {
-      elements.push(KEYWORDS[b - 128]);
+    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
+      elements.push(KEYWORDS[b - 0x80]);
     } else {
-      elements.push('[UNKNOWN_KEYWORD]');
+      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
     }
   }
   line.v = elements.join('');
@@ -482,12 +482,12 @@ export function splitLineWithEdits(
   firstElements.push(`${parsedFirst.lineNum} `);
   for (let i = 2; i < parsedFirst.bytes.length - 1; i++) {
     const b = parsedFirst.bytes[i];
-    if (b < 128) {
+    if (b >= 0x20 && b <= 0x7E) {
       firstElements.push(String.fromCharCode(b));
-    } else if ((b - 128) < KEYWORDS.length) {
-      firstElements.push(KEYWORDS[b - 128]);
+    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
+      firstElements.push(KEYWORDS[b - 0x80]);
     } else {
-      firstElements.push('[UNKNOWN_KEYWORD]');
+      firstElements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
     }
   }
   line.v = firstElements.join('');
@@ -502,12 +502,12 @@ export function splitLineWithEdits(
   secondElements.push(`${parsedSecond.lineNum} `);
   for (let i = 2; i < parsedSecond.bytes.length - 1; i++) {
     const b = parsedSecond.bytes[i];
-    if (b < 128) {
+    if (b >= 0x20 && b <= 0x7E) {
       secondElements.push(String.fromCharCode(b));
-    } else if ((b - 128) < KEYWORDS.length) {
-      secondElements.push(KEYWORDS[b - 128]);
+    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
+      secondElements.push(KEYWORDS[b - 0x80]);
     } else {
-      secondElements.push('[UNKNOWN_KEYWORD]');
+      secondElements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
     }
   }
 
@@ -639,12 +639,12 @@ export function joinLinesWithEdit(
   elements.push(`${parsed.lineNum} `);
   for (let i = 2; i < newValues.length - 1; i++) {
     const b = newValues[i];
-    if (b < 128) {
+    if (b >= 0x20 && b <= 0x7E) {
       elements.push(String.fromCharCode(b));
-    } else if ((b - 128) < KEYWORDS.length) {
-      elements.push(KEYWORDS[b - 128]);
+    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
+      elements.push(KEYWORDS[b - 0x80]);
     } else {
-      elements.push('[UNKNOWN_KEYWORD]');
+      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
     }
   }
   first.v = elements.join('');
@@ -738,6 +738,23 @@ function tokenise(content: string): number[] {
     const ch = content[i];
     const code = ch.charCodeAt(0);
 
+    // Escaped byte token «0xNN» — emit the byte directly, in any context.
+    if (ch === '«' && content.startsWith('«0x', i) && content[i + 5] === '»') {
+      const hexStr = content.slice(i + 3, i + 5);
+      const byteVal = parseInt(hexStr, 16);
+      if (!isNaN(byteVal)) {
+        bytes.push(byteVal);
+        i += 6;
+        continue;
+      }
+    }
+
+    // Characters outside the Oric's 7-bit range — silently drop.
+    if (code > 0x7E) {
+      i++;
+      continue;
+    }
+
     // After REM or !, everything is literal to end of line.
     if (afterRem) {
       bytes.push(code);
@@ -791,12 +808,7 @@ function tokenise(content: string): number[] {
       continue;
     }
 
-    // Characters >= 0x80 pass through as-is.
-    if (code >= 0x80) {
-      bytes.push(code);
-      i++;
-      continue;
-    }
+
 
     // Try to match a keyword at the current position (greedy, longest match).
     let matched = false;

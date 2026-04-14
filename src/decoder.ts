@@ -209,9 +209,10 @@ export function flagElementErrors(prog: Program): void {
         severity = 'error';
       }
 
-      // Unknown keyword.
-      if (el === '[UNKNOWN_KEYWORD]') {
-        severity = 'error';
+      // Escaped byte token «0xNN» — error for unknown keywords (0x80+), warning for non-printable chars.
+      if (el.startsWith('«0x') && el.endsWith('»') && el.length === 6) {
+        const byteVal = parseInt(el.slice(3, 5), 16);
+        severity = byteVal >= 0x80 ? 'error' : 'warning';
       }
 
       // Syntax mismatch: map byte offset to element index.
@@ -935,13 +936,16 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
       const b = getByte();
       if (b === 0) break;
       let element: string;
-      if (b < 128) {
+      if (b >= 0x20 && b <= 0x7E) {
         element = String.fromCharCode(b);
-      } else if ((b - 128) < KEYWORDS.length) {
-        element = KEYWORDS[b - 128];
-      } else {
-        element = '[UNKNOWN_KEYWORD]';
+      } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
+        element = KEYWORDS[b - 0x80];
+      } else if (b >= 0x80) {
+        element = `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
         unknownKeyword = true;
+      } else {
+        // Non-printable character (0x01-0x1F, 0x7F).
+        element = `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
       }
       elements.push(element);
       line += element;
