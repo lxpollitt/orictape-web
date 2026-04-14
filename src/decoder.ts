@@ -1021,9 +1021,8 @@ export function flagNonMonotonicLines(prog: Program): void {
   }
 
   // Flag lines not in the LIS (or with unparseable line numbers).
+  // Clear the flag for lines that are in the LIS (editing may have fixed them).
   for (let i = 0; i < n; i++) {
-    if (!inLIS[i]) {
-      prog.lines[i].nonMonotonic = true;
-    }
+    prog.lines[i].nonMonotonic = !inLIS[i] || undefined;
   }
 }
