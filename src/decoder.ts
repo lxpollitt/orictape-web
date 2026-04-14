@@ -6,7 +6,7 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-import { flagSyntaxErrors, checkLineSyntax } from './editor';
+import { flagSyntaxErrors, checkLineSyntax, byteSequenceSyntaxChecker } from './editor';
 
 // BitInfo is used by the UI when reading individual bits out of a BitStream.
 export interface BitInfo {
@@ -168,6 +168,38 @@ export function programSummary(prog: Program): { label: string; count: number; s
   if (errorLines > 0)   result.push({ label: 'errors', count: errorLines, severity: 'error' });
   if (warningLines > 0) result.push({ label: 'warnings', count: warningLines, severity: 'warning' });
   return result;
+}
+
+/**
+ * Build the elements array and display text for a line from its bytes.
+ * Uses byteSequenceSyntaxChecker to decide whether bytes need escaping
+ * (e.g. literal ASCII that should have been a keyword token).
+ * Sets line.v and line.elements.
+ */
+export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
+  const elements: string[] = [];
+  // Line number from bytes: firstByte+2 (lo) and firstByte+3 (hi).
+  const lineNum = bytes[line.firstByte + 2].v + bytes[line.firstByte + 3].v * 256;
+  elements.push(`${lineNum} `);
+
+  // Content bytes: firstByte+4 to lastByte (lastByte is the 0x00 terminator).
+  byteSequenceSyntaxChecker(0x00, true);  // reset
+  for (let i = line.firstByte + 4; i < line.lastByte; i++) {
+    const b = bytes[i].v;
+    if (b === 0) break;  // early terminator
+    const syntax = byteSequenceSyntaxChecker(b);
+    if (syntax.severity !== 'ok') {
+      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
+    } else if (b >= 0x20 && b <= 0x7E) {
+      elements.push(String.fromCharCode(b));
+    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
+      elements.push(KEYWORDS[b - 0x80]);
+    } else {
+      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
+    }
+  }
+  line.v = elements.join('');
+  line.elements = elements;
 }
 
 /**
@@ -945,19 +977,22 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     let line = lineNumStr;
     let unknownKeyword = false;
 
+    byteSequenceSyntaxChecker(0x00, true);  // reset syntax checker for this line
     while (true) {
       const b = getByte();
       if (b === 0) break;
+      const syntax = byteSequenceSyntaxChecker(b);
       let element: string;
-      if (b >= 0x20 && b <= 0x7E) {
+      if (syntax.severity !== 'ok') {
+        // Byte is unexpected in this context — escape it to preserve round-tripping.
+        element = `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
+        if (b >= 0x80) unknownKeyword = true;
+      } else if (b >= 0x20 && b <= 0x7E) {
         element = String.fromCharCode(b);
       } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
         element = KEYWORDS[b - 0x80];
-      } else if (b >= 0x80) {
-        element = `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
-        unknownKeyword = true;
       } else {
-        // Non-printable character (0x01-0x1F, 0x7F).
+        // Shouldn't reach here if syntax checker is comprehensive, but safety net.
         element = `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
       }
       elements.push(element);

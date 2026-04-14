@@ -36,7 +36,7 @@
 
 import { KEYWORDS, TOKEN_REM, TOKEN_BANG, TOKEN_DATA, INVALID_CODE_LITERALS } from './decoder';
 import type { Program, ByteInfo, LineInfo } from './decoder';
-import { flagNonMonotonicLines, flagElementErrors } from './decoder';
+import { flagNonMonotonicLines, flagElementErrors, buildLineElements } from './decoder';
 
 export interface ParsedLine {
   lineNum: number;
@@ -414,21 +414,8 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   line.expectedLastByte = line.lastByte;
   line.lenErr = false;
 
-  // Update the edited line's elements and line number from the parsed data.
-  const elements: string[] = [];
-  elements.push(`${parsed.lineNum} `);
-  for (let i = 2; i < newValues.length - 1; i++) {
-    const b = newValues[i];
-    if (b >= 0x20 && b <= 0x7E) {
-      elements.push(String.fromCharCode(b));
-    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
-      elements.push(KEYWORDS[b - 0x80]);
-    } else {
-      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
-    }
-  }
-  line.v = elements.join('');
-  line.elements = elements;
+  // Update the edited line's elements and display text from its bytes.
+  buildLineElements(line, prog.bytes);
 
   // --- Adjust subsequent lines: byte stream pointers then line info ---
 
@@ -572,42 +559,16 @@ export function splitLineWithEdits(
   line.lenErr = false;
 
   // Build elements for the first line.
-  const firstElements: string[] = [];
-  firstElements.push(`${parsedFirst.lineNum} `);
-  for (let i = 2; i < parsedFirst.bytes.length - 1; i++) {
-    const b = parsedFirst.bytes[i];
-    if (b >= 0x20 && b <= 0x7E) {
-      firstElements.push(String.fromCharCode(b));
-    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
-      firstElements.push(KEYWORDS[b - 0x80]);
-    } else {
-      firstElements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
-    }
-  }
-  line.v = firstElements.join('');
-  line.elements = firstElements;
+  buildLineElements(line, prog.bytes);
 
   // --- Create the second line's LineInfo and insert it ---
 
   const secondLineFirstByte = firstLineEnd + 1;  // starts right after first line
   const secondLineLastByte = secondLineFirstByte + 2 + secondContent.length - 1;
 
-  const secondElements: string[] = [];
-  secondElements.push(`${parsedSecond.lineNum} `);
-  for (let i = 2; i < parsedSecond.bytes.length - 1; i++) {
-    const b = parsedSecond.bytes[i];
-    if (b >= 0x20 && b <= 0x7E) {
-      secondElements.push(String.fromCharCode(b));
-    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
-      secondElements.push(KEYWORDS[b - 0x80]);
-    } else {
-      secondElements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
-    }
-  }
-
   const newLine: LineInfo = {
-    v: secondElements.join(''),
-    elements: secondElements,
+    v: '',
+    elements: [],
     firstByte: secondLineFirstByte,
     lastByte: secondLineLastByte,
     expectedLastByte: secondLineLastByte,
@@ -615,6 +576,7 @@ export function splitLineWithEdits(
     memAddr: 0,
   };
   prog.lines.splice(lineIdx + 1, 0, newLine);
+  buildLineElements(newLine, prog.bytes);
 
   // --- Adjust subsequent lines (after the two new lines) ---
 
@@ -729,20 +691,7 @@ export function joinLinesWithEdit(
   first.lenErr = false;
 
   // Build elements for the merged line.
-  const elements: string[] = [];
-  elements.push(`${parsed.lineNum} `);
-  for (let i = 2; i < newValues.length - 1; i++) {
-    const b = newValues[i];
-    if (b >= 0x20 && b <= 0x7E) {
-      elements.push(String.fromCharCode(b));
-    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
-      elements.push(KEYWORDS[b - 0x80]);
-    } else {
-      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
-    }
-  }
-  first.v = elements.join('');
-  first.elements = elements;
+  buildLineElements(first, prog.bytes);
 
   // Remove the second (deleted) line from prog.lines.
   prog.lines.splice(secondIdx, 1);
