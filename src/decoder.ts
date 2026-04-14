@@ -320,6 +320,19 @@ export const KEYWORDS: string[] = [
   'TRUE', 'FALSE', 'KEY$', 'SCRN', 'POINT', 'LEFT$', 'RIGHT$', 'MID$',
 ];
 
+// Token bytes for keywords that trigger tokenisation state changes.
+export const TOKEN_REM  = 0x80 + KEYWORDS.indexOf('REM');   // 0x9D
+export const TOKEN_BANG = 0x80 + KEYWORDS.indexOf('!');     // 0xC0
+export const TOKEN_DATA = 0x80 + KEYWORDS.indexOf('DATA');  // 0x91
+
+// Literal byte values that are invalid in code mode — the Oric tokeniser would
+// have produced keyword tokens for these, so seeing them as literals indicates
+// corruption or non-standard program creation.
+export const INVALID_CODE_LITERALS = new Set(
+  KEYWORDS.filter(kw => kw.length === 1).map(kw => kw.charCodeAt(0))
+    .concat(0x3F)  // ? (PRINT shorthand)
+);
+
 export function readBitStreams(samples: Int16Array, sampleRate = 44100): BitStream[] {
   // Compute file-level peak amplitude once, used to scale noise floor thresholds
   // to compensate for different ADC recording levels.

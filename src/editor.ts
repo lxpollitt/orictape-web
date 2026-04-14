@@ -34,7 +34,7 @@
  *   - Oric Advanced User Guide ROM Disassembly (Defence-Force)
  */
 
-import { KEYWORDS } from './decoder';
+import { KEYWORDS, TOKEN_REM, TOKEN_BANG, TOKEN_DATA, INVALID_CODE_LITERALS } from './decoder';
 import type { Program, ByteInfo, LineInfo } from './decoder';
 import { flagNonMonotonicLines, flagElementErrors } from './decoder';
 
@@ -56,28 +56,6 @@ export interface ByteSyntaxResult {
   expectNext: 'code' | 'literals';
 }
 
-// Literal byte values that are invalid in code mode — the Oric tokeniser would
-// have produced keyword tokens for these, so seeing them as literals indicates
-// corruption or non-standard program creation.
-const INVALID_CODE_LITERALS = new Set([
-  0x21, // !
-  0x26, // &
-  0x2A, // *
-  0x2B, // +
-  0x2D, // -
-  0x2F, // /
-  0x3C, // <
-  0x3D, // =
-  0x3E, // >
-  0x3F, // ?
-  0x40, // @
-  0x5E, // ^
-]);
-
-// Token bytes that trigger state transitions.
-const TOKEN_REM  = 0x80 + KEYWORDS.indexOf('REM');   // 0x9D
-const TOKEN_BANG = 0x80 + KEYWORDS.indexOf('!');     // 0xC0
-const TOKEN_DATA = 0x80 + KEYWORDS.indexOf('DATA');  // 0x91
 
 /**
  * Byte-level syntax checker for Oric BASIC line content.
@@ -842,13 +820,12 @@ export function parseLine(text: string, noLineNumber?: boolean, originalBytes?: 
 /**
  * Tokenise a BASIC line's content (everything after the line number).
  * Returns an array of bytes: keyword tokens (0x80+) and ASCII characters.
+ * Uses byteSequenceSyntaxChecker to track tokenisation context.
  */
 function tokenise(content: string): number[] {
   const bytes: number[] = [];
   let i = 0;
-  let inString = false;
-  let afterRem  = false;
-  let inData    = false;
+  let mode = byteSequenceSyntaxChecker(0x00, true).expectNext;  // reset, get initial mode
 
   while (i < content.length) {
     const ch = content[i];
@@ -860,6 +837,7 @@ function tokenise(content: string): number[] {
       const byteVal = parseInt(hexStr, 16);
       if (!isNaN(byteVal)) {
         bytes.push(byteVal);
+        mode = byteSequenceSyntaxChecker(byteVal).expectNext;
         i += 6;
         continue;
       }
@@ -871,48 +849,21 @@ function tokenise(content: string): number[] {
       continue;
     }
 
-    // After REM or !, everything is literal to end of line.
-    if (afterRem) {
+    // Literal mode — emit byte as-is.
+    if (mode === 'literals') {
       bytes.push(code);
+      mode = byteSequenceSyntaxChecker(code).expectNext;
       i++;
       continue;
     }
 
-    // Inside a string literal — copy verbatim until closing quote or end of line.
-    if (inString) {
-      bytes.push(code);
-      if (ch === '"') inString = false;
-      i++;
-      continue;
-    }
-
-    // Opening quote — start string literal.
-    if (ch === '"') {
-      inString = true;
-      bytes.push(code);
-      i++;
-      continue;
-    }
-
-    // Colon resets DATA suppression and is output as-is.
-    if (ch === ':') {
-      inData = false;
-      bytes.push(code);
-      i++;
-      continue;
-    }
-
-    // Inside DATA — suppress tokenisation until : or end of line.
-    if (inData) {
-      bytes.push(code);
-      i++;
-      continue;
-    }
+    // Code mode — try keyword matching.
 
     // ? is shorthand for PRINT.
     if (ch === '?') {
-      const printIdx = KEYWORDS.indexOf('PRINT');
-      bytes.push(printIdx + 0x80);
+      const token = KEYWORDS.indexOf('PRINT') + 0x80;
+      bytes.push(token);
+      mode = byteSequenceSyntaxChecker(token).expectNext;
       i++;
       continue;
     }
@@ -920,11 +871,10 @@ function tokenise(content: string): number[] {
     // Spaces, digits, semicolons pass through without keyword matching.
     if (ch === ' ' || (code >= 0x30 && code <= 0x39) || ch === ';') {
       bytes.push(code);
+      mode = byteSequenceSyntaxChecker(code).expectNext;
       i++;
       continue;
     }
-
-
 
     // Try to match a keyword at the current position (greedy, longest match).
     let matched = false;
@@ -933,13 +883,9 @@ function tokenise(content: string): number[] {
       if (content.startsWith(kw, i)) {
         const token = ki + 0x80;
         bytes.push(token);
+        mode = byteSequenceSyntaxChecker(token).expectNext;
         i += kw.length;
         matched = true;
-
-        // Check if this keyword suppresses further tokenisation.
-        if (kw === 'REM' || kw === '!') afterRem = true;
-        if (kw === 'DATA') inData = true;
-
         break;
       }
     }
@@ -947,6 +893,7 @@ function tokenise(content: string): number[] {
     if (!matched) {
       // No keyword match — output the character as ASCII and advance.
       bytes.push(code);
+      mode = byteSequenceSyntaxChecker(code).expectNext;
       i++;
     }
   }
