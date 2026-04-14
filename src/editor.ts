@@ -49,6 +49,122 @@ export interface SyntaxIssue {
   message:    string;
 }
 
+// ── Byte-level syntax checking ────────────────────────────────────────────────
+
+export interface ByteSyntaxResult {
+  severity: 'ok' | 'warning' | 'error';
+  expectNext: 'code' | 'literals';
+}
+
+// Literal byte values that are invalid in code mode — the Oric tokeniser would
+// have produced keyword tokens for these, so seeing them as literals indicates
+// corruption or non-standard program creation.
+const INVALID_CODE_LITERALS = new Set([
+  0x21, // !
+  0x26, // &
+  0x2A, // *
+  0x2B, // +
+  0x2D, // -
+  0x2F, // /
+  0x3C, // <
+  0x3D, // =
+  0x3E, // >
+  0x3F, // ?
+  0x40, // @
+  0x5E, // ^
+]);
+
+// Token bytes that trigger state transitions.
+const TOKEN_REM  = 0x80 + KEYWORDS.indexOf('REM');   // 0x9D
+const TOKEN_BANG = 0x80 + KEYWORDS.indexOf('!');     // 0xC0
+const TOKEN_DATA = 0x80 + KEYWORDS.indexOf('DATA');  // 0x91
+
+/**
+ * Byte-level syntax checker for Oric BASIC line content.
+ * Tracks tokenisation context (code/string/rem/data) across a sequence of bytes.
+ * Call with reset=true on the first content byte of each new line.
+ *
+ * For each byte, returns:
+ *   - severity: whether this byte is expected in the current context
+ *   - expectNext: the mode for the next byte (code or literals)
+ */
+let _syntaxState: 'code' | 'string' | 'rem' | 'data' = 'code';
+
+export function byteSequenceSyntaxChecker(byte: number, reset?: boolean): ByteSyntaxResult {
+  if (reset) _syntaxState = 'code';
+
+  // End of line — reset and return ok.
+  if (byte === 0x00) {
+    const expectNext: 'code' | 'literals' = 'code';
+    _syntaxState = 'code';
+    return { severity: 'ok', expectNext };
+  }
+
+  if (_syntaxState === 'rem') {
+    // After REM/!, everything is literal to end of line.
+    const severity = (byte >= 0x20 && byte <= 0x7E) ? 'ok'
+      : byte >= 0x80 ? 'error'    // keyword token in literal context
+      : 'warning' as const;       // non-printable control character
+    return { severity, expectNext: 'literals' };
+  }
+
+  if (_syntaxState === 'string') {
+    // Inside a string — literal until closing quote.
+    if (byte === 0x22) {
+      _syntaxState = 'code';
+      return { severity: 'ok', expectNext: 'code' };
+    }
+    const severity = (byte >= 0x20 && byte <= 0x7E) ? 'ok'
+      : byte >= 0x80 ? 'error'
+      : 'warning' as const;
+    return { severity, expectNext: 'literals' };
+  }
+
+  if (_syntaxState === 'data') {
+    // After DATA — literal until colon.
+    if (byte === 0x3A) {  // colon
+      _syntaxState = 'code';
+      return { severity: 'ok', expectNext: 'code' };
+    }
+    const severity = (byte >= 0x20 && byte <= 0x7E) ? 'ok'
+      : byte >= 0x80 ? 'error'
+      : 'warning' as const;
+    return { severity, expectNext: 'literals' };
+  }
+
+  // Code mode.
+  // Opening quote — enter string mode.
+  if (byte === 0x22) {
+    _syntaxState = 'string';
+    return { severity: 'ok', expectNext: 'literals' };
+  }
+
+  // Keyword token.
+  if (byte >= 0x80) {
+    if (byte === TOKEN_REM || byte === TOKEN_BANG) {
+      _syntaxState = 'rem';
+      return { severity: 'ok', expectNext: 'literals' };
+    }
+    if (byte === TOKEN_DATA) {
+      _syntaxState = 'data';
+      return { severity: 'ok', expectNext: 'literals' };
+    }
+    // Valid or unknown keyword — stay in code mode.
+    const severity = (byte - 0x80) < KEYWORDS.length ? 'ok' : 'error';
+    return { severity, expectNext: 'code' };
+  }
+
+  // Printable ASCII in code mode.
+  if (byte >= 0x20 && byte <= 0x7E) {
+    // Single-character keyword chars as literals are errors — should have been tokens.
+    const severity = INVALID_CODE_LITERALS.has(byte) ? 'error' : 'ok';
+    return { severity, expectNext: 'code' };
+  }
+
+  // Non-printable in code mode.
+  return { severity: 'warning', expectNext: 'code' };
+}
+
 /**
  * Check whether a decoded BASIC line's text re-tokenises to the same bytes.
  * Returns null if the bytes match, or a SyntaxIssue describing the first mismatch.
