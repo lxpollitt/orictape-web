@@ -93,8 +93,11 @@ export function byteSequenceSyntaxChecker(byte: number, reset?: boolean): ByteSy
     }
     // Printable ASCII is fine in literal context.
     if (byte >= 0x20 && byte <= 0x7E) return { severity: 'ok', expectNext: 'literals' };
-    // Keyword token in literal context — error.
-    if (byte >= 0x80) return { severity: 'error', expectNext: 'literals', reason: 'keywordInLiteral' };
+    // Keyword token in literal context — error. Unknown keyword trumps keyword-in-literal.
+    if (byte >= 0x80) {
+      const reason = (byte - 0x80) >= KEYWORDS.length ? 'unknownKeyword' : 'keywordInLiteral';
+      return { severity: 'error', expectNext: 'literals', reason };
+    }
     // Non-printable in literal context — warning.
     return { severity: 'warning', expectNext: 'literals', reason: 'nonPrintableInLiteral' };
   }

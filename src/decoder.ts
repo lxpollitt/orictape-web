@@ -41,9 +41,6 @@ export interface LineInfo {
    *  itself may be byte-clean; the flag marks the point where the program
    *  ended unexpectedly early. */
   earlyEnd?: boolean;
-  /** Set when the line contains at least one byte in the keyword range
-   *  (0x80–0xFF) that does not map to a known BASIC keyword. */
-  unknownKeyword?: boolean;
   /** Set when the line's line number is not part of the longest increasing
    *  subsequence of line numbers in the program — i.e. it breaks the expected
    *  monotonic ordering, likely due to a corrupt line-number byte. */
@@ -84,7 +81,7 @@ export function lineHealth(prog: Program, lineIdx: number): LineSeverity {
   let health: LineSeverity = 'clean';
 
   // Line-level flags.
-  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError) {
+  if (line.lenErr || line.earlyEnd || line.nonMonotonic || line.syntaxError) {
     health = 'error';
   }
 
@@ -1034,13 +1031,11 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     const nextLineStart = rawLineStart - correctionOffset;
 
     // Read line number (2 bytes) and content bytes (until 0x00 terminator)
-    // to advance nextByte. Track unknownKeyword flag.
+    // to advance nextByte.
     getByte(); getByte();  // line number bytes
-    let unknownKeyword = false;
     while (true) {
       const b = getByte();
       if (b === 0) break;
-      if (b >= 0x80 && (b - 0x80) >= KEYWORDS.length) unknownKeyword = true;
     }
 
     const lineInfo: LineInfo = {
@@ -1050,7 +1045,6 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
       lastByte:  nextByte - 1,
       expectedLastByte: nextLineStart - 1,
       lenErr: nextLineStart !== nextByte,
-      unknownKeyword: unknownKeyword || undefined,
       memAddr: lineMemAddr,
     };
     prog.lines.push(lineInfo);
