@@ -54,6 +54,12 @@ export interface LineInfo {
   /** Per-element error severity. Null/undefined = no element-level issues.
    *  When present, one entry per element: 'error', 'warning', or null (clean). */
   elementErrors?: ('error' | 'warning' | null)[];
+  // Syntax-level element issue counts, populated by buildLineElements.
+  unknownKeywordCount?: number;        // error: keyword byte beyond KEYWORDS table
+  keywordInLiteralCount?: number;      // error: keyword token inside string/rem/data
+  invalidReservedCharCount?: number;   // error: literal byte in code mode that should be a keyword token
+  invalidNonPrintableCount?: number;   // error: non-printable character in code mode
+  nonPrintableInLiteralCount?: number; // warning: non-printable character in string/rem/data
   /** Cached line health — set by lineHealth(), cleared by invalidateLineHealth(). */
   _health?: LineSeverity;
 }
@@ -137,9 +143,6 @@ export function lineStatuses(prog: Program, lineIdx: number): LineStatus[] {
     const actual   = line.lastByte         - line.firstByte + 1;
     statuses.push({ message: `Line length error (expected ${expected} bytes, found ${actual})`, severity: 'error' });
   }
-  if (line.unknownKeyword) {
-    statuses.push({ message: 'Unknown keyword byte', severity: 'error' });
-  }
   if (line.nonMonotonic) {
     statuses.push({ message: 'Non-monotonic line number', severity: 'error' });
   }
@@ -147,7 +150,29 @@ export function lineStatuses(prog: Program, lineIdx: number): LineStatus[] {
     statuses.push({ message: 'Tokenisation mismatch', severity: 'error' });
   }
 
-  // Byte-level issues (summarised, not per-byte).
+  // Element-level syntax issues (counts populated by buildLineElements).
+  if (line.unknownKeywordCount) {
+    const n = line.unknownKeywordCount;
+    statuses.push({ message: `${n} unknown keyword${n !== 1 ? 's' : ''}`, severity: 'error' });
+  }
+  if (line.keywordInLiteralCount) {
+    const n = line.keywordInLiteralCount;
+    statuses.push({ message: `${n} unexpected keyword${n !== 1 ? 's' : ''} in literal`, severity: 'error' });
+  }
+  if (line.invalidReservedCharCount) {
+    const n = line.invalidReservedCharCount;
+    statuses.push({ message: `${n} invalid reserved character${n !== 1 ? 's' : ''}`, severity: 'error' });
+  }
+  if (line.invalidNonPrintableCount) {
+    const n = line.invalidNonPrintableCount;
+    statuses.push({ message: `${n} invalid non-printable character${n !== 1 ? 's' : ''}`, severity: 'error' });
+  }
+  if (line.nonPrintableInLiteralCount) {
+    const n = line.nonPrintableInLiteralCount;
+    statuses.push({ message: `${n} non-printable character${n !== 1 ? 's' : ''}`, severity: 'warning' });
+  }
+
+  // Byte-level waveform issues (summarised, not per-byte).
   let chkErrCount = 0;
   let unclearCount = 0;
   for (let i = line.firstByte; i <= line.lastByte; i++) {
@@ -211,6 +236,13 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
   const errors: ('error' | 'warning' | null)[] = [];
   let hasAnyError = false;
 
+  // Reset syntax-level counters.
+  let unknownKeywordCount = 0;
+  let keywordInLiteralCount = 0;
+  let invalidReservedCharCount = 0;
+  let invalidNonPrintableCount = 0;
+  let nonPrintableInLiteralCount = 0;
+
   // Line number from bytes: firstByte+2 (lo) and firstByte+3 (hi).
   const lineNum = bytes[line.firstByte + 2].v + bytes[line.firstByte + 3].v * 256;
   elements.push(`${lineNum} `);
@@ -226,6 +258,12 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
       elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
       errors.push(syntax.severity);
       hasAnyError = true;
+      // Increment the appropriate counter using the reason from the syntax checker.
+      if (syntax.reason === 'unknownKeyword') unknownKeywordCount++;
+      else if (syntax.reason === 'keywordInLiteral') keywordInLiteralCount++;
+      else if (syntax.reason === 'invalidReservedChar') invalidReservedCharCount++;
+      else if (syntax.reason === 'invalidNonPrintable') invalidNonPrintableCount++;
+      else if (syntax.reason === 'nonPrintableInLiteral') nonPrintableInLiteralCount++;
     } else if (b >= 0x20 && b <= 0x7E) {
       elements.push(String.fromCharCode(b));
       errors.push(null);
@@ -241,6 +279,11 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
   line.v = elements.join('');
   line.elements = elements;
   line.elementErrors = hasAnyError ? errors : undefined;
+  line.unknownKeywordCount = unknownKeywordCount || undefined;
+  line.keywordInLiteralCount = keywordInLiteralCount || undefined;
+  line.invalidReservedCharCount = invalidReservedCharCount || undefined;
+  line.invalidNonPrintableCount = invalidNonPrintableCount || undefined;
+  line.nonPrintableInLiteralCount = nonPrintableInLiteralCount || undefined;
   invalidateLineHealth(line);
 }
 

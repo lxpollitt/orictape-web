@@ -54,6 +54,7 @@ export interface SyntaxIssue {
 export interface ByteSyntaxResult {
   severity: 'ok' | 'warning' | 'error';
   expectNext: 'code' | 'literals';
+  reason?: 'unknownKeyword' | 'keywordInLiteral' | 'invalidReservedChar' | 'invalidNonPrintable' | 'nonPrintableInLiteral';
 }
 
 
@@ -78,36 +79,24 @@ export function byteSequenceSyntaxChecker(byte: number, reset?: boolean): ByteSy
     return { severity: 'ok', expectNext };
   }
 
-  if (_syntaxState === 'rem') {
-    // After REM/!, everything is literal to end of line.
-    const severity = (byte >= 0x20 && byte <= 0x7E) ? 'ok'
-      : byte >= 0x80 ? 'error'    // keyword token in literal context
-      : 'warning' as const;       // non-printable control character
-    return { severity, expectNext: 'literals' };
-  }
-
-  if (_syntaxState === 'string') {
-    // Inside a string — literal until closing quote.
-    if (byte === 0x22) {
+  // Literal modes: rem, string, data.
+  if (_syntaxState === 'rem' || _syntaxState === 'string' || _syntaxState === 'data') {
+    // Closing quote exits string mode.
+    if (_syntaxState === 'string' && byte === 0x22) {
       _syntaxState = 'code';
       return { severity: 'ok', expectNext: 'code' };
     }
-    const severity = (byte >= 0x20 && byte <= 0x7E) ? 'ok'
-      : byte >= 0x80 ? 'error'
-      : 'warning' as const;
-    return { severity, expectNext: 'literals' };
-  }
-
-  if (_syntaxState === 'data') {
-    // After DATA — literal until colon.
-    if (byte === 0x3A) {  // colon
+    // Colon exits data mode.
+    if (_syntaxState === 'data' && byte === 0x3A) {
       _syntaxState = 'code';
       return { severity: 'ok', expectNext: 'code' };
     }
-    const severity = (byte >= 0x20 && byte <= 0x7E) ? 'ok'
-      : byte >= 0x80 ? 'error'
-      : 'warning' as const;
-    return { severity, expectNext: 'literals' };
+    // Printable ASCII is fine in literal context.
+    if (byte >= 0x20 && byte <= 0x7E) return { severity: 'ok', expectNext: 'literals' };
+    // Keyword token in literal context — error.
+    if (byte >= 0x80) return { severity: 'error', expectNext: 'literals', reason: 'keywordInLiteral' };
+    // Non-printable in literal context — warning.
+    return { severity: 'warning', expectNext: 'literals', reason: 'nonPrintableInLiteral' };
   }
 
   // Code mode.
@@ -127,20 +116,18 @@ export function byteSequenceSyntaxChecker(byte: number, reset?: boolean): ByteSy
       _syntaxState = 'data';
       return { severity: 'ok', expectNext: 'literals' };
     }
-    // Valid or unknown keyword — stay in code mode.
-    const severity = (byte - 0x80) < KEYWORDS.length ? 'ok' : 'error';
-    return { severity, expectNext: 'code' };
+    if ((byte - 0x80) < KEYWORDS.length) return { severity: 'ok', expectNext: 'code' };
+    return { severity: 'error', expectNext: 'code', reason: 'unknownKeyword' };
   }
 
   // Printable ASCII in code mode.
   if (byte >= 0x20 && byte <= 0x7E) {
-    // Single-character keyword chars as literals are errors — should have been tokens.
-    const severity = INVALID_CODE_LITERALS.has(byte) ? 'error' : 'ok';
-    return { severity, expectNext: 'code' };
+    if (INVALID_CODE_LITERALS.has(byte)) return { severity: 'error', expectNext: 'code', reason: 'invalidReservedChar' };
+    return { severity: 'ok', expectNext: 'code' };
   }
 
-  // Non-printable in code mode.
-  return { severity: 'warning', expectNext: 'code' };
+  // Non-printable in code mode — error.
+  return { severity: 'error', expectNext: 'code', reason: 'invalidNonPrintable' };
 }
 
 /**
