@@ -559,15 +559,15 @@ export function splitLineWithEdits(
  * lines' original bytes to optimally preserve them, then splices the
  * merged line into the byte stream.
  *
- * @param lineIdx    The line currently being edited
- * @param editedText Current textarea content for the edited line
+ * @param lineIdx    The line currently being edited (or the anchor line for a non-edit join)
+ * @param editedText Current textarea content for the edited line. If omitted, uses the line's saved text.
  * @param direction  -1 = join with previous line, 1 = join with next line
  * @returns          Cursor position (character offset) at the join point, or null on failure
  */
 export function joinLinesWithEdit(
   prog: Program,
   lineIdx: number,
-  editedText: string,
+  editedText: string | undefined,
   direction: -1 | 1,
 ): number | null {
   // Validate parameters.
@@ -575,6 +575,7 @@ export function joinLinesWithEdit(
     console.warn('joinLinesWithEdit: invalid lineIdx', lineIdx);
     return null;
   }
+  if (editedText === undefined) editedText = prog.lines[lineIdx].elements.join('');
   const neighbourIdx = lineIdx + direction;
   if (neighbourIdx < 0 || neighbourIdx >= prog.lines.length) {
     console.warn('joinLinesWithEdit: no neighbour line at', neighbourIdx);

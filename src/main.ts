@@ -837,6 +837,35 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
           eta.selectionStart = eta.selectionEnd = joinPoint;
         }
       }
+    } else if (e.key === 'Delete' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) {
+      // Delete at end of line: join with next line.
+      const prog = programs[activeProgIdx];
+      if (!prog || editingLine === null || editingLine >= prog.lines.length - 1) return;
+      e.preventDefault();
+      const savedLineIdx = editingLine;
+      const curText = ta.value;
+
+      // Exit edit mode without saving (joinLinesWithEdit handles the merge).
+      editingLine = null;
+      editInput = null;
+      editIsNewLine = false;
+
+      const joinPoint = joinLinesWithEdit(prog, savedLineIdx, curText, 1);
+
+      renderHex(prog);
+      if (selByte !== null && prog.bytes[selByte]?.edited) {
+        waveform.selectByte(null);
+      }
+      renderBasic(prog);
+
+      // Enter edit mode on the surviving line (same line) with cursor at join point.
+      if (joinPoint !== null) {
+        enterEditMode(savedLineIdx);
+        if (editInput) {
+          const eta = editInput as HTMLTextAreaElement;
+          eta.selectionStart = eta.selectionEnd = joinPoint;
+        }
+      }
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       // Capture cursor position before the browser moves it.
       // After a minimal timeout, check if the cursor hit a boundary
@@ -2165,6 +2194,32 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
       }
     }
     return;
+  }
+
+  // Delete (non-edit mode): delete forward from the selected element.
+  if (e.key === 'Delete' && !e.metaKey && !e.ctrlKey && !e.altKey
+      && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+    const prog2 = programs[activeProgIdx];
+    if (prog2) {
+      const li2 = prog2.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
+      if (li2 >= 0) {
+        const line2 = prog2.lines[li2];
+        const ei2 = elemIdxForByte(line2, selByte!);
+        if (ei2 >= line2.elements.length - 1 && li2 < prog2.lines.length - 1) {
+          // Last element on the line: join with next line.
+          e.preventDefault();
+          joinLinesWithEdit(prog2, li2, undefined, 1);
+          renderHex(prog2);
+          renderBasic(prog2);
+          selectByte(byteForElem(prog2.lines[li2], ei2));
+        } else if (ei2 >= 0 && ei2 < line2.elements.length - 1) {
+          // Not last element: enter edit mode, deleting the next element.
+          e.preventDefault();
+          enterEditMode(li2, ei2 + 1, '');
+        }
+        return;
+      }
+    }
   }
 
   // Printable character or Delete: start editing the selected BASIC line,
