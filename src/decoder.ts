@@ -54,6 +54,8 @@ export interface LineInfo {
   /** Per-element error severity. Null/undefined = no element-level issues.
    *  When present, one entry per element: 'error', 'warning', or null (clean). */
   elementErrors?: ('error' | 'warning' | null)[];
+  /** Cached line health — set by lineHealth(), cleared by invalidateLineHealth(). */
+  _health?: LineSeverity;
 }
 
 // ── Line health utilities ────────────────────────────────────────────────────
@@ -71,16 +73,44 @@ export interface LineStatus {
  */
 export function lineHealth(prog: Program, lineIdx: number): LineSeverity {
   const line = prog.lines[lineIdx];
-  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError) return 'error';
-  for (let i = line.firstByte; i <= line.lastByte; i++) {
-    const b = prog.bytes[i];
-    if (b?.chkErr) return 'error';
+  if (line._health !== undefined) return line._health;
+
+  let health: LineSeverity = 'clean';
+
+  // Line-level flags.
+  if (line.lenErr || line.earlyEnd || line.unknownKeyword || line.nonMonotonic || line.syntaxError) {
+    health = 'error';
   }
-  for (let i = line.firstByte; i <= line.lastByte; i++) {
-    const b = prog.bytes[i];
-    if (b?.unclear) return 'warning';
+
+  // Element-level syntax errors/warnings.
+  if (health !== 'error' && line.elementErrors) {
+    for (const e of line.elementErrors) {
+      if (e === 'error') { health = 'error'; break; }
+      if (e === 'warning') health = 'warning';
+    }
   }
-  return 'clean';
+
+  // Byte-level waveform errors.
+  if (health !== 'error') {
+    for (let i = line.firstByte; i <= line.lastByte; i++) {
+      if (prog.bytes[i]?.chkErr) { health = 'error'; break; }
+    }
+  }
+  if (health !== 'error') {
+    for (let i = line.firstByte; i <= line.lastByte; i++) {
+      if (prog.bytes[i]?.unclear && health === 'clean') health = 'warning';
+    }
+  }
+
+  line._health = health;
+  return health;
+}
+
+/**
+ * Invalidate the cached health for a line, forcing recalculation on next access.
+ */
+export function invalidateLineHealth(line: LineInfo): void {
+  line._health = undefined;
 }
 
 /**
@@ -211,6 +241,7 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
   line.v = elements.join('');
   line.elements = elements;
   line.elementErrors = hasAnyError ? errors : undefined;
+  invalidateLineHealth(line);
 }
 
 /**
@@ -261,6 +292,7 @@ export function flagElementErrors(prog: Program): void {
     }
 
     line.elementErrors = hasAny ? errors : undefined;
+    invalidateLineHealth(line);
   }
 }
 
@@ -1048,5 +1080,6 @@ export function flagNonMonotonicLines(prog: Program): void {
   // Clear the flag for lines that are in the LIS (editing may have fixed them).
   for (let i = 0; i < n; i++) {
     prog.lines[i].nonMonotonic = !inLIS[i] || undefined;
+    invalidateLineHealth(prog.lines[i]);
   }
 }

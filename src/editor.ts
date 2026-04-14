@@ -36,7 +36,7 @@
 
 import { KEYWORDS, TOKEN_REM, TOKEN_BANG, TOKEN_DATA, INVALID_CODE_LITERALS } from './decoder';
 import type { Program, ByteInfo, LineInfo } from './decoder';
-import { flagNonMonotonicLines, flagElementErrors, buildLineElements } from './decoder';
+import { flagNonMonotonicLines, flagElementErrors, buildLineElements, invalidateLineHealth } from './decoder';
 
 export interface ParsedLine {
   lineNum: number;
@@ -200,6 +200,7 @@ function flagLenErrors(prog: Program): void {
     const nextLineBytePos = ptr + addrToByte;
     const errorAmount = nextLineBytePos - (line.lastByte + 1);
     line.lenErr = (errorAmount !== 0);
+    invalidateLineHealth(line);
     if (errorAmount !== 0) addrToByte -= errorAmount;
   }
 }
