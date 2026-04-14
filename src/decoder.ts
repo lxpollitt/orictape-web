@@ -891,7 +891,9 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
   }
 
   // Program lines.
-  let correctionOffset = 0;
+  // correctionOffset converts memory addresses (from next-line pointers) to byte indices.
+  // Initialised from the header's startAddr and adjusted for each length error.
+  let correctionOffset = startAddr - nextByte;
   let lineMemAddr = startAddr; // memory address of the line we are about to push
   while (true) {
     const lineStart = nextByte;
@@ -960,9 +962,14 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     lineMemAddr = rawLineStart;
   }
 
-  if (prog.lines.length > 0) {
-    prog.lines[0].lenErr = false;
-    prog.lines[0].expectedLastByte = prog.lines[0].lastByte;
+  // Without a header, startAddr is guessed — derive it from the first line's pointer
+  // and suppress the first line's length check.
+  if (skipHeader && prog.lines.length > 0) {
+    const firstLine = prog.lines[0];
+    const ptr = prog.bytes[firstLine.firstByte].v | (prog.bytes[firstLine.firstByte + 1].v << 8);
+    prog.header.startAddr = ptr - (firstLine.lastByte - firstLine.firstByte + 1);
+    firstLine.lenErr = false;
+    firstLine.expectedLastByte = firstLine.lastByte;
   }
 }
 
