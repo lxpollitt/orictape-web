@@ -2152,8 +2152,9 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
 const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 
 document.addEventListener('keydown', (e: KeyboardEvent) => {
-  // Don't let any keys fire while the edit input has focus — it handles its own keys.
+  // Don't let any keys fire while the edit input or search input has focus — they handle their own keys.
   if (editInput && document.activeElement === editInput) return;
+  if (document.activeElement === searchInput) return;
 
   // Cmd/Ctrl+F: open search bar (tape view only).
   if (e.key === 'f' && (e.metaKey || e.ctrlKey)) {
@@ -2259,8 +2260,6 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     }
   }
 
-  // Don't let nav keys fire while the search input has focus.
-  if (document.activeElement === searchInput) return;
   if (!NAV_KEYS.has(e.key)) return;
   if (viewMode === 'merged') {
     if (focusedPanel === 'basic') { e.preventDefault(); navigateMerge(e.key, e.altKey); }
