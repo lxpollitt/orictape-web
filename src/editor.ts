@@ -306,10 +306,13 @@ export function computeLcs(newValues: number[], oldValues: number[]): LcsMatch[]
   }
 
   // Backtrack to collect matches in reverse, then reverse.
+  // When a match exists but skipping it yields the same LCS length, skip it
+  // to prefer earlier match positions in the new values.
   const matches: LcsMatch[] = [];
   let oi = n, ni = m;
   while (oi > 0 && ni > 0) {
-    if (oldValues[oi - 1] === newValues[ni - 1]) {
+    if (oldValues[oi - 1] === newValues[ni - 1] && dp[oi][ni - 1] < dp[oi][ni]) {
+      // Match is required — can't achieve the same LCS without it.
       matches.push({ newIdx: ni - 1, oldIdx: oi - 1 });
       oi--; ni--;
     } else if (dp[oi][ni - 1] >= dp[oi - 1][ni]) {
@@ -360,9 +363,9 @@ function adjustLineOffsets(prog: Program, delta: number, firstLineIdx: number, l
     const newPtr = oldPtr + delta;
     const newPtrLo = newPtr & 0xFF;
     const newPtrHi = (newPtr >> 8) & 0xFF;
-    prog.bytes[l.firstByte]     = newPtrLo === fullOriginal[0].v ? fullOriginal[0]
+    prog.bytes[l.firstByte]     = fullOriginal.length > 0 && newPtrLo === fullOriginal[0].v ? fullOriginal[0]
       : { v: newPtrLo, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
-    prog.bytes[l.firstByte + 1] = newPtrHi === fullOriginal[1].v ? fullOriginal[1]
+    prog.bytes[l.firstByte + 1] = fullOriginal.length > 1 && newPtrHi === fullOriginal[1].v ? fullOriginal[1]
       : { v: newPtrHi, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
     // Store only the displaced original bytes.
     storeOriginalBytesDelta(prog, l, fullOriginal);
@@ -510,119 +513,117 @@ export function splitLineWithEdits(
     return null;
   }
 
-  // Concatenate the two halves' content bytes (excluding pointers) for a single LCS.
-  // Exclude dummy line number bytes from the concatenation so they can't steal LCS matches.
+  const progStartAddr = prog.header.startAddr;
+  const progStartIndex = prog.lines[0].firstByte;
+  const oldLine = prog.lines[lineIdx];
+  const oldFirstByteIndex = oldLine.firstByte;
+  const oldLastByteIndex = oldLine.lastByte;
+
+  // --- Get full original bytes and compute pointers ---
+  const fullOriginalBytes = getFullOriginalBytes(prog, oldLine);
+  
+  // Build content for each half excluding their next-line pointers.
+  // Exclude dummy line number bytes from LCS so they can't steal matches.
   const firstForLcs = parsedFirst.hasDummyLineNumber ? parsedFirst.bytes.slice(2) : parsedFirst.bytes;
   const secondForLcs = parsedSecond.hasDummyLineNumber ? parsedSecond.bytes.slice(2) : parsedSecond.bytes;
-  const concatenated = [...firstForLcs, ...secondForLcs];
-  const splitPoint = firstForLcs.length;   // index where second half starts in concatenated
 
-  // Extract old line byte values (skipping the 2-byte pointer).
-  const line = prog.lines[lineIdx];
-  const oldFirst = line.firstByte;
-  const oldLast = line.lastByte;
-  const oldValues: number[] = [];
-  for (let i = oldFirst + 2; i <= oldLast; i++) oldValues.push(prog.bytes[i].v);
+  // Calculate next-line pointer values.
+  // First line's pointer: points to where the second new line will start.
+  const ptr1Value = progStartAddr + (oldFirstByteIndex + 2 + parsedFirst.bytes.length - progStartIndex);
+  // Second line's pointer: points to where the line after both new lines will start.
+  const ptr2Value = progStartAddr + (oldFirstByteIndex + 2 + parsedFirst.bytes.length + 2 + parsedSecond.bytes.length - progStartIndex);
 
-  // LCS across the full concatenation against the original bytes.
-  const matches = computeLcs(concatenated, oldValues);
+  // --- Build full new values and run LCS against original bytes ---
+
+  // Include pointers in the LCS new values: [ptr1_lo, ptr1_hi, firstContent, ptr2_lo, ptr2_hi, secondContent]
+  const newValues = [ptr1Value & 0xFF, (ptr1Value >> 8) & 0xFF, ...firstForLcs, ptr2Value & 0xFF, (ptr2Value >> 8) & 0xFF, ...secondForLcs];
+  const splitPoint = 2 + firstForLcs.length; // index where second line values start
+
+  const oldValues = fullOriginalBytes.map(b => b.v);
+  const matches = computeLcs(newValues, oldValues);
 
   // Debug: log the LCS results for verification.
   const hex = (arr: number[]) => arr.map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
   console.log('splitLineWithEdits LCS:', {
     firstText,
     secondText,
-    firstForLcs: hex(firstForLcs),
-    secondForLcs: hex(secondForLcs),
+    newFirstHalf: hex(newValues.slice(0, splitPoint)),
+    newSecondHalf: hex(newValues.slice(splitPoint)),
     oldValues: hex(oldValues),
     splitPoint,
     matches,
     matchesInFirst: matches.filter(m => m.newIdx < splitPoint).length
-      + ' — ' + hex(matches.filter(m => m.newIdx < splitPoint).map(m => concatenated[m.newIdx])),
+      + ' — ' + hex(matches.filter(m => m.newIdx < splitPoint).map(m => newValues[m.newIdx])),
     matchesInSecond: matches.filter(m => m.newIdx >= splitPoint).length
-      + ' — ' + hex(matches.filter(m => m.newIdx >= splitPoint).map(m => concatenated[m.newIdx])),
+      + ' — ' + hex(matches.filter(m => m.newIdx >= splitPoint).map(m => newValues[m.newIdx])),
   });
 
-  // Build merged ByteInfo arrays for each half.
-  const oldBytes = prog.bytes.slice(oldFirst + 2, oldLast + 1);
-  const firstMerged = buildMergedBytes(concatenated, oldBytes, matches, 0, splitPoint - 1);
-  const secondMerged = buildMergedBytes(concatenated, oldBytes, matches, splitPoint, concatenated.length - 1);
+  // --- Build merged bytes for each half ---
+  const firstMerged = buildMergedBytes(newValues, fullOriginalBytes, matches, 0, splitPoint - 1);
+  const secondMerged = buildMergedBytes(newValues, fullOriginalBytes, matches, splitPoint, newValues.length - 1);
 
-  // Prepend dummy line number bytes for halves that didn't have a parsed line number.
-  const makeDummyLineNum = (): ByteInfo[] => [
-    { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },
-    { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },
-  ];
-  const firstContent = parsedFirst.hasDummyLineNumber ? [...makeDummyLineNum(), ...firstMerged] : firstMerged;
-  const secondContent = parsedSecond.hasDummyLineNumber ? [...makeDummyLineNum(), ...secondMerged] : secondMerged;
+  // Add back in any dummy line number bytes (deliberately left out of the LCS matching).
+  if (parsedFirst.hasDummyLineNumber) {
+    const dummyLo: ByteInfo = { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' };
+    const dummyHi: ByteInfo = { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' };
+    firstMerged.splice(2, 0, dummyLo, dummyHi);
+  }
+  if (parsedSecond.hasDummyLineNumber) {
+    const dummyLo: ByteInfo = { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' };
+    const dummyHi: ByteInfo = { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' };
+    secondMerged.splice(2, 0, dummyLo, dummyHi);
+  }
+
+  // Adjust the edited status of the first line's next-line pointer bytes that didn't match original bytes. (buildMergedBytes marks 
+  // all edits as explicit edits but we want them marked as automatic as we are just updating the existing pointer byte values.)
+  // Note that in contrast, we want to treat the second line's pointer bytes as new bytes (if they didn't match
+  // original bytes) because we're creating a new line and effectively inserted these as the line's required header.)
+  if (firstMerged[0].edited === 'explicit') firstMerged[0].edited = 'automatic';
+  if (firstMerged[1].edited === 'explicit') firstMerged[1].edited = 'automatic';
 
   // Debug: log the merged results for verification.
   const hexBI = (arr: ByteInfo[]) => arr.map(b => (b.edited ? '*' : '') + '0x' + b.v.toString(16).toUpperCase().padStart(2, '0')).join(' ');
   console.log('splitLineWithEdits merged:', {
-    firstContent: hexBI(firstContent),
-    secondContent: hexBI(secondContent),
+    firstMerged: hexBI(firstMerged),
+    secondMerged: hexBI(secondMerged),
   });
 
-  // --- Assemble full bytes for both lines and splice ---
+  // --- Partition original bytes between the two lines ---
 
-  const startAddr = prog.header.startAddr;
-  const firstLineOffset = prog.lines[0].firstByte;
+  // Find the first oldIdx matched by the second half.
+  const splitPointFirstMatch = matches.find(m => m.newIdx >= splitPoint);
+  const secondOrigStart = splitPointFirstMatch
+    ? splitPointFirstMatch.oldIdx
+    : fullOriginalBytes.length;
+  const firstOriginalBytes = fullOriginalBytes.slice(0, secondOrigStart);
+  const secondOriginalBytes = fullOriginalBytes.slice(secondOrigStart);
 
-  // First line's pointer: points to where the second new line will start.
-  // That's oldFirst + 2 (ptr1) + firstContent.length (which already includes line number bytes).
-  const ptr1Value = startAddr + (oldFirst + 2 + firstContent.length - firstLineOffset);
+  // --- Splice into the byte stream and setup the lines to point to the new byte indexes ---
+  const delta = spliceMergedBytes(prog.bytes, oldFirstByteIndex, oldLastByteIndex, [...firstMerged, ...secondMerged]);
 
-  // Second line's pointer: points to where the line after both new lines will start.
-  // That's oldFirst + 2 (ptr1) + firstContent + 2 (ptr2) + secondContent.
-  let ptr2Value: number;
-  if (lineIdx < prog.lines.length - 1) {
-    ptr2Value = startAddr + (oldFirst + 2 + firstContent.length + 2 + secondContent.length - firstLineOffset);
-  } else {
-    ptr2Value = 0x0000;
-  }
+  // Update the first line's info.
+  const firstLineLastByteIndex = oldFirstByteIndex + firstMerged.length - 1;
+  oldLine.lastByte = firstLineLastByteIndex;
+  oldLine.expectedLastByte = firstLineLastByteIndex;
+  oldLine.lenErr = false;
+  buildLineElements(oldLine, prog.bytes);
+  storeOriginalBytesDelta(prog, oldLine, firstOriginalBytes);
 
-  // Build pointer ByteInfo entries (fresh objects, not shared).
-  const makePtr = (v: number): ByteInfo[] => [
-    { ...prog.bytes[oldFirst],     edited: undefined, v: v & 0xFF },
-    { ...prog.bytes[oldFirst + 1], edited: undefined, v: (v >> 8) & 0xFF },
-  ];
-
-  const fullMerged: ByteInfo[] = [
-    ...makePtr(ptr1Value),
-    ...firstContent,
-    ...makePtr(ptr2Value),
-    ...secondContent,
-  ];
-
-  // Single splice replaces the original line's bytes with both new lines.
-  const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, fullMerged);
-
-  // --- Update the first (edited) line's info ---
-
-  const firstLineEnd = oldFirst + 2 + firstContent.length - 1;
-  line.lastByte = firstLineEnd;
-  line.expectedLastByte = firstLineEnd;
-  line.lenErr = false;
-
-  // Build elements for the first line.
-  buildLineElements(line, prog.bytes);
-
-  // --- Create the second line's LineInfo and insert it ---
-
-  const secondLineFirstByte = firstLineEnd + 1;  // starts right after first line
-  const secondLineLastByte = secondLineFirstByte + 2 + secondContent.length - 1;
-
+  // Create the second line's LineInfo and insert it.
+  const secondLineFirstByteIndex = firstLineLastByteIndex + 1;
+  const secondLineLastByteIndex = secondLineFirstByteIndex + secondMerged.length - 1;
   const newLine: LineInfo = {
     v: '',
     elements: [],
-    firstByte: secondLineFirstByte,
-    lastByte: secondLineLastByte,
-    expectedLastByte: secondLineLastByte,
+    firstByte: secondLineFirstByteIndex,
+    lastByte: secondLineLastByteIndex,
+    expectedLastByte: secondLineLastByteIndex,
     lenErr: false,
     memAddr: 0,
   };
   prog.lines.splice(lineIdx + 1, 0, newLine);
   buildLineElements(newLine, prog.bytes);
+  storeOriginalBytesDelta(prog, newLine, secondOriginalBytes);
 
   // --- Adjust subsequent lines (after the two new lines) ---
 
