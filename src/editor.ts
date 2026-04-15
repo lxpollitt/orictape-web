@@ -302,16 +302,24 @@ function adjustLineOffsets(prog: Program, delta: number, firstLineIdx: number, l
   const last = lastLineIdx ?? prog.lines.length - 1;
   for (let li = firstLineIdx; li <= last; li++) {
     const l = prog.lines[li];
-    // Offset existing pointer values in the byte stream by delta.
-    // Note: line info not yet updated, so use l.firstByte + delta to find the bytes post-splice.
-    const oldPtr = prog.bytes[l.firstByte + delta].v | (prog.bytes[l.firstByte + delta + 1].v << 8);
-    const newPtr = oldPtr + delta;
-    prog.bytes[l.firstByte + delta]     = { v: newPtr & 0xFF,        firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
-    prog.bytes[l.firstByte + delta + 1] = { v: (newPtr >> 8) & 0xFF, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
-    // Update line info.
+    // Update line info first so getFullOriginalBytes reads the correct position.
     l.firstByte += delta;
     l.lastByte  += delta;
     l.expectedLastByte += delta;
+    // Snapshot original bytes before replacing the pointer.
+    const fullOriginal = getFullOriginalBytes(prog, l);
+    // Offset existing pointer values in the byte stream by delta.
+    // If the new value matches the original, restore the original ByteInfo.
+    const oldPtr = prog.bytes[l.firstByte].v | (prog.bytes[l.firstByte + 1].v << 8);
+    const newPtr = oldPtr + delta;
+    const newPtrLo = newPtr & 0xFF;
+    const newPtrHi = (newPtr >> 8) & 0xFF;
+    prog.bytes[l.firstByte]     = newPtrLo === fullOriginal[0].v ? fullOriginal[0]
+      : { v: newPtrLo, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+    prog.bytes[l.firstByte + 1] = newPtrHi === fullOriginal[1].v ? fullOriginal[1]
+      : { v: newPtrHi, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+    // Store only the displaced original bytes.
+    storeOriginalBytesDelta(prog, l, fullOriginal);
   }
 }
 
