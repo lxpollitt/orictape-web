@@ -203,8 +203,8 @@ function flagLenErrors(prog: Program): void {
  */
 export function deleteLineEdit(prog: Program, lineIdx: number): void {
   // Validate parameters.
-  if (lineIdx < 0 || lineIdx >= prog.lines.length) {
-    console.warn('deleteLineEdit: invalid lineIdx', lineIdx);
+  if (lineIdx < 0 || lineIdx >= prog.lines.length || prog.lines.length < 2) {
+    console.warn('deleteLineEdit: invalid lineIdx or only one line', lineIdx);
     return;
   }
 
@@ -213,6 +213,19 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
   const oldLast  = line.lastByte;
   const oldLen   = oldLast - oldFirst + 1;
   const delta = -oldLen;
+
+  // Get original bytes for the deleted line before removing it.
+  const deletedOriginal = getFullOriginalBytes(prog, line);
+
+  // Determine which neighbour inherits the deleted line's original bytes.
+  // Previous line if available, otherwise next line.
+  const inheritIdx = lineIdx > 0 ? lineIdx - 1 : lineIdx + 1;
+  const neighbour = prog.lines[inheritIdx];
+  const neighbourOriginal = getFullOriginalBytes(prog, neighbour);
+  // Concatenate in stream order.
+  const inheritOriginal = inheritIdx < lineIdx
+    ? [...neighbourOriginal, ...deletedOriginal]
+    : [...deletedOriginal, ...neighbourOriginal];
 
   // Remove the bytes from the byte stream.
   prog.bytes.splice(oldFirst, oldLen);
@@ -224,6 +237,11 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
   // (The predecessor line's pointer doesn't need adjusting — the new next line
   // now starts at oldFirst, which is where the deleted line was.)
   adjustLineOffsets(prog, delta, lineIdx);
+
+  // Store the combined original bytes on the inheriting neighbour.
+  // Done after adjustLineOffsets so the neighbour's byte indices are correct.
+  const adjustedInheritIdx = inheritIdx < lineIdx ? inheritIdx : inheritIdx - 1;
+  storeOriginalBytesDelta(prog, prog.lines[adjustedInheritIdx], inheritOriginal);
 
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
