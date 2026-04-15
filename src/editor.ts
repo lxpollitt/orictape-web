@@ -399,15 +399,15 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   // --- Splice edited line into the byte stream and update its line info ---
 
   const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, mergedLine);
-
-  // Store only the displaced original bytes (or clear if line matches original).
-  storeOriginalBytesDelta(prog, line, fullOriginal);
   line.lastByte = oldFirst + mergedLine.length - 1;
   line.expectedLastByte = line.lastByte;
   line.lenErr = false;
 
   // Update the edited line's elements and display text from its bytes.
   buildLineElements(line, prog.bytes);
+
+  // Store only the displaced original bytes (or clear if line matches original).
+  storeOriginalBytesDelta(prog, line, fullOriginal);
 
   // --- Adjust subsequent lines: byte stream pointers then line info ---
 

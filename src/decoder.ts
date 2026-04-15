@@ -237,7 +237,12 @@ export function getFullOriginalBytes(prog: Program, line: LineInfo): ByteInfo[] 
   }
   const nonEdited = currentBytes.filter(b => !b.edited);
   const result = [...nonEdited, ...line.originalBytesDelta].sort((a, b) => a.firstBit - b.firstBit);
-  console.log(`getFullOriginalBytes: ${result.length} original bytes (${nonEdited.length} current + ${line.originalBytesDelta.length} delta)`);
+  const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
+  console.log(`getFullOriginalBytes: ${result.length} original (${nonEdited.length} non-edited + ${line.originalBytesDelta.length} delta)`,
+    `\n  current: [${currentBytes.map(hx).join(' ')}]`,
+    `\n  non-edited: [${nonEdited.map(hx).join(' ')}]`,
+    `\n  delta: [${line.originalBytesDelta.map(hx).join(' ')}]`,
+    `\n  result: [${result.map(hx).join(' ')}]`);
   return result;
 }
 
@@ -253,7 +258,13 @@ export function storeOriginalBytesDelta(prog: Program, line: LineInfo, fullOrigi
   );
   const delta = fullOriginal.filter(b => !keptFirstBits.has(b.firstBit));
   line.originalBytesDelta = delta.length > 0 ? delta : undefined;
-  console.log(`storeOriginalBytesDelta: ${fullOriginal.length} original, ${delta.length} delta stored`);
+  const hx2 = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
+  const currentBytes2 = prog.bytes.slice(line.firstByte, line.lastByte + 1);
+  console.log(`storeOriginalBytesDelta: ${fullOriginal.length} original, ${delta.length} delta`,
+    `\n  fullOriginal: [${fullOriginal.map(hx2).join(' ')}]`,
+    `\n  current: [${currentBytes2.map(hx2).join(' ')}]`,
+    `\n  kept: [${currentBytes2.filter(b => !b.edited).map(hx2).join(' ')}]`,
+    `\n  delta: [${delta.map(hx2).join(' ')}]`);
 }
 
 /**
