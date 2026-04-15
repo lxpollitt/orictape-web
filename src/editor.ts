@@ -306,8 +306,8 @@ function adjustLineOffsets(prog: Program, delta: number, firstLineIdx: number, l
     // Note: line info not yet updated, so use l.firstByte + delta to find the bytes post-splice.
     const oldPtr = prog.bytes[l.firstByte + delta].v | (prog.bytes[l.firstByte + delta + 1].v << 8);
     const newPtr = oldPtr + delta;
-    prog.bytes[l.firstByte + delta].v     = newPtr & 0xFF;
-    prog.bytes[l.firstByte + delta + 1].v = (newPtr >> 8) & 0xFF;
+    prog.bytes[l.firstByte + delta]     = { v: newPtr & 0xFF,        firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+    prog.bytes[l.firstByte + delta + 1] = { v: (newPtr >> 8) & 0xFF, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
     // Update line info.
     l.firstByte += delta;
     l.lastByte  += delta;
