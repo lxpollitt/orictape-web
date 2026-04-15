@@ -369,34 +369,29 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
 
   // --- Compute the merged bytes for the edited line ---
 
-  // Extract old byte values and ByteInfo (skipping the 2-byte pointer).
-  const oldValues: number[] = [];
-  for (let i = oldFirst + 2; i <= oldLast; i++) oldValues.push(prog.bytes[i].v);
-  const oldBytes = prog.bytes.slice(oldFirst + 2, oldLast + 1);
-
-  // LCS between new content bytes and old content bytes.
-  const newValues = parsed.bytes;
-  const matches = computeLcs(newValues, oldValues);
-  const mergedContent = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
-
-  // Build the next-line pointer for the edited line.
-  // Calculate based on where the next line will be after the splice:
-  // this line's start + 2 (pointer bytes) + merged content length.
+  // Calculate the correct next-line pointer value.
+  // Based on where the next line will be after the splice:
+  // this line's start + 2 (pointer bytes) + content length.
   let ptrValue: number;
   if (lineIdx < prog.lines.length - 1) {
     const startAddr = prog.header.startAddr;
     const firstLineOffset = prog.lines[0].firstByte;
-    ptrValue = startAddr + (oldFirst + 2 + mergedContent.length - firstLineOffset);
+    ptrValue = startAddr + (oldFirst + 2 + parsed.bytes.length - firstLineOffset);
   } else {
     ptrValue = 0x0000;
   }
 
-  // Assemble full line: pointer (2 bytes) + merged content.
-  const mergedLine: ByteInfo[] = [
-    { ...prog.bytes[oldFirst],     edited: undefined, v: ptrValue & 0xFF },
-    { ...prog.bytes[oldFirst + 1], edited: undefined, v: (ptrValue >> 8) & 0xFF },
-    ...mergedContent,
-  ];
+  // Include pointer bytes in the LCS so matching originals are preserved.
+  const newValues = [ptrValue & 0xFF, (ptrValue >> 8) & 0xFF, ...parsed.bytes];
+  const oldBytes = prog.bytes.slice(oldFirst, oldLast + 1);
+  const oldValues = oldBytes.map(b => b.v);
+
+  const matches = computeLcs(newValues, oldValues);
+  const mergedLine = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
+
+  // Pointer bytes created by editing are automatic, not explicit.
+  if (mergedLine[0].edited === 'explicit') mergedLine[0].edited = 'automatic';
+  if (mergedLine[1].edited === 'explicit') mergedLine[1].edited = 'automatic';
 
   // --- Splice edited line into the byte stream and update its line info ---
 
