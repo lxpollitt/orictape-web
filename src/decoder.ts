@@ -6,7 +6,7 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-import { flagSyntaxErrors, byteSequenceSyntaxChecker } from './editor';
+import { flagTokenisationMismatches, byteSequenceSyntaxChecker } from './editor';
 
 // BitInfo is used by the UI when reading individual bits out of a BitStream.
 export interface BitInfo {
@@ -47,7 +47,7 @@ export interface LineInfo {
   nonMonotonic?: boolean;
   /** Set when re-tokenising the line's text produces different bytes than
    *  the original — indicates the stored bytes aren't valid tokenised BASIC. */
-  syntaxError?: boolean;
+  tokenisationMismatch?: boolean;
   /** Per-element error severity. Null/undefined = no element-level issues.
    *  When present, one entry per element: 'error', 'warning', or null (clean). */
   elementErrors?: ('error' | 'warning' | null)[];
@@ -81,7 +81,7 @@ export function lineHealth(prog: Program, lineIdx: number): LineSeverity {
   let health: LineSeverity = 'clean';
 
   // Line-level flags.
-  if (line.lenErr || line.earlyEnd || line.nonMonotonic || line.syntaxError) {
+  if (line.lenErr || line.earlyEnd || line.nonMonotonic || line.tokenisationMismatch) {
     health = 'error';
   }
 
@@ -143,7 +143,7 @@ export function lineStatuses(prog: Program, lineIdx: number): LineStatus[] {
   if (line.nonMonotonic) {
     statuses.push({ message: 'Non-monotonic line number', severity: 'error' });
   }
-  if (line.syntaxError) {
+  if (line.tokenisationMismatch) {
     statuses.push({ message: 'Tokenisation mismatch', severity: 'error' });
   }
 
@@ -294,7 +294,7 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
  *   - Underlying byte has unclear → 'warning'
  *
  * Only allocates the elementErrors array if at least one element has an issue.
- * Must be called after flagNonMonotonicLines and flagSyntaxErrors.
+ * Must be called after flagNonMonotonicLines and flagTokenisationMismatches.
  */
 export function flagElementErrors(prog: Program): void {
   for (let li = 0; li < prog.lines.length; li++) {
@@ -847,7 +847,7 @@ export function readPrograms(streams: BitStream[]): Program[] {
     if (prog.bytes.length > 0) {
       readProgramLines(prog);
       flagNonMonotonicLines(prog);
-      flagSyntaxErrors(prog);
+      flagTokenisationMismatches(prog);
       flagElementErrors(prog);
       programs.push(prog);
     }

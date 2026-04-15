@@ -140,7 +140,7 @@ export function byteSequenceSyntaxChecker(byte: number, reset?: boolean): ByteSy
  * @param lineText  The line's element text joined (e.g. "100 PRINT \"Hello\"")
  * @param originalBytes  The original bytes from firstByte+2 to lastByte (line number + content + null)
  */
-export function checkLineSyntax(lineText: string, originalBytes: number[]): SyntaxIssue | null {
+export function checkTokenisationMatch(lineText: string, originalBytes: number[]): SyntaxIssue | null {
   const parsed = parseLine(lineText);
   if (!parsed) return { byteOffset: 0, message: 'Failed to parse line' };
 
@@ -156,9 +156,9 @@ export function checkLineSyntax(lineText: string, originalBytes: number[]): Synt
 
 /**
  * Check all lines in a program for syntax issues (re-tokenisation mismatches).
- * Sets `syntaxError` flag on any line whose text doesn't round-trip to the same bytes.
+ * Sets `tokenisationMismatch` flag on any line whose text doesn't round-trip to the same bytes.
  */
-export function flagSyntaxErrors(prog: Program): void {
+export function flagTokenisationMismatches(prog: Program): void {
   for (const line of prog.lines) {
     const lineText = line.elements.join('');
     // Extract original bytes: line number (2 bytes) + content + null terminator.
@@ -166,9 +166,9 @@ export function flagSyntaxErrors(prog: Program): void {
     for (let b = line.firstByte + 2; b <= line.lastByte; b++) {
       originalBytes.push(prog.bytes[b].v);
     }
-    const issue = checkLineSyntax(lineText, originalBytes);
+    const issue = checkTokenisationMatch(lineText, originalBytes);
     if (issue) {
-      line.syntaxError = true;
+      line.tokenisationMismatch = true;
     }
   }
 }
@@ -228,7 +228,7 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
   flagNonMonotonicLines(prog);
-  flagSyntaxErrors(prog);
+  flagTokenisationMismatches(prog);
   flagElementErrors(prog);
 }
 
@@ -415,7 +415,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
   flagNonMonotonicLines(prog);
-  flagSyntaxErrors(prog);
+  flagTokenisationMismatches(prog);
   flagElementErrors(prog);
 }
 
@@ -576,7 +576,7 @@ export function splitLineWithEdits(
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
   flagNonMonotonicLines(prog);
-  flagSyntaxErrors(prog);
+  flagTokenisationMismatches(prog);
   flagElementErrors(prog);
 
   return lineIdx + 1;
@@ -693,7 +693,7 @@ export function joinLinesWithEdit(
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
   flagNonMonotonicLines(prog);
-  flagSyntaxErrors(prog);
+  flagTokenisationMismatches(prog);
   flagElementErrors(prog);
 
   return joinPoint;
