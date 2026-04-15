@@ -57,6 +57,10 @@ export interface LineInfo {
   invalidReservedCharCount?: number;   // error: literal byte in code mode that should be a keyword token
   invalidNonPrintableCount?: number;   // error: non-printable character in code mode
   nonPrintableInLiteralCount?: number; // warning: non-printable character in string/rem/data
+  /** Delta of original bytes displaced by editing — only stores bytes no longer
+   *  in the current line. Used with getFullOriginalBytes/storeOriginalBytesDelta
+   *  to reconstruct the full original for LCS comparisons. */
+  originalBytesDelta?: ByteInfo[];
   /** Cached line health — set by lineHealth(), cleared by invalidateLineHealth(). */
   _health?: LineSeverity;
 }
@@ -220,6 +224,36 @@ export function programSummary(prog: Program): { label: string; count: number; s
   if (errorLines > 0)   result.push({ label: 'errors', count: errorLines, severity: 'error' });
   if (warningLines > 0) result.push({ label: 'warnings', count: warningLines, severity: 'warning' });
   return result;
+}
+
+/**
+ * Reconstruct the full original bytes for a line from its delta and current bytes.
+ * Combines non-edited current bytes with the stored delta, sorted by waveform position.
+ */
+export function getFullOriginalBytes(prog: Program, line: LineInfo): ByteInfo[] {
+  const currentBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
+  if (!line.originalBytesDelta || line.originalBytesDelta.length === 0) {
+    return currentBytes;
+  }
+  const nonEdited = currentBytes.filter(b => !b.edited);
+  const result = [...nonEdited, ...line.originalBytesDelta].sort((a, b) => a.firstBit - b.firstBit);
+  console.log(`getFullOriginalBytes: ${result.length} original bytes (${nonEdited.length} current + ${line.originalBytesDelta.length} delta)`);
+  return result;
+}
+
+/**
+ * Compute and store the delta of original bytes that are no longer in the current line.
+ * If all original bytes are still present (no edits), clears line.originalBytesDelta.
+ */
+export function storeOriginalBytesDelta(prog: Program, line: LineInfo, fullOriginal: ByteInfo[]): void {
+  const keptFirstBits = new Set(
+    prog.bytes.slice(line.firstByte, line.lastByte + 1)
+      .filter(b => !b.edited)
+      .map(b => b.firstBit)
+  );
+  const delta = fullOriginal.filter(b => !keptFirstBits.has(b.firstBit));
+  line.originalBytesDelta = delta.length > 0 ? delta : undefined;
+  console.log(`storeOriginalBytesDelta: ${fullOriginal.length} original, ${delta.length} delta stored`);
 }
 
 /**

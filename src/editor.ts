@@ -36,7 +36,7 @@
 
 import { KEYWORDS, TOKEN_REM, TOKEN_BANG, TOKEN_DATA, INVALID_CODE_LITERALS } from './decoder';
 import type { Program, ByteInfo, LineInfo } from './decoder';
-import { flagNonMonotonicLines, flagElementErrors, buildLineElements, invalidateLineHealth } from './decoder';
+import { flagNonMonotonicLines, flagElementErrors, buildLineElements, invalidateLineHealth, getFullOriginalBytes, storeOriginalBytesDelta } from './decoder';
 
 export interface ParsedLine {
   lineNum: number;
@@ -369,6 +369,9 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
 
   // --- Compute the merged bytes for the edited line ---
 
+  // Reconstruct the full original bytes for optimal LCS.
+  const fullOriginal = getFullOriginalBytes(prog, line);
+
   // Calculate the correct next-line pointer value.
   // Based on where the next line will be after the splice:
   // this line's start + 2 (pointer bytes) + content length.
@@ -382,12 +385,12 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   }
 
   // Include pointer bytes in the LCS so matching originals are preserved.
+  // Always LCS against original bytes to get the minimum diff from the tape.
   const newValues = [ptrValue & 0xFF, (ptrValue >> 8) & 0xFF, ...parsed.bytes];
-  const oldBytes = prog.bytes.slice(oldFirst, oldLast + 1);
-  const oldValues = oldBytes.map(b => b.v);
+  const oldValues = fullOriginal.map(b => b.v);
 
   const matches = computeLcs(newValues, oldValues);
-  const mergedLine = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
+  const mergedLine = buildMergedBytes(newValues, fullOriginal, matches, 0, newValues.length - 1);
 
   // Pointer bytes created by editing are automatic, not explicit.
   if (mergedLine[0].edited === 'explicit') mergedLine[0].edited = 'automatic';
@@ -396,6 +399,9 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   // --- Splice edited line into the byte stream and update its line info ---
 
   const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, mergedLine);
+
+  // Store only the displaced original bytes (or clear if line matches original).
+  storeOriginalBytesDelta(prog, line, fullOriginal);
   line.lastByte = oldFirst + mergedLine.length - 1;
   line.expectedLastByte = line.lastByte;
   line.lenErr = false;
