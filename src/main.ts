@@ -481,7 +481,8 @@ function renderHex(prog: Program): void {
     if (i < firstContent || i >= lastContent) cls.push('hb-pre');
     if (b.chkErr)                        cls.push('hb-err');
     else if (b.unclear)                  cls.push('hb-unclear');
-    if (b.edited)                        cls.push('hb-edited');
+    if (b.edited === 'explicit')         cls.push('hb-edited');
+    else if (b.edited === 'automatic')   cls.push('hb-auto-edited');
     if (i >= lineFirst && i <= lineLast) cls.push('hb-line');
     if (i === selByte)                   cls.push('hb-sel');
     html += `<span class="${cls.join(' ')}" data-i="${i}">${b.v.toString(16).padStart(2, '0')}</span>`;
@@ -1270,7 +1271,8 @@ function renderMergedHex(merged: MergedProgram): void {
     const cls = ['hb',
       ...(b.chkErr  ? ['hb-err']     : []),
       ...(b.unclear ? ['hb-unclear'] : []),
-      ...(b.edited  ? ['hb-edited']  : []),
+      ...(b.edited === 'explicit'  ? ['hb-edited']      : []),
+      ...(b.edited === 'automatic' ? ['hb-auto-edited'] : []),
     ].join(' ');
     html += `<span class="${cls}">${b.v.toString(16).padStart(2, '0')}</span>`;
   }
