@@ -255,21 +255,62 @@ export function restoreLineToOriginalBytes(prog: Program, lineIdx: number): void
   const oldLast = line.lastByte;
 
   // Splice original bytes back into the byte stream.
-  const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, fullOriginal);
+  // The original bytes may contain multiple lines (e.g. after a join).
+  // We may need to insert missing bytes for incomplete segments.
+  const restoredBytes = [...fullOriginal];
+  const editedZero = (): ByteInfo => ({ v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' });
 
-  // Update line info.
-  line.lastByte = oldFirst + fullOriginal.length - 1;
-  line.expectedLastByte = line.lastByte;
-  line.lenErr = false;
+  // Walk the bytes to find line boundaries (0x00 terminators) and
+  // insert missing bytes for any incomplete final segment.
+  const newLines: { startOffset: number; endOffset: number }[] = [];
+  let pos = 0;
+  while (pos < restoredBytes.length) {
+    const segStart = pos;
+    // Each line needs 2 pointer bytes + 2 line number bytes (4 total header).
+    // Pad with edited zeros if we run out of bytes.
+    while (pos < segStart + 4) {
+      if (pos === restoredBytes.length) restoredBytes.push(editedZero());
+      pos++;
+    }
+    // Scan content for 0x00 terminator (after the 4 header bytes).
+    while (pos < restoredBytes.length && restoredBytes[pos].v !== 0x00) pos++;
+    if (pos === restoredBytes.length) {
+      // Ran out of bytes without a terminator — add one.
+      restoredBytes.push(editedZero());
+    }
+    pos++;  // include the 0x00
+    newLines.push({ startOffset: segStart, endOffset: pos - 1 });
+  }
 
-  // Store delta (should clear since restored bytes match originals).
-  storeOriginalBytesDelta(prog, line, fullOriginal);
+  const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, restoredBytes);
 
-  // Rebuild elements.
-  buildLineElements(line, prog.bytes);
+  // Create LineInfo entries for each restored line.
+  const lineInfos: LineInfo[] = [];
+  for (const seg of newLines) {
+    const segOriginal = fullOriginal.slice(seg.startOffset, Math.min(seg.endOffset + 1, fullOriginal.length));
+    const lineFirstByte = oldFirst + seg.startOffset;
+    const lineLastByte = oldFirst + seg.endOffset;
+    // TODO: expectedLastByte should be derived from pointer value with correction offset.
+    // For now use lastByte as placeholder — flagLenErrors will set lenErr correctly.
+    const newLine: LineInfo = {
+      v: '',
+      elements: [],
+      firstByte: lineFirstByte,
+      lastByte: lineLastByte,
+      expectedLastByte: lineLastByte, // TODO: this is wrong! Needs to be derived from next-line pointer bytes
+      lenErr: false,
+      memAddr: 0,
+    };
+    buildLineElements(newLine, prog.bytes);
+    storeOriginalBytesDelta(prog, newLine, segOriginal);
+    lineInfos.push(newLine);
+  }
+
+  // Replace the single LineInfo with the restored line(s).
+  prog.lines.splice(lineIdx, 1, ...lineInfos);
 
   // Adjust subsequent lines.
-  adjustLineOffsets(prog, delta, lineIdx + 1);
+  adjustLineOffsets(prog, delta, lineIdx + lineInfos.length);
 
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
@@ -432,14 +473,9 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   // Calculate the correct next-line pointer value.
   // Based on where the next line will be after the splice:
   // this line's start + 2 (pointer bytes) + content length.
-  let ptrValue: number;
-  if (lineIdx < prog.lines.length - 1) {
-    const startAddr = prog.header.startAddr;
-    const firstLineOffset = prog.lines[0].firstByte;
-    ptrValue = startAddr + (oldFirst + 2 + parsed.bytes.length - firstLineOffset);
-  } else {
-    ptrValue = 0x0000;
-  }
+  const startAddr = prog.header.startAddr;
+  const firstLineOffset = prog.lines[0].firstByte;
+  const ptrValue = startAddr + (oldFirst + 2 + parsed.bytes.length - firstLineOffset);
 
   // Include pointer bytes in the LCS so matching originals are preserved.
   // Always LCS against original bytes to get the minimum diff from the tape.
