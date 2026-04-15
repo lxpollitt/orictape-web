@@ -678,11 +678,11 @@ function insertNewLine(prog: Program, insertAt: number): void {
 
   // Minimal line: next-line pointer (2 bytes) + line number 0 (2 bytes) + null terminator (1 byte).
   const newBytes: ByteInfo[] = [
-    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // ptr lo
-    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // ptr hi
-    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // linenum lo
-    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // linenum hi
-    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },  // null terminator
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },  // ptr lo
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },  // ptr hi
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },  // linenum lo
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },  // linenum hi
+    { v: 0, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },  // null terminator
   ];
   prog.bytes.splice(bytePos, 0, ...newBytes);
 

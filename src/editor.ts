@@ -345,7 +345,7 @@ function buildMergedBytes(
         v: newValues[ni],
         firstBit: 0, lastBit: 0,
         unclear: false, chkErr: false,
-        edited: true,
+        edited: 'explicit',
       });
     }
   }
@@ -495,8 +495,8 @@ export function splitLineWithEdits(
 
   // Prepend dummy line number bytes for halves that didn't have a parsed line number.
   const makeDummyLineNum = (): ByteInfo[] => [
-    { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },
-    { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: true },
+    { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },
+    { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'explicit' },
   ];
   const firstContent = parsedFirst.hasDummyLineNumber ? [...makeDummyLineNum(), ...firstMerged] : firstMerged;
   const secondContent = parsedSecond.hasDummyLineNumber ? [...makeDummyLineNum(), ...secondMerged] : secondMerged;

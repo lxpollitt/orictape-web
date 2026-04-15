@@ -23,7 +23,7 @@ export interface ByteInfo {
   lastBit: number;
   unclear: boolean;
   chkErr: boolean;
-  edited?: boolean;  // set on bytes created by editing (no waveform backing)
+  edited?: 'explicit' | 'automatic';  // set on bytes created or modified by editing (no waveform backing)
 }
 
 export interface LineInfo {
