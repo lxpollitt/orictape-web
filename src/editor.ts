@@ -696,49 +696,38 @@ export function joinLinesWithEdit(
   const first = prog.lines[firstIdx];
   const second = prog.lines[secondIdx];
 
-  const oldBytes: ByteInfo[] = [
-    ...prog.bytes.slice(first.firstByte + 2, first.lastByte + 1),
-    ...prog.bytes.slice(second.firstByte, second.lastByte + 1),
-  ];
-  const oldValues = oldBytes.map(b => b.v);
+  // --- Get full original bytes from both lines ---
 
-  // LCS between tokenised combined text and the concatenated original bytes.
-  const newValues = parsed.bytes;
+  const fullOriginalFirst = getFullOriginalBytes(prog, first);
+  const fullOriginalSecond = getFullOriginalBytes(prog, second);
+  const fullOriginal = [...fullOriginalFirst, ...fullOriginalSecond];
+
+  // Calculate the next-line pointer for the merged line.
+  const startAddr = prog.header.startAddr;
+  const firstLineOffset = prog.lines[0].firstByte;
+  const ptrValue = startAddr + (first.firstByte + 2 + parsed.bytes.length - firstLineOffset);
+
+  // --- Build new values with pointer and run LCS against original bytes ---
+
+  const newValues = [ptrValue & 0xFF, (ptrValue >> 8) & 0xFF, ...parsed.bytes];
+  const oldValues = fullOriginal.map(b => b.v);
   const matches = computeLcs(newValues, oldValues);
-  const mergedContent = buildMergedBytes(newValues, oldBytes, matches, 0, newValues.length - 1);
+  const mergedLine = buildMergedBytes(newValues, fullOriginal, matches, 0, newValues.length - 1);
 
-  // Build the next-line pointer for the merged line.
-  // Calculate based on where the next line will be after the splice:
-  // this line's start + 2 (pointer bytes) + merged content length.
-  let ptrValue: number;
-  const afterIdx = secondIdx + 1;
-  if (afterIdx < prog.lines.length) {
-    const startAddr = prog.header.startAddr;
-    const firstLineOffset = prog.lines[0].firstByte;
-    ptrValue = startAddr + (first.firstByte + 2 + mergedContent.length - firstLineOffset);
-  } else {
-    ptrValue = 0x0000;
-  }
+  // We mark pointer bytes updated by editing as automatic, not explicit.
+  if (mergedLine[0].edited === 'explicit') mergedLine[0].edited = 'automatic';
+  if (mergedLine[1].edited === 'explicit') mergedLine[1].edited = 'automatic';
 
-  // Assemble full line: pointer (2 bytes) + merged content.
-  const mergedLine: ByteInfo[] = [
-    { ...prog.bytes[first.firstByte],     edited: undefined, v: ptrValue & 0xFF },
-    { ...prog.bytes[first.firstByte + 1], edited: undefined, v: (ptrValue >> 8) & 0xFF },
-    ...mergedContent,
-  ];
+  // --- Splice and update ---
 
-  // Splice: replace both lines' byte ranges with the single merged line.
-  const spliceEnd = second.lastByte;
-  const delta = spliceMergedBytes(prog.bytes, first.firstByte, spliceEnd, mergedLine);
+  const delta = spliceMergedBytes(prog.bytes, first.firstByte, second.lastByte, mergedLine);
 
   // Update the first (surviving) line's info.
-  first.firstByte = first.firstByte;
   first.lastByte = first.firstByte + mergedLine.length - 1;
   first.expectedLastByte = first.lastByte;
   first.lenErr = false;
-
-  // Build elements for the merged line.
   buildLineElements(first, prog.bytes);
+  storeOriginalBytesDelta(prog, first, fullOriginal);
 
   // Remove the second (deleted) line from prog.lines.
   prog.lines.splice(secondIdx, 1);
