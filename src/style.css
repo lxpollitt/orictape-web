@@ -436,6 +436,8 @@ header h1 {
 .hb-sel                { background: #2a5a2a; box-shadow: inset 0 0 0 1px var(--green);  color: var(--bright); }
 .hb-sel.hb-err         { box-shadow: inset 0 0 0 1px var(--red);    color: var(--red); }
 .hb-sel.hb-unclear     { box-shadow: inset 0 0 0 1px var(--yellow);  color: var(--yellow); }
+.hb-sel.hb-edited      { box-shadow: inset 0 0 0 1px #6cb6ff; color: #6cb6ff; }
+.hb-sel.hb-auto-edited { box-shadow: inset 0 0 0 1px #618bb0; color: #618bb0; }
 
 /* ── BASIC view ─────────────────────────────────────────────────────────────── */
 .basic-line {
