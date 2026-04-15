@@ -233,6 +233,52 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
 }
 
 /**
+ * Restore a line to its original bytes from the tape.
+ * Splices the full original bytes back into the byte stream, updates line info,
+ * and clears the original bytes delta.
+ */
+export function restoreLineToOriginalBytes(prog: Program, lineIdx: number): void {
+  if (lineIdx < 0 || lineIdx >= prog.lines.length) {
+    console.warn('restoreLineToOriginalBytes: invalid lineIdx', lineIdx);
+    return;
+  }
+  const line = prog.lines[lineIdx];
+  const fullOriginal = getFullOriginalBytes(prog, line);
+
+  if (fullOriginal.length === 0) {
+    // No original bytes — line is entirely synthetic. Delete it.
+    deleteLineEdit(prog, lineIdx);
+    return;
+  }
+
+  const oldFirst = line.firstByte;
+  const oldLast = line.lastByte;
+
+  // Splice original bytes back into the byte stream.
+  const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, fullOriginal);
+
+  // Update line info.
+  line.lastByte = oldFirst + fullOriginal.length - 1;
+  line.expectedLastByte = line.lastByte;
+  line.lenErr = false;
+
+  // Store delta (should clear since restored bytes match originals).
+  storeOriginalBytesDelta(prog, line, fullOriginal);
+
+  // Rebuild elements.
+  buildLineElements(line, prog.bytes);
+
+  // Adjust subsequent lines.
+  adjustLineOffsets(prog, delta, lineIdx + 1);
+
+  // Re-run all post-processing flags.
+  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
+  flagNonMonotonicLines(prog);
+  flagTokenisationMismatches(prog);
+  flagElementErrors(prog);
+}
+
+/**
  * Apply an edit to a BASIC line in a program using LCS-based minimal diff.
  * Preserves original ByteInfo entries (with waveform references, error flags)
  * for bytes that didn't change. Only creates new edited ByteInfo entries for

@@ -5,7 +5,7 @@ import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
-import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit } from './editor';
+import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit, restoreLineToOriginalBytes } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -805,6 +805,20 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
       // Enter: save and exit edit mode.
       e.preventDefault();
       exitEditMode(true);
+    } else if (e.key === 'Escape' && e.shiftKey) {
+      // Shift+Escape: restore line to original bytes.
+      e.preventDefault();
+      const prog = programs[activeProgIdx];
+      if (prog && editingLine !== null) {
+        const savedLineIdx = editingLine;
+        editingLine = null;
+        editInput = null;
+        editIsNewLine = false;
+        restoreLineToOriginalBytes(prog, savedLineIdx);
+        renderHex(prog);
+        renderBasic(prog);
+        selectByte(byteForElem(prog.lines[savedLineIdx], 0));
+      }
     } else if (e.key === 'Escape') {
       e.preventDefault();
       exitEditMode(false);
@@ -934,6 +948,7 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   }
 
   autoSize();  // initial sizing
+  updateStatusBar();
 }
 
 /**
@@ -2162,6 +2177,22 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     return;
   }
 
+  // Shift+Escape: restore selected line to original bytes (tape view only).
+  if (e.key === 'Escape' && e.shiftKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+    const prog = programs[activeProgIdx];
+    if (prog) {
+      const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
+      if (li >= 0) {
+        e.preventDefault();
+        restoreLineToOriginalBytes(prog, li);
+        renderHex(prog);
+        renderBasic(prog);
+        selectByte(byteForElem(prog.lines[li], 0));
+      }
+    }
+    return;
+  }
+
   // Enter: enter edit mode on the selected line, cursor at end of selected element (tape view only).
   if (e.key === 'Enter' && !e.shiftKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
     const prog = programs[activeProgIdx];
@@ -2373,6 +2404,11 @@ function describeProgRegion(prog: Program, byteIdx: number): string {
 function updateStatusBar(): void {
   if (viewMode === 'merged') {
     updateMergedStatusBar();
+    return;
+  }
+
+  if (editingLine !== null) {
+    statusBar.innerHTML = '<span class="sb-dim">Enter to save · Esc to cancel · Shift+Esc to restore original bytes</span>';
     return;
   }
 

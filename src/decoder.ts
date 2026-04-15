@@ -232,16 +232,14 @@ export function programSummary(prog: Program): { label: string; count: number; s
  */
 export function getFullOriginalBytes(prog: Program, line: LineInfo): ByteInfo[] {
   const currentBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-  if (!line.originalBytesDelta || line.originalBytesDelta.length === 0) {
-    return currentBytes;
-  }
   const nonEdited = currentBytes.filter(b => !b.edited);
-  const result = [...nonEdited, ...line.originalBytesDelta].sort((a, b) => a.firstBit - b.firstBit);
+  const delta = line.originalBytesDelta || [];
+  const result = [...nonEdited, ...delta].sort((a, b) => a.firstBit - b.firstBit);
   const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
-  console.log(`getFullOriginalBytes: ${result.length} original (${nonEdited.length} non-edited + ${line.originalBytesDelta.length} delta)`,
+  console.log(`getFullOriginalBytes: ${result.length} original (${nonEdited.length} non-edited + ${delta.length} delta)`,
     `\n  current: [${currentBytes.map(hx).join(' ')}]`,
     `\n  non-edited: [${nonEdited.map(hx).join(' ')}]`,
-    `\n  delta: [${line.originalBytesDelta.map(hx).join(' ')}]`,
+    `\n  delta: [${delta.map(hx).join(' ')}]`,
     `\n  result: [${result.map(hx).join(' ')}]`);
   return result;
 }
