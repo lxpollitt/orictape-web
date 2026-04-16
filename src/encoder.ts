@@ -173,9 +173,13 @@ export function encodeTapMetadata(prog: Program): number[] {
   const headerStart = prog.header.byteIndex;
   const chkErr:  number[] = [];
   const unclear: number[] = [];
+  const editedExplicit:  number[] = [];
+  const editedAutomatic: number[] = [];
   for (let i = 0; i < prog.bytes.length; i++) {
     if (prog.bytes[i].chkErr)  chkErr.push(i - headerStart);
     if (prog.bytes[i].unclear) unclear.push(i - headerStart);
+    if (prog.bytes[i].edited === 'explicit')  editedExplicit.push(i - headerStart);
+    if (prog.bytes[i].edited === 'automatic') editedAutomatic.push(i - headerStart);
   }
 
   const json = JSON.stringify({
@@ -183,6 +187,7 @@ export function encodeTapMetadata(prog: Program): number[] {
     format: prog.stream.format,
     chkErr,
     unclear,
+    edited: { explicit: editedExplicit, automatic: editedAutomatic },
   });
 
   const out: number[] = [];

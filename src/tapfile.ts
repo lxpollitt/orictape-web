@@ -27,7 +27,7 @@ function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
  * Search for ORICTAPE_META magic in a byte range and parse the JSON metadata.
  * Returns null if no metadata is found.
  */
-function findMetadata(data: Uint8Array, start: number, end: number): { format?: 'fast' | 'slow'; chkErr?: number[]; unclear?: number[] } | null {
+function findMetadata(data: Uint8Array, start: number, end: number): { format?: 'fast' | 'slow'; chkErr?: number[]; unclear?: number[]; edited?: { explicit?: number[]; automatic?: number[] } } | null {
   // Search for the magic string.
   outer:
   for (let i = start; i <= end - TAP_META_MAGIC.length - 1; i++) {
@@ -127,6 +127,18 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
         for (const idx of meta.unclear) {
           const bi = idx + headerStart;
           if (bi >= 0 && bi < bytes.length) bytes[bi].unclear = true;
+        }
+      }
+      if (meta.edited?.explicit) {
+        for (const idx of meta.edited.explicit) {
+          const bi = idx + headerStart;
+          if (bi >= 0 && bi < bytes.length) bytes[bi].edited = 'explicit';
+        }
+      }
+      if (meta.edited?.automatic) {
+        for (const idx of meta.edited.automatic) {
+          const bi = idx + headerStart;
+          if (bi >= 0 && bi < bytes.length) bytes[bi].edited = 'automatic';
         }
       }
     }
