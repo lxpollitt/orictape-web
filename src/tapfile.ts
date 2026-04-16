@@ -91,9 +91,10 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     const end = b + 1 < blockStarts.length ? blockStarts[b + 1] : data.length;
 
     // Build ByteInfo[] — all bytes are clean by default.
+    // Each byte gets a sequential originalIndex for tracking the original byte order.
     const bytes: ByteInfo[] = [];
     for (let j = start; j < end; j++) {
-      bytes.push({ v: data[j], firstBit: 0, lastBit: 0, unclear: false, chkErr: false });
+      bytes.push({ v: data[j], firstBit: 0, lastBit: 0, unclear: false, chkErr: false, originalIndex: bytes.length });
     }
 
     // Check for metadata between this block's data and the next sync / EOF.

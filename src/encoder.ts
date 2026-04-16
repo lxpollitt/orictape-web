@@ -182,12 +182,65 @@ export function encodeTapMetadata(prog: Program): number[] {
     if (prog.bytes[i].edited === 'automatic') editedAutomatic.push(i - headerStart);
   }
 
+  // Build per-line originalBytesDelta entries. Delta bytes are sorted by
+  // originalIndex. We group consecutive originalIndex runs into a single entry
+  // with v as an array; single bytes get v as a number (more compact JSON).
+  const lineDeltas: { [lineIdx: string]: { i: number; v: number | number[] }[] } = {};
+  for (let li = 0; li < prog.lines.length; li++) {
+    const line = prog.lines[li];
+    if (!line.originalBytesDelta || line.originalBytesDelta.length === 0) continue;
+
+    // Compute splice positions: walk the line's current bytes and the delta
+    // bytes together in originalIndex order to figure out where each delta
+    // byte would splice back in (as an offset relative to the line's start).
+    // Current non-edited bytes and delta bytes are interleaved by originalIndex.
+    const delta = line.originalBytesDelta;
+    const entries: { i: number; v: number | number[] }[] = [];
+    const currentNonEdited: { origIdx: number; lineOffset: number }[] = [];
+    for (let o = 0; o < line.lastByte - line.firstByte + 1; o++) {
+      const b = prog.bytes[line.firstByte + o];
+      if (!b.edited && b.originalIndex !== undefined) {
+        currentNonEdited.push({ origIdx: b.originalIndex, lineOffset: o });
+      }
+    }
+
+    // For each delta byte, its splice position in the current line's bytes is
+    // determined by how many current non-edited bytes have a smaller originalIndex.
+    // Group consecutive deltas (by originalIndex) that map to the same splice position.
+    let runStart = 0;
+    while (runStart < delta.length) {
+      const spliceIdx = delta[runStart].originalIndex;
+      // Count current non-edited bytes with originalIndex < this delta's originalIndex.
+      let lineOffset = 0;
+      while (lineOffset < currentNonEdited.length
+             && currentNonEdited[lineOffset].origIdx < spliceIdx!) {
+        lineOffset++;
+      }
+      const i = lineOffset < currentNonEdited.length
+        ? currentNonEdited[lineOffset].lineOffset
+        : line.lastByte - line.firstByte + 1;  // past the end
+      // Collect consecutive delta bytes that have contiguous originalIndex
+      // values AND the same splice position.
+      const run: number[] = [delta[runStart].v];
+      let runEnd = runStart + 1;
+      while (runEnd < delta.length
+             && delta[runEnd].originalIndex === delta[runEnd - 1].originalIndex! + 1) {
+        run.push(delta[runEnd].v);
+        runEnd++;
+      }
+      entries.push({ i, v: run.length === 1 ? run[0] : run });
+      runStart = runEnd;
+    }
+    if (entries.length > 0) lineDeltas[li.toString()] = entries;
+  }
+
   const json = JSON.stringify({
     v: 1,
     format: prog.stream.format,
     chkErr,
     unclear,
     edited: { explicit: editedExplicit, automatic: editedAutomatic },
+    lineDeltas,
   });
 
   const out: number[] = [];

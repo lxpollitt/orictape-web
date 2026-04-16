@@ -197,13 +197,13 @@ function flagLenErrors(prog: Program): void {
 
 /**
  * Reconstruct the full original bytes for a line from its delta and current bytes.
- * Combines non-edited current bytes with the stored delta, sorted by waveform position.
+ * Combines non-edited current bytes with the stored delta, sorted by originalIndex.
  */
 export function getFullOriginalBytes(prog: Program, line: LineInfo): ByteInfo[] {
   const currentBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
   const nonEdited = currentBytes.filter(b => !b.edited);
   const delta = line.originalBytesDelta || [];
-  const result = [...nonEdited, ...delta].sort((a, b) => a.firstBit - b.firstBit);
+  const result = [...nonEdited, ...delta].sort((a, b) => (a.originalIndex ?? 0) - (b.originalIndex ?? 0));
   const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
   console.log(`getFullOriginalBytes: ${result.length} original (${nonEdited.length} non-edited + ${delta.length} delta)`,
     `\n  current: [${currentBytes.map(hx).join(' ')}]`,
@@ -218,12 +218,12 @@ export function getFullOriginalBytes(prog: Program, line: LineInfo): ByteInfo[] 
  * If all original bytes are still present (no edits), clears line.originalBytesDelta.
  */
 export function storeOriginalBytesDelta(prog: Program, line: LineInfo, fullOriginal: ByteInfo[]): void {
-  const keptFirstBits = new Set(
+  const keptIndices = new Set(
     prog.bytes.slice(line.firstByte, line.lastByte + 1)
       .filter(b => !b.edited)
-      .map(b => b.firstBit)
+      .map(b => b.originalIndex)
   );
-  const delta = fullOriginal.filter(b => !keptFirstBits.has(b.firstBit));
+  const delta = fullOriginal.filter(b => !keptIndices.has(b.originalIndex));
   line.originalBytesDelta = delta.length > 0 ? delta : undefined;
   const hx2 = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
   const currentBytes2 = prog.bytes.slice(line.firstByte, line.lastByte + 1);

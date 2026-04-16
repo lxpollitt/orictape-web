@@ -24,6 +24,7 @@ export interface ByteInfo {
   unclear: boolean;
   chkErr: boolean;
   edited?: 'explicit' | 'automatic';  // set on bytes created or modified by editing (no waveform backing)
+  originalIndex?: number;  // sequential position in the original (pre-edit) byte stream. Undefined for edited bytes.
 }
 
 export interface LineInfo {
@@ -918,6 +919,7 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
       lastBit:  currentBit - 1,
       unclear:  byteUnclear,
       chkErr:   r.bt === (chk & 1),
+      originalIndex: prog.bytes.length,
     });
   }
 }
