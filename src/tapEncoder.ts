@@ -178,7 +178,8 @@ export function encodeTapFile(entries: TapEntry[]): Uint8Array {
  *       { i: <offset>,          // splice position within the line's current bytes
  *         v: <byte> | [b1, b2, ...] }  // single byte or run of contiguous-originalIndex bytes
  *     ], ...
- *   }
+ *   },
+ *   ignoreLineErrors: [l1, ...] // line indices where user has marked errors as ignored
  * }
  *
  * All byte indices in chkErr/unclear/edited are relative to the first header byte
@@ -254,6 +255,12 @@ export function encodeTapMetadata(prog: Program): number[] {
     if (entries.length > 0) lineDeltas[li.toString()] = entries;
   }
 
+  // Collect line indices where the user has marked errors as ignored.
+  const ignoreLineErrors: number[] = [];
+  for (let li = 0; li < prog.lines.length; li++) {
+    if (prog.lines[li].ignoreErrors) ignoreLineErrors.push(li);
+  }
+
   const json = JSON.stringify({
     v: 1,
     format: prog.stream.format,
@@ -261,6 +268,7 @@ export function encodeTapMetadata(prog: Program): number[] {
     unclear,
     edited: { explicit: editedExplicit, automatic: editedAutomatic },
     lineDeltas,
+    ignoreLineErrors,
   });
 
   const out: number[] = [];

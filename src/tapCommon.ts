@@ -15,4 +15,5 @@ export interface TapMetadata {
   unclear?: number[];
   edited?: { explicit?: number[]; automatic?: number[] };
   lineDeltas?: { [l: string]: { i: number; v: number | number[] }[] };
+  ignoreLineErrors?: number[];
 }

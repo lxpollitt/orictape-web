@@ -228,6 +228,13 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
           if (b.edited) b.originalIndex = undefined;
         }
       }
+
+      // Apply ignoreLineErrors flags to the corresponding lines.
+      if (meta.ignoreLineErrors) {
+        for (const li of meta.ignoreLineErrors) {
+          if (li >= 0 && li < prog.lines.length) prog.lines[li].ignoreErrors = true;
+        }
+      }
     } else {
       // No metadata — edited bytes shouldn't exist, but if any are set via
       // other means, ensure originalIndex invariant holds.
