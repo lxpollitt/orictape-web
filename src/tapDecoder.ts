@@ -186,9 +186,6 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     };
 
     readProgramLines(prog);
-    flagNonMonotonicLines(prog);
-    flagTokenisationMismatches(prog);
-    flagElementErrors(prog);
 
     // Apply metadata flags to bytes if present.
     // Metadata indices are relative to the first header byte; offset them
@@ -238,6 +235,12 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
         if (b.edited) b.originalIndex = undefined;
       }
     }
+
+    // Run post-processing flags AFTER metadata is applied so byte-level errors
+    // (chkErr, unclear) from metadata contribute to element-level styling.
+    flagNonMonotonicLines(prog);
+    flagTokenisationMismatches(prog);
+    flagElementErrors(prog);
 
     if (prog.lines.length > 0) {
       programs.push(prog);
