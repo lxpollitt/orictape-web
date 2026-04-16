@@ -10,8 +10,8 @@ import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
 } from './merger';
-import { linesFromProgram, linesFromMerged, encodeTapFile, encodeTapMetadata, downloadTap, type TapBlock, type TapEntry } from './encoder';
-import { parseTapFile } from './tapfile';
+import { linesFromProgram, linesFromMerged, encodeTapFile, encodeTapMetadata, downloadTap, type TapBlock, type TapEntry } from './tapEncoder';
+import { parseTapFile } from './tapDecoder';
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const fileInput  = document.getElementById('file-input')       as HTMLInputElement;
