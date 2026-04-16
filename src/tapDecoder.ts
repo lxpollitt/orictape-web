@@ -1,8 +1,7 @@
 import type { ByteInfo, BitStream, Program } from './decoder';
 import { readProgramLines, flagNonMonotonicLines, flagElementErrors } from './decoder';
 import { flagTokenisationMismatches } from './editor';
-
-const TAP_META_MAGIC = 'ORICTAPE_META';
+import { TAP_META_MAGIC, type TapMetadata } from './tapCommon';
 
 /** A minimal empty BitStream for programs loaded from TAP (no waveform data). */
 function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
@@ -32,7 +31,7 @@ function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
  * assigning sequential originalIndex values to every non-edited byte and
  * every delta byte. Populates each line's originalBytesDelta.
  *
- * See encodeTapMetadata in encoder.ts for the JSON structure of lineDeltas.
+ * See encodeTapMetadata in tapEncoder.ts for the JSON structure of lineDeltas.
  */
 function reassignOriginalIndicesWithDeltas(
   prog: Program,
@@ -103,14 +102,6 @@ function reassignOriginalIndicesWithDeltas(
     if (!b.edited) b.originalIndex = nextOriginalIndex++;
     else           b.originalIndex = undefined;
   }
-}
-
-interface TapMetadata {
-  format?: 'fast' | 'slow';
-  chkErr?: number[];
-  unclear?: number[];
-  edited?: { explicit?: number[]; automatic?: number[] };
-  lineDeltas?: { [l: string]: { i: number; v: number | number[] }[] };
 }
 
 function findMetadata(data: Uint8Array, start: number, end: number): TapMetadata | null {

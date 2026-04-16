@@ -1,6 +1,7 @@
 import type { Program } from './decoder';
 import type { MergedProgram } from './merger';
 import { bestSource } from './merger';
+import { TAP_META_MAGIC } from './tapCommon';
 
 /**
  * BASIC programs always load at 0x0501 on the Oric-1 / Atmos.
@@ -157,8 +158,6 @@ export function encodeTapFile(entries: TapEntry[]): Uint8Array {
 }
 
 // ── Metadata encoding ─────────────────────────────────────────────────────────
-
-const TAP_META_MAGIC = 'ORICTAPE_META';
 
 /**
  * Encode decode-quality metadata for a program as bytes to append after a TAP block.
