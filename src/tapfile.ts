@@ -27,7 +27,93 @@ function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
  * Search for ORICTAPE_META magic in a byte range and parse the JSON metadata.
  * Returns null if no metadata is found.
  */
-function findMetadata(data: Uint8Array, start: number, end: number): { format?: 'fast' | 'slow'; chkErr?: number[]; unclear?: number[]; edited?: { explicit?: number[]; automatic?: number[] } } | null {
+/**
+ * Walk the program's bytes (and per-line deltas from metadata) in order,
+ * assigning sequential originalIndex values to every non-edited byte and
+ * every delta byte. Populates each line's originalBytesDelta.
+ *
+ * See encodeTapMetadata in encoder.ts for the JSON structure of lineDeltas.
+ */
+function reassignOriginalIndicesWithDeltas(
+  prog: Program,
+  lineDeltas: { [l: string]: { i: number; v: number | number[] }[] },
+): void {
+  let nextOriginalIndex = 0;
+
+  // Helper to normalize v to an array.
+  const normalizeV = (v: number | number[]): number[] => Array.isArray(v) ? v : [v];
+
+  // Find where lines span in prog.bytes.
+  const firstLineByte = prog.lines.length > 0 ? prog.lines[0].firstByte : prog.bytes.length;
+  const lastLineByte  = prog.lines.length > 0 ? prog.lines[prog.lines.length - 1].lastByte : -1;
+
+  // Pre-first-line bytes.
+  for (let i = 0; i < firstLineByte; i++) {
+    const b = prog.bytes[i];
+    if (!b.edited) b.originalIndex = nextOriginalIndex++;
+    else           b.originalIndex = undefined;
+  }
+
+  // Each line, with delta interleaving.
+  for (let li = 0; li < prog.lines.length; li++) {
+    const line = prog.lines[li];
+    const deltas = lineDeltas[li.toString()] || [];
+    const deltaBytes: ByteInfo[] = [];
+
+    // Walk the line's positions (line-relative offsets 0..length inclusive).
+    // The extra iteration at offset === length handles trailing deltas (splice at end of line).
+    const lineLen = line.lastByte - line.firstByte + 1;
+    let deltaIdx = 0;
+    for (let o = 0; o <= lineLen; o++) {
+      // Insert any delta at this line-relative position.
+      // At most one entry should match — deltas from storeOriginalBytesDelta
+      // never have multiple runs at the same splice position.
+      if (deltaIdx < deltas.length && deltas[deltaIdx].i === o) {
+        const values = normalizeV(deltas[deltaIdx].v);
+        for (const v of values) {
+          deltaBytes.push({
+            v,
+            firstBit: 0, lastBit: 0,
+            unclear: false, chkErr: false,
+            originalIndex: nextOriginalIndex++,
+          });
+        }
+        deltaIdx++;
+        // Defensive check — shouldn't happen with deltas from storeOriginalBytesDelta.
+        if (deltaIdx < deltas.length && deltas[deltaIdx].i === o) {
+          console.warn('reassignOriginalIndicesWithDeltas: unexpected extra delta at same offset', { lineIdx: li, offset: o });
+        }
+      }
+      // Process the current byte (if still within the line).
+      if (o < lineLen) {
+        const b = prog.bytes[line.firstByte + o];
+        if (!b.edited) b.originalIndex = nextOriginalIndex++;
+        else           b.originalIndex = undefined;
+      }
+    }
+
+    if (deltaBytes.length > 0) {
+      line.originalBytesDelta = deltaBytes;
+    }
+  }
+
+  // Post-last-line bytes.
+  for (let i = lastLineByte + 1; i < prog.bytes.length; i++) {
+    const b = prog.bytes[i];
+    if (!b.edited) b.originalIndex = nextOriginalIndex++;
+    else           b.originalIndex = undefined;
+  }
+}
+
+interface TapMetadata {
+  format?: 'fast' | 'slow';
+  chkErr?: number[];
+  unclear?: number[];
+  edited?: { explicit?: number[]; automatic?: number[] };
+  lineDeltas?: { [l: string]: { i: number; v: number | number[] }[] };
+}
+
+function findMetadata(data: Uint8Array, start: number, end: number): TapMetadata | null {
   // Search for the magic string.
   outer:
   for (let i = start; i <= end - TAP_META_MAGIC.length - 1; i++) {
@@ -141,6 +227,24 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
           const bi = idx + headerStart;
           if (bi >= 0 && bi < bytes.length) bytes[bi].edited = 'automatic';
         }
+      }
+
+      // Process lineDeltas: create ByteInfo entries for delta bytes and
+      // re-assign originalIndex values so delta bytes slot into the
+      // original-byte sequence correctly.
+      if (meta.lineDeltas) {
+        reassignOriginalIndicesWithDeltas(prog, meta.lineDeltas);
+      } else {
+        // No deltas — edited bytes should have undefined originalIndex.
+        for (const b of bytes) {
+          if (b.edited) b.originalIndex = undefined;
+        }
+      }
+    } else {
+      // No metadata — edited bytes shouldn't exist, but if any are set via
+      // other means, ensure originalIndex invariant holds.
+      for (const b of bytes) {
+        if (b.edited) b.originalIndex = undefined;
       }
     }
 

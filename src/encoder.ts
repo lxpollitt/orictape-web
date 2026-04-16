@@ -164,10 +164,27 @@ const TAP_META_MAGIC = 'ORICTAPE_META';
  * Encode decode-quality metadata for a program as bytes to append after a TAP block.
  * Format: magic string + null terminator + UTF-8 JSON.
  *
- * The JSON records which bytes had checksum errors or unclear bits during WAV
- * decoding, so this information survives the TAP round-trip.  Byte indices are
- * relative to the first header byte (byte after 0x24 sync marker), so they are
- * stable regardless of how many sync/pre-sync bytes the byte stream contains.
+ * JSON structure:
+ * {
+ *   v: 1,                       // metadata format version
+ *   format: "fast" | "slow",    // waveform format (from WAV decode)
+ *   chkErr:  [i1, i2, ...],     // byte indices with checksum errors
+ *   unclear: [i1, i2, ...],     // byte indices with unclear bits
+ *   edited: {
+ *     explicit:  [i1, ...],     // byte indices marked as user-explicit edits
+ *     automatic: [i1, ...]      // byte indices marked as automatic edits (e.g. pointer fixups)
+ *   },
+ *   lineDeltas: {               // displaced original bytes per line
+ *     "<l>": [                  // l = line index (string key)
+ *       { i: <offset>,          // splice position within the line's current bytes
+ *         v: <byte> | [b1, b2, ...] }  // single byte or run of contiguous-originalIndex bytes
+ *     ], ...
+ *   }
+ * }
+ *
+ * All byte indices in chkErr/unclear/edited are relative to the first header byte
+ * (byte after 0x24 sync marker), so they are stable regardless of how many
+ * sync/pre-sync bytes the byte stream contains.
  */
 export function encodeTapMetadata(prog: Program): number[] {
   const headerStart = prog.header.byteIndex;
@@ -185,23 +202,27 @@ export function encodeTapMetadata(prog: Program): number[] {
   // Build per-line originalBytesDelta entries. Delta bytes are sorted by
   // originalIndex. We group consecutive originalIndex runs into a single entry
   // with v as an array; single bytes get v as a number (more compact JSON).
-  const lineDeltas: { [lineIdx: string]: { i: number; v: number | number[] }[] } = {};
+  const lineDeltas: { [l: string]: { i: number; v: number | number[] }[] } = {};
   for (let li = 0; li < prog.lines.length; li++) {
     const line = prog.lines[li];
     if (!line.originalBytesDelta || line.originalBytesDelta.length === 0) continue;
 
-    // Compute splice positions: walk the line's current bytes and the delta
-    // bytes together in originalIndex order to figure out where each delta
-    // byte would splice back in (as an offset relative to the line's start).
-    // Current non-edited bytes and delta bytes are interleaved by originalIndex.
+    // Compute splice positions within the lines current bytes: walk the line's 
+    // current bytes and the delta bytes together in originalIndex order to figure 
+    // out where each delta byte would splice back in (as an offset relative to the
+    // line's start). Current non-edited bytes and delta bytes are interleaved by
+    // originalIndex. Start by finding all the current non-edited bytes.
     const delta = line.originalBytesDelta;
     const entries: { i: number; v: number | number[] }[] = [];
     const currentNonEdited: { origIdx: number; lineOffset: number }[] = [];
     for (let o = 0; o < line.lastByte - line.firstByte + 1; o++) {
       const b = prog.bytes[line.firstByte + o];
-      if (!b.edited && b.originalIndex !== undefined) {
-        currentNonEdited.push({ origIdx: b.originalIndex, lineOffset: o });
+      if (b.edited) continue;
+      if (b.originalIndex === undefined) {
+        console.warn('encodeTapMetadata: non-edited byte has no originalIndex', { lineIdx: li, offset: o, byte: b });
+        continue;
       }
+      currentNonEdited.push({ origIdx: b.originalIndex, lineOffset: o });
     }
 
     // For each delta byte, its splice position in the current line's bytes is
