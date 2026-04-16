@@ -642,6 +642,7 @@ function renderBasic(prog: Program): void {
       'basic-line',
       ...(hasChkErr  ? ['err']  : []),
       ...(hasUnclear ? ['warn'] : []),
+      ...(line.ignoreErrors   ? ['ignore-errors']         : []),
       ...(i === selLine       ? ['sel']                  : []),
       ...(isMatch             ? ['search-match']         : []),
       ...(isCurrent           ? ['search-match-current'] : []),
@@ -801,9 +802,21 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
           eta.selectionStart = eta.selectionEnd = 0;
         }
       }
-    } else if (e.key === 'Enter' && !e.shiftKey) {
-      // Enter: save and exit edit mode.
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+      // Ctrl/Cmd+Enter: save, ignore errors on this line, and exit edit mode.
       e.preventDefault();
+      const prog = programs[activeProgIdx];
+      if (prog && editingLine !== null) {
+        prog.lines[editingLine].ignoreErrors = true;
+      }
+      exitEditMode(true);
+    } else if (e.key === 'Enter' && !e.shiftKey) {
+      // Enter: save, clear ignoreErrors flag, and exit edit mode.
+      e.preventDefault();
+      const prog = programs[activeProgIdx];
+      if (prog && editingLine !== null) {
+        prog.lines[editingLine].ignoreErrors = undefined;
+      }
       exitEditMode(true);
     } else if (e.key === 'Escape' && e.shiftKey) {
       // Shift+Escape: restore line to original bytes.
@@ -2194,7 +2207,22 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 
   // Enter: enter edit mode on the selected line, cursor at end of selected element (tape view only).
-  if (e.key === 'Enter' && !e.shiftKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+  // Ctrl/Cmd+Enter: mark the selected line's errors as ignored (tape view only).
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
+    const prog = programs[activeProgIdx];
+    if (prog) {
+      const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
+      if (li >= 0) {
+        e.preventDefault();
+        prog.lines[li].ignoreErrors = true;
+        renderBasic(prog);
+      }
+    }
+    return;
+  }
+
+  // Enter: enter edit mode on the selected line, cursor at end of selected element (tape view only).
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
     const prog = programs[activeProgIdx];
     if (prog) {
       const li = prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte);
@@ -2408,7 +2436,7 @@ function updateStatusBar(): void {
   }
 
   if (editingLine !== null) {
-    statusBar.innerHTML = '<span class="sb-dim">Enter to save · Esc to cancel · Shift+Esc to restore original bytes</span>';
+    statusBar.innerHTML = '<span class="sb-dim">Enter to save · Esc to cancel · Ctrl+Enter to ignore errors · Shift+Esc to restore original bytes</span>';
     return;
   }
 

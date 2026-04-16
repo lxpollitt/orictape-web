@@ -456,6 +456,13 @@ header h1 {
 .basic-line .elem.elem-warn  { color: var(--yellow); text-decoration: underline; text-underline-offset: 15%; }
 .basic-line .elem.sel        { background: #2a5a2a; box-shadow: inset 0 0 0 1px var(--green); }
 
+/* User has marked this line's errors to be ignored — mute the error styling. */
+.basic-line.ignore-errors                       { color: #6e9c6e; }
+.basic-line.ignore-errors.err                   { background: transparent; }
+.basic-line.ignore-errors.warn                  { background: transparent; }
+.basic-line.ignore-errors .elem.elem-err        { color: inherit; }
+.basic-line.ignore-errors .elem.elem-warn       { color: inherit; }
+
 .basic-edit-input {
   display: block;
   width: 100%;

@@ -62,6 +62,8 @@ export interface LineInfo {
    *  in the current line. Used with getFullOriginalBytes/storeOriginalBytesDelta
    *  to reconstruct the full original for LCS comparisons. */
   originalBytesDelta?: ByteInfo[];
+  /** User has acknowledged the line's errors and wants them visually suppressed. */
+  ignoreErrors?: boolean;
   /** Cached line health — set by lineHealth(), cleared by invalidateLineHealth(). */
   _health?: LineSeverity;
 }
