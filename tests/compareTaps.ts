@@ -23,7 +23,7 @@
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'fs';
 import { join, basename } from 'path';
-import { parseTapFile } from '../src/tapfile';
+import { parseTapFile } from '../src/tapDecoder';
 import { alignPrograms, isLineClean, type LineSource } from '../src/merger';
 import type { Program } from '../src/decoder';
 

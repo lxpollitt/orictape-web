@@ -13,7 +13,7 @@ import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 
 import { join, basename } from 'path';
 import { parseWavFile } from '../src/wavfile';
 import { readBitStreams, readPrograms } from '../src/decoder';
-import { linesFromProgram, encodeTapFile, encodeTapMetadata } from '../src/encoder';
+import { linesFromProgram, encodeTapFile, encodeTapMetadata } from '../src/tapEncoder';
 import type { Program } from '../src/decoder';
 
 function usage(): never {
@@ -52,7 +52,7 @@ function summariseProgram(prog: Program, index: number, sampleRate: number): str
   // Line-level stats (within decoded BASIC)
   const lenErrLines      = prog.lines.filter(l => l.lenErr).length;
   const earlyEndLines    = prog.lines.filter(l => l.earlyEnd).length;
-  const unknownKwLines   = prog.lines.filter(l => l.unknownKeyword).length;
+  const unknownKwLines   = prog.lines.filter(l => (l.unknownKeywordCount ?? 0) > 0).length;
   const earlyTermination = prog.earlyTermination ? ' EARLY_END' : '';
 
   // Bytes within BASIC line range vs outside

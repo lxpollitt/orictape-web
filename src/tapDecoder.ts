@@ -2,7 +2,6 @@ import type { ByteInfo, BitStream, Program } from './decoder';
 import { readProgramLines, flagNonMonotonicLines, flagElementErrors } from './decoder';
 import { flagTokenisationMismatches } from './editor';
 import { TAP_META_MAGIC, type TapMetadata } from './tapCommon';
-import { disassemble } from './disassembler6502';
 
 /** A minimal empty BitStream for programs loaded from TAP (no waveform data). */
 function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
@@ -160,8 +159,6 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     }
   }
 
-  console.log(`parseTapFile: found ${blockStarts.length} block(s) at positions`, blockStarts);
-
   // ── Parse each block ─────────────────────────────────────────────────────────
   for (let b = 0; b < blockStarts.length; b++) {
     const start = blockStarts[b];
@@ -189,11 +186,6 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     };
 
     readProgramLines(prog);
-
-    console.log(`parseTapFile block ${b}: start=${start}, end=${end}, bytes=${bytes.length}, ` +
-      `fileType=0x${prog.header.fileType.toString(16)}, lines=${prog.lines.length}, ` +
-      `name="${prog.name}", startAddr=0x${prog.header.startAddr.toString(16)}, ` +
-      `endAddr=0x${prog.header.endAddr.toString(16)}`);
 
     // Apply metadata flags to bytes if present.
     // Metadata indices are relative to the first header byte; offset them
@@ -258,19 +250,7 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     flagElementErrors(prog);
 
     // Include the program if it has BASIC lines OR a valid header (machine code).
-    const include = prog.lines.length > 0 || prog.header.fileType !== 0;
-    console.log(`parseTapFile block ${b}: ${include ? 'INCLUDED' : 'SKIPPED'}`);
-
-    // Machine code program — log a disassembly as a first test of the 6502 disassembler.
-    if (include && prog.header.fileType !== 0) {
-      const contentStart = prog.header.byteIndex + 9 /* header */
-        + (prog.name.length + 1);  // name + null terminator
-      const contentBytes = prog.bytes.slice(contentStart).map(b => b.v);
-      const lines = disassemble(contentBytes, prog.header.startAddr);
-      console.log(`Disassembly of "${prog.name}" (${contentBytes.length} bytes @ $${prog.header.startAddr.toString(16)}):\n` + lines.join('\n'));
-    }
-
-    if (include) {
+    if (prog.lines.length > 0 || prog.header.fileType !== 0) {
       programs.push(prog);
     }
   }
