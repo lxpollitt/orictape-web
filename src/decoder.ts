@@ -969,15 +969,15 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
       const b = getByte();
       if (!ok) return;
       if (b === 0x16) { syncCount++; }
-      else if (b === 0x24 && syncCount > 3) { break; }
+      else if (b === 0x24 && syncCount >= 3) { break; }
       else { syncCount = 0; }
     }
     const headerByteIndex = nextByte;
 
-    // 9-byte file header; byte[2] === 0 means BASIC file.
+    // 9-byte file header; byte[2] === 0 means BASIC file, other values indicate
+    // non-BASIC (e.g. machine code has byte[2] === 0x80).
     const headerBytes: number[] = [];
     for (let i = 0; i < 9; i++) headerBytes.push(getByte());
-    if (headerBytes[2] !== 0) return;
 
     // Start address from header (bytes 6–7, big-endian).  Used to anchor the
     // chain of next-line pointer addresses to real Oric memory addresses.
@@ -997,6 +997,10 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     for (let b = getByte(); b > 0; b = getByte()) {
       prog.name += String.fromCharCode(b);
     }
+
+    // Non-BASIC programs (machine code, etc.) — header fields are populated
+    // but we skip the BASIC line parsing below.
+    if (headerBytes[2] !== 0) return;
 
     // Cap getByte to the address range declared in the header.
     // endAddr is exclusive (the first byte past the saved data), so the last
