@@ -253,11 +253,13 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
   elements.push(`${lineNum} `);
   errors.push(null);  // line number element — syntax checker doesn't cover this
 
-  // Content bytes: firstByte+4 to lastByte (lastByte is the 0x00 terminator).
+  // Content bytes: firstByte+4 to lastByte. (The lastByte should be the 0x00 terminator, 
+  // but corrupt lines may have it earlier or missing in rare cases. Known example is from
+  // the last line of the program, but this code is more defensive and copes with all lines.)
   byteSequenceSyntaxChecker(0x00, true);  // reset
-  for (let i = line.firstByte + 4; i < line.lastByte; i++) {
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
     const b = bytes[i].v;
-    if (b === 0) break;  // early terminator
+    if (b === 0) break;  // terminator
     const syntax = byteSequenceSyntaxChecker(b);
     if (syntax.severity !== 'ok') {
       elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);

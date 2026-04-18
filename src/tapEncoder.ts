@@ -29,6 +29,12 @@ export function linesFromProgram(prog: Program): TapLine[] {
     for (let i = line.firstByte + 4; i < line.lastByte; i++) {
       tokens.push(prog.bytes[i].v);
     }
+    // Some corrupt programs may be missing 0x00 terminator in rare cases.
+    // Known example is from the last line of the program, but this code is
+    // more defensive and copes with all lines.
+    if (prog.bytes[line.lastByte].v !== 0) { 
+      tokens.push(prog.bytes[line.lastByte].v);
+    }
     // elements[0] is the line-number string e.g. "100 "
     const lineNum = parseInt(line.elements[0] ?? '', 10);
     return { lineNum: isNaN(lineNum) ? 0 : lineNum, tokens };
@@ -52,6 +58,12 @@ export function linesFromMerged(
     const tokens: number[] = [];
     for (let i = line.firstByte + 4; i < line.lastByte; i++) {
       tokens.push(prog.bytes[i].v);
+    }
+    // Some corrupt programs may be missing 0x00 terminator in rare cases.
+    // Known example is from the last line of the program, but this code is
+    // more defensive and copes with all lines.
+    if (prog.bytes[line.lastByte].v !== 0) { 
+      tokens.push(prog.bytes[line.lastByte].v);
     }
     lines.push({ lineNum: alignedLine.lineNum, tokens });
   }
