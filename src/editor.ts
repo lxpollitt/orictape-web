@@ -195,21 +195,62 @@ export function flagTokenisationMismatches(prog: Program): void {
 }
 
 /**
+ * Reconstruct the full original bytes for a byte-stream range from its stored
+ * delta and current non-edited bytes.  Combines them and sorts by originalIndex.
+ * Range is inclusive: [firstByte, lastByte].
+ */
+function getFullOriginalBytesInRange(
+  prog: Program,
+  firstByte: number,
+  lastByte: number,
+  delta: ByteInfo[] | undefined,
+): ByteInfo[] {
+  const currentBytes = prog.bytes.slice(firstByte, lastByte + 1);
+  const nonEdited = currentBytes.filter(b => !b.edited);
+  const deltaBytes = delta || [];
+  const result = [...nonEdited, ...deltaBytes].sort((a, b) => (a.originalIndex ?? 0) - (b.originalIndex ?? 0));
+  const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
+  console.log(`getFullOriginalBytesInRange [${firstByte}..${lastByte}]: ${result.length} original (${nonEdited.length} non-edited + ${deltaBytes.length} delta)`,
+    `\n  current: [${currentBytes.map(hx).join(' ')}]`,
+    `\n  non-edited: [${nonEdited.map(hx).join(' ')}]`,
+    `\n  delta: [${deltaBytes.map(hx).join(' ')}]`,
+    `\n  result: [${result.map(hx).join(' ')}]`);
+  return result;
+}
+
+/**
+ * Compute the delta of original bytes that are no longer in the given byte-stream
+ * range (i.e. bytes that have been replaced by edits).  Returns undefined when
+ * all original bytes are still present.  Range is inclusive: [firstByte, lastByte].
+ */
+function computeOriginalBytesDelta(
+  prog: Program,
+  firstByte: number,
+  lastByte: number,
+  fullOriginal: ByteInfo[],
+): ByteInfo[] | undefined {
+  const keptIndices = new Set(
+    prog.bytes.slice(firstByte, lastByte + 1)
+      .filter(b => !b.edited)
+      .map(b => b.originalIndex)
+  );
+  const delta = fullOriginal.filter(b => !keptIndices.has(b.originalIndex));
+  const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
+  const currentBytes = prog.bytes.slice(firstByte, lastByte + 1);
+  console.log(`computeOriginalBytesDelta [${firstByte}..${lastByte}]: ${fullOriginal.length} original, ${delta.length} delta`,
+    `\n  fullOriginal: [${fullOriginal.map(hx).join(' ')}]`,
+    `\n  current: [${currentBytes.map(hx).join(' ')}]`,
+    `\n  kept: [${currentBytes.filter(b => !b.edited).map(hx).join(' ')}]`,
+    `\n  delta: [${delta.map(hx).join(' ')}]`);
+  return delta.length > 0 ? delta : undefined;
+}
+
+/**
  * Reconstruct the full original bytes for a line from its delta and current bytes.
  * Combines non-edited current bytes with the stored delta, sorted by originalIndex.
  */
 export function getFullOriginalBytes(prog: Program, line: LineInfo): ByteInfo[] {
-  const currentBytes = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-  const nonEdited = currentBytes.filter(b => !b.edited);
-  const delta = line.originalBytesDelta || [];
-  const result = [...nonEdited, ...delta].sort((a, b) => (a.originalIndex ?? 0) - (b.originalIndex ?? 0));
-  const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
-  console.log(`getFullOriginalBytes: ${result.length} original (${nonEdited.length} non-edited + ${delta.length} delta)`,
-    `\n  current: [${currentBytes.map(hx).join(' ')}]`,
-    `\n  non-edited: [${nonEdited.map(hx).join(' ')}]`,
-    `\n  delta: [${delta.map(hx).join(' ')}]`,
-    `\n  result: [${result.map(hx).join(' ')}]`);
-  return result;
+  return getFullOriginalBytesInRange(prog, line.firstByte, line.lastByte, line.originalBytesDelta);
 }
 
 /**
@@ -217,20 +258,25 @@ export function getFullOriginalBytes(prog: Program, line: LineInfo): ByteInfo[] 
  * If all original bytes are still present (no edits), clears line.originalBytesDelta.
  */
 export function storeOriginalBytesDelta(prog: Program, line: LineInfo, fullOriginal: ByteInfo[]): void {
-  const keptIndices = new Set(
-    prog.bytes.slice(line.firstByte, line.lastByte + 1)
-      .filter(b => !b.edited)
-      .map(b => b.originalIndex)
-  );
-  const delta = fullOriginal.filter(b => !keptIndices.has(b.originalIndex));
-  line.originalBytesDelta = delta.length > 0 ? delta : undefined;
-  const hx2 = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
-  const currentBytes2 = prog.bytes.slice(line.firstByte, line.lastByte + 1);
-  console.log(`storeOriginalBytesDelta: ${fullOriginal.length} original, ${delta.length} delta`,
-    `\n  fullOriginal: [${fullOriginal.map(hx2).join(' ')}]`,
-    `\n  current: [${currentBytes2.map(hx2).join(' ')}]`,
-    `\n  kept: [${currentBytes2.filter(b => !b.edited).map(hx2).join(' ')}]`,
-    `\n  delta: [${delta.map(hx2).join(' ')}]`);
+  line.originalBytesDelta = computeOriginalBytesDelta(prog, line.firstByte, line.lastByte, fullOriginal);
+}
+
+/**
+ * Header-level analogue of getFullOriginalBytes: reconstruct the original 9-byte
+ * program header from its delta and current non-edited bytes.
+ */
+export function getHeaderOriginalBytes(prog: Program): ByteInfo[] {
+  const first = prog.header.byteIndex;
+  return getFullOriginalBytesInRange(prog, first, first + 8, prog.header.originalBytesDelta);
+}
+
+/**
+ * Header-level analogue of storeOriginalBytesDelta: store any displaced header
+ * bytes in prog.header.originalBytesDelta.
+ */
+export function storeHeaderOriginalBytesDelta(prog: Program, fullOriginal: ByteInfo[]): void {
+  const first = prog.header.byteIndex;
+  prog.header.originalBytesDelta = computeOriginalBytesDelta(prog, first, first + 8, fullOriginal);
 }
 
 /**
@@ -1000,6 +1046,47 @@ function fixLinePointers(prog: Program): void {
 }
 
 /**
+ * Recalculate the header's end-address bytes to match the program's actual
+ * final size (after any line-terminator or end-marker insertions done by
+ * earlier phases of fixPointersAndTerminators).  Replaces the two header
+ * bytes at byteIndex+4 (hi) and byteIndex+5 (lo) when they disagree;
+ * preserves original ByteInfo entries where the new value happens to match,
+ * and tracks displaced originals in prog.header.originalBytesDelta.
+ *
+ * Also updates the parsed prog.header.endAddr field to the new value, so
+ * both the raw bytes and the materialised view stay in sync.
+ *
+ * No-op on programs with no lines.
+ */
+function fixHeaderEndAddr(prog: Program): void {
+  if (prog.lines.length === 0) return;
+  const lastLine = prog.lines[prog.lines.length - 1];
+  const firstLineOffset = prog.lines[0].firstByte;
+  // End marker sits at lastLine.lastByte + 1 and +2; the first byte past it
+  // (i.e. the exclusive end address in program-byte terms) is +3.
+  const bytesPastEndMarker = lastLine.lastByte + 3;
+  const newEndAddr = prog.header.startAddr + (bytesPastEndMarker - firstLineOffset);
+  if (prog.header.endAddr === newEndAddr) return;
+
+  const newEndHi = (newEndAddr >> 8) & 0xFF;
+  const newEndLo = newEndAddr & 0xFF;
+  const hiIdx = prog.header.byteIndex + 4;
+  const loIdx = prog.header.byteIndex + 5;
+
+  // Snapshot full header originals before replacing, so displaced values can
+  // be stored in originalBytesDelta — same pattern as fixLinePointers.
+  const fullOriginal = getHeaderOriginalBytes(prog);
+  prog.bytes[hiIdx] = fullOriginal.length > 4 && newEndHi === fullOriginal[4].v ? fullOriginal[4]
+    : { v: newEndHi, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+  prog.bytes[loIdx] = fullOriginal.length > 5 && newEndLo === fullOriginal[5].v ? fullOriginal[5]
+    : { v: newEndLo, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+  storeHeaderOriginalBytesDelta(prog, fullOriginal);
+
+  // Keep the parsed header field in sync with the rewritten bytes.
+  prog.header.endAddr = newEndAddr;
+}
+
+/**
  * Normalise the structural bytes of a BASIC program in place, so it round-trips
  * cleanly through the TAP encoder/decoder cycle:
  *
@@ -1011,10 +1098,13 @@ function fixLinePointers(prog: Program): void {
  *   3. Recalculate every line's next-line pointer to match the final byte
  *      layout (catching both layout changes from step 1 and any pre-existing
  *      pointer corruption).
+ *   4. Recalculate the header's end address (byteIndex+4..+5) to match the
+ *      program's actual final size.
  *
  * All inserted and replaced bytes are marked edited: 'automatic'.  Displaced
- * originals are preserved in line.originalBytesDelta for phase 3 replacements;
- * the inserted terminators and end-of-program bytes have no prior original.
+ * originals are preserved in line.originalBytesDelta for phase 3 replacements
+ * and prog.header.originalBytesDelta for phase 4; the inserted terminators
+ * and end-of-program bytes have no prior original.
  *
  * Trailing or preceding bytes in prog.bytes are never removed — the user may
  * still care about them, and the TAP encoder simply doesn't include them in
@@ -1063,6 +1153,9 @@ export function fixPointersAndTerminators(prog: Program): void {
 
   // Phase 3 — recalculate every line's next-line pointer.
   fixLinePointers(prog);
+
+  // Phase 4 — recalculate the header's end address to match the final program size.
+  fixHeaderEndAddr(prog);
 
   // Re-run post-processing flags to reflect the now-normalised state.
   flagAll(prog);

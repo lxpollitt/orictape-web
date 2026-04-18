@@ -410,6 +410,10 @@ export interface ProgramHeader {
   startAddr:  number;
   /** First byte past program data in Oric memory (big-endian from header, exclusive). */
   endAddr:    number;
+  /** Delta of original header bytes displaced by editing — same pattern as
+   *  LineInfo.originalBytesDelta, used with getHeaderOriginalBytes /
+   *  storeHeaderOriginalBytesDelta. */
+  originalBytesDelta?: ByteInfo[];
 }
 
 export interface Program {
@@ -561,7 +565,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   /** Measure one waveform cycle and classify it as short, medium, or long.
    *  Returns false if bit is unreadbale / no useful signal found (for section of ~cycle length). */
   const readCycle = (): boolean => {
-    // The previous readCyle already had to find this cycle's maxIndex to workout the crossover point
+    // The previous readCycle already had to find this cycle's maxIndex to workout the crossover point
     maxIndex = nextMaxIndex;
 
     // Find the cycle's minimum. Start searching from the cycle's max.
@@ -1249,6 +1253,13 @@ function hasPointerAndTerminatorIssues(prog: Program): boolean {
   for (const line of prog.lines) {
     if (line.lenErr) return true;
   }
+
+  // 4. Header end address doesn't match the program's actual size?  Expected
+  //    end address = startAddr + (one past the end-of-program marker) measured
+  //    in program-data bytes from the first line's start.
+  const firstLineOffset = prog.lines[0].firstByte;
+  const expectedEndAddr = prog.header.startAddr + (lastLine.lastByte + 3 - firstLineOffset);
+  if (prog.header.endAddr !== expectedEndAddr) return true;
 
   return false;
 }
