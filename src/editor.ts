@@ -156,7 +156,9 @@ export function checkTokenisationMatch(lineText: string, originalBytes: number[]
 
 /**
  * Check all lines in a program for syntax issues (re-tokenisation mismatches).
- * Sets `tokenisationMismatch` flag on any line whose text doesn't round-trip to the same bytes.
+ * Sets `tokenisationMismatch` on any line whose text doesn't round-trip to the
+ * same bytes; clears it on lines that do round-trip cleanly (so the flag always
+ * reflects current state, not a historical observation).
  */
 export function flagTokenisationMismatches(prog: Program): void {
   for (const line of prog.lines) {
@@ -167,9 +169,54 @@ export function flagTokenisationMismatches(prog: Program): void {
       originalBytes.push(prog.bytes[b].v);
     }
     const issue = checkTokenisationMatch(lineText, originalBytes);
-    if (issue) {
-      line.tokenisationMismatch = true;
+    line.tokenisationMismatch = issue ? true : undefined;
+    invalidateLineHealth(line);
+  }
+}
+
+/**
+ * Re-evaluate earlyEnd (on the last line) and earlyTermination (program-level)
+ * from current state.  Idempotent: callable at any time after a byte-count
+ * change to keep the flags in sync with reality.
+ *
+ * Mirrors the decoder's original check in readProgramLines: the program-end
+ * marker (0x00 0x00) is present and its position is at least 2 bytes before
+ * the byte position implied by the header's endAddr.  The "at least 2"
+ * tolerance absorbs a known off-by-one case where endAddr sometimes points
+ * exactly one byte past the marker (not treated as genuinely early).
+ */
+export function flagEarlyEnd(prog: Program): void {
+  // Clear across all lines defensively, in case line structure has changed
+  // (e.g. lines added/removed by an edit).  Only the last line may genuinely
+  // carry this flag on re-evaluation.
+  for (const line of prog.lines) {
+    if (line.earlyEnd) {
+      line.earlyEnd = undefined;
+      invalidateLineHealth(line);
     }
+  }
+  prog.earlyTermination = undefined;
+
+  if (prog.lines.length === 0) return;
+
+  const lastLine = prog.lines[prog.lines.length - 1];
+  const endMarkerIdx = lastLine.lastByte + 1;
+
+  // If the end-of-program marker isn't present at the expected position,
+  // the early-end condition doesn't apply in its usual form.
+  const hasEndMarker =
+    prog.bytes[endMarkerIdx]?.v === 0x00 &&
+    prog.bytes[endMarkerIdx + 1]?.v === 0x00;
+  if (!hasEndMarker) return;
+
+  const firstLineOffset = prog.lines[0].firstByte;
+  const endIdx = firstLineOffset + (prog.header.endAddr - prog.header.startAddr) - 1;
+  const nextByteIdx = endMarkerIdx + 2;
+
+  if (nextByteIdx < endIdx) {
+    prog.earlyTermination = true;
+    lastLine.earlyEnd = true;
+    invalidateLineHealth(lastLine);
   }
 }
 
@@ -284,6 +331,7 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
 
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
+  flagEarlyEnd(prog);
   flagNonMonotonicLines(prog);
   flagTokenisationMismatches(prog);
   flagElementErrors(prog);
@@ -371,6 +419,7 @@ export function restoreLineToOriginalBytes(prog: Program, lineIdx: number): void
 
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
+  flagEarlyEnd(prog);
   flagNonMonotonicLines(prog);
   flagTokenisationMismatches(prog);
   flagElementErrors(prog);
@@ -565,6 +614,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
 
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
+  flagEarlyEnd(prog);
   flagNonMonotonicLines(prog);
   flagTokenisationMismatches(prog);
   flagElementErrors(prog);
@@ -724,6 +774,7 @@ export function splitLineWithEdits(
 
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
+  flagEarlyEnd(prog);
   flagNonMonotonicLines(prog);
   flagTokenisationMismatches(prog);
   flagElementErrors(prog);
@@ -830,6 +881,7 @@ export function joinLinesWithEdit(
 
   // Re-run all post-processing flags.
   flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
+  flagEarlyEnd(prog);
   flagNonMonotonicLines(prog);
   flagTokenisationMismatches(prog);
   flagElementErrors(prog);
@@ -977,4 +1029,126 @@ function tokenise(content: string): number[] {
   }
 
   return bytes;
+}
+
+// ── Pointers & terminators fix ────────────────────────────────────────────────
+
+/**
+ * Recalculate every line's next-line pointer from the current byte layout,
+ * replacing the existing pointer bytes (at line.firstByte, firstByte+1) with
+ * automatic-edit ByteInfo entries when they disagree.  Preserves the original
+ * ByteInfo when the computed value happens to match the original tape byte.
+ *
+ * Also reconciles per-line length-derived state: expectedLastByte is set to
+ * lastByte, and lenErr is cleared (the pointer now matches the line's actual
+ * extent by construction).
+ *
+ * Safe to call at any time: if every line's pointer already agrees with its
+ * layout, this is a no-op on prog.bytes.
+ */
+function fixLinePointers(prog: Program): void {
+  if (prog.lines.length === 0) return;
+
+  const progStartAddr   = prog.header.startAddr;
+  const firstLineOffset = prog.lines[0].firstByte;
+
+  for (let li = 0; li < prog.lines.length; li++) {
+    const line = prog.lines[li];
+    // Pointer value = memory address of the byte immediately after this
+    // line's terminator (i.e. where the next line, or end-of-program marker,
+    // begins).
+    const newPtrValue = progStartAddr + (line.lastByte + 1 - firstLineOffset);
+    const newPtrLo = newPtrValue & 0xFF;
+    const newPtrHi = (newPtrValue >> 8) & 0xFF;
+
+    const currentPtrValue = prog.bytes[line.firstByte].v | (prog.bytes[line.firstByte + 1].v << 8);
+
+    if (currentPtrValue !== newPtrValue) {
+      // Snapshot original bytes before replacing the pointer so we can store
+      // displaced originals in originalBytesDelta (matches adjustLineOffsets).
+      const fullOriginal = getFullOriginalBytes(prog, line);
+      prog.bytes[line.firstByte]     = fullOriginal.length > 0 && newPtrLo === fullOriginal[0].v ? fullOriginal[0]
+        : { v: newPtrLo, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+      prog.bytes[line.firstByte + 1] = fullOriginal.length > 1 && newPtrHi === fullOriginal[1].v ? fullOriginal[1]
+        : { v: newPtrHi, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+      storeOriginalBytesDelta(prog, line, fullOriginal);
+    }
+
+    // Pointer now matches actual layout — reconcile length-derived state.
+    line.expectedLastByte = line.lastByte;
+    line.lenErr = false;
+  }
+}
+
+/**
+ * Normalise the structural bytes of a BASIC program in place, so it round-trips
+ * cleanly through the TAP encoder/decoder cycle:
+ *
+ *   1. Ensure every line ends with a 0x00 terminator (inserting one where
+ *      missing, e.g. the recovered-last-line case where the decoder hit
+ *      end-of-stream before finding a terminator).
+ *   2. Ensure the 0x00 0x00 end-of-program marker is present immediately
+ *      after the last line.
+ *   3. Recalculate every line's next-line pointer to match the final byte
+ *      layout (catching both layout changes from step 1 and any pre-existing
+ *      pointer corruption).
+ *
+ * All inserted and replaced bytes are marked edited: 'automatic'.  Displaced
+ * originals are preserved in line.originalBytesDelta for phase 3 replacements;
+ * the inserted terminators and end-of-program bytes have no prior original.
+ *
+ * Trailing or preceding bytes in prog.bytes are never removed — the user may
+ * still care about them, and the TAP encoder simply doesn't include them in
+ * the serialised output.
+ *
+ * Idempotent: calling on an already-clean program produces no byte changes.
+ */
+export function fixPointersAndTerminators(prog: Program): void {
+  // Phase 1 — insert missing line terminators.
+  for (let li = 0; li < prog.lines.length; li++) {
+    const line = prog.lines[li];
+    if (prog.bytes[line.lastByte]?.v !== 0x00) {
+      const zero: ByteInfo = { v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+      prog.bytes.splice(line.lastByte + 1, 0, zero);
+      line.lastByte += 1;
+      // Shift subsequent lines' byte-stream positions to account for the
+      // inserted byte.  Pointer values are intentionally left stale here;
+      // phase 3 (fixLinePointers) recomputes them all from scratch.
+      for (let lj = li + 1; lj < prog.lines.length; lj++) {
+        prog.lines[lj].firstByte += 1;
+        prog.lines[lj].lastByte  += 1;
+      }
+    }
+  }
+
+  // Phase 2 — insert missing end-of-program marker (0x00 0x00).
+  if (prog.lines.length > 0) {
+    const lastLine = prog.lines[prog.lines.length - 1];
+    const endMarkerStart = lastLine.lastByte + 1;
+    // Count contiguous 0x00 bytes already present from endMarkerStart.  We
+    // want 2; insert however many are missing.  Never replace existing
+    // non-zero bytes — just splice zeros in before them.
+    let existing = 0;
+    while (existing < 2 && prog.bytes[endMarkerStart + existing]?.v === 0x00) existing++;
+    const needed = 2 - existing;
+    if (needed > 0) {
+      const insertPos = endMarkerStart + existing;
+      const toInsert: ByteInfo[] = [];
+      for (let i = 0; i < needed; i++) {
+        toInsert.push({ v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' });
+      }
+      prog.bytes.splice(insertPos, 0, ...toInsert);
+      // No LineInfo positions to update — the marker sits after the last line.
+    }
+  }
+
+  // Phase 3 — recalculate every line's next-line pointer.
+  fixLinePointers(prog);
+
+  // Re-run post-processing flags to reflect the now-normalised state.
+  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
+  flagEarlyEnd(prog);
+  flagNonMonotonicLines(prog);
+  flagTokenisationMismatches(prog);
+  flagElementErrors(prog);
 }

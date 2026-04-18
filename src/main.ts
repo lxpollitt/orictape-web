@@ -5,7 +5,7 @@ import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
-import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit, restoreLineToOriginalBytes } from './editor';
+import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit, restoreLineToOriginalBytes, fixPointersAndTerminators } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
   type MergedProgram,
@@ -25,6 +25,8 @@ const statusBar  = document.getElementById('statusbar')        as HTMLElement;
 const basicTypeEl  = document.getElementById('basic-type')      as HTMLElement;
 const wrapLabelEl      = document.getElementById('wrap-label')       as HTMLElement;
 const wrapToggle       = document.getElementById('wrap-toggle')      as HTMLInputElement;
+const fixLabelEl       = document.getElementById('fix-label')        as HTMLElement;
+const fixToggle        = document.getElementById('fix-toggle')       as HTMLInputElement;
 const normaliseToggle  = document.getElementById('normalise-toggle') as HTMLInputElement;
 const zoomInBtn        = document.getElementById('zoom-in')          as HTMLButtonElement;
 const zoomOutBtn       = document.getElementById('zoom-out')         as HTMLButtonElement;
@@ -137,6 +139,19 @@ normaliseToggle.addEventListener('change', () => {
 });
 waveform.setNormaliseCallback((checked) => {
   normaliseToggle.checked = checked;
+});
+
+// Fix pointers & terminators checkbox — runs fixPointersAndTerminators on the
+// current program each time it is toggled off → on, then re-renders.  Step 1a
+// semantics: always visible (when a single program is shown) and always
+// enabled; unchecking is a no-op.  Step 1b will later tie the checkbox's
+// visible/enabled state to whether the program currently has fixable issues.
+fixToggle.addEventListener('change', () => {
+  if (!fixToggle.checked) return;
+  const prog = programs[activeProgIdx];
+  if (!prog) return;
+  fixPointersAndTerminators(prog);
+  renderAll();
 });
 
 zoomInBtn   .addEventListener('click', () => waveform.zoomIn());
@@ -434,6 +449,9 @@ function renderAll(): void {
     const merged    = userMerge?.result ?? null;
     basicTypeEl.textContent = 'BASIC program (merged)';
     wrapLabelEl.hidden = !merged;
+    // Fix pointers & terminators operates on a single Program; it is not
+    // wired up for merged programs yet (see the merger-byte-stream todo).
+    fixLabelEl.hidden = true;
     if (!merged) { clearPanels(); return; }
     renderMergeView(merged);
     renderMergedHex(merged);
@@ -453,6 +471,7 @@ function renderAll(): void {
   const prog = programs[activeProgIdx];
   basicTypeEl.textContent = prog ? 'BASIC program' : '';
   wrapLabelEl.hidden = !prog;
+  fixLabelEl.hidden = !prog;
   if (!prog) { clearPanels(); return; }
   renderHex(prog);
   renderBasic(prog);
