@@ -3,7 +3,7 @@ import { parseWavFile } from './wavfile';
 import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
-import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary } from './decoder';
+import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary, lineFirstAddr } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
 import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit, restoreLineToOriginalBytes, fixPointersAndTerminators } from './editor';
 import {
@@ -719,7 +719,6 @@ function insertNewLine(prog: Program, insertAt: number): void {
   for (let li = insertAt; li < prog.lines.length; li++) {
     prog.lines[li].firstByte += 5;
     prog.lines[li].lastByte  += 5;
-    prog.lines[li].expectedLastByte += 5;
   }
 
   // Create the new LineInfo entry (empty — user will type the line number and content).
@@ -728,9 +727,7 @@ function insertNewLine(prog: Program, insertAt: number): void {
     elements: [],
     firstByte: bytePos,
     lastByte: bytePos + 4,
-    expectedLastByte: bytePos + 4,
     lenErr: false,
-    memAddr: 0,
   };
   prog.lines.splice(insertAt, 0, newLine);
 
@@ -2385,12 +2382,13 @@ function progByteAddr(prog: Program, byteIdx: number): string | null {
 
   // Find the line that contains this byte, or fall back to the last line for
   // bytes beyond the last parsed line (e.g. orphaned post-program bytes).
-  // Use line.memAddr (derived from the chain of next-line pointers) so the
+  // Use lineFirstAddr (derived from the chain of next-line pointers) so the
   // address stays correct even when the byte stream has gained or lost bytes
   // due to corruption.
-  const line = lines.find(l => byteIdx >= l.firstByte && byteIdx <= l.lastByte)
-            ?? lines[lines.length - 1];
-  const addr = line.memAddr + (byteIdx - line.firstByte);
+  let lineIdx = lines.findIndex(l => byteIdx >= l.firstByte && byteIdx <= l.lastByte);
+  if (lineIdx === -1) lineIdx = lines.length - 1;
+  const line = lines[lineIdx];
+  const addr = lineFirstAddr(prog, lineIdx) + (byteIdx - line.firstByte);
   return '$' + (addr & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
 }
 

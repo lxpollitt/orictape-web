@@ -32,11 +32,7 @@ export interface LineInfo {
   elements: string[];
   firstByte: number;
   lastByte: number;
-  expectedLastByte: number;
   lenErr: boolean;
-  /** Oric memory address of this line's first byte, derived from the
-   *  header start address and the chain of next-line pointers. */
-  memAddr: number;
   /** Set on the last parsed line when the BASIC end-of-program null pointer
    *  was encountered before the header's declared end address.  The line
    *  itself may be byte-clean; the flag marks the point where the program
@@ -124,6 +120,29 @@ export function invalidateLineHealth(line: LineInfo): void {
 }
 
 /**
+ * Oric memory address of this line's first byte.  For the first line this is
+ * the header's start address; for subsequent lines it's the previous line's
+ * next-line pointer value.  Pointer-driven: if a previous line had a corrupt
+ * pointer, this line's firstAddr reflects what the pointer SAYS rather than
+ * where the bytes actually sit in the canonical byte-position-to-address
+ * mapping.  The divergence shows up as lenErr.
+ */
+export function lineFirstAddr(prog: Program, lineIdx: number): number {
+  if (lineIdx === 0) return prog.header.startAddr;
+  return lineNextAddr(prog, lineIdx - 1);
+}
+
+/**
+ * Value of this line's next-line pointer (2 bytes at firstByte, little-endian)
+ * \u2014 the memory address where the next line should start.  Read directly
+ * from prog.bytes so it's always consistent with the current byte state.
+ */
+export function lineNextAddr(prog: Program, lineIdx: number): number {
+  const line = prog.lines[lineIdx];
+  return prog.bytes[line.firstByte].v | (prog.bytes[line.firstByte + 1].v << 8);
+}
+
+/**
  * Return true if the line has any hard error (chkErr bytes, structural issues).
  * Unclear-only lines return false.
  */
@@ -143,8 +162,8 @@ export function lineStatuses(prog: Program, lineIdx: number): LineStatus[] {
     statuses.push({ message: 'Unexpected end of program · null pointer before header end address', severity: 'error' });
   }
   if (line.lenErr) {
-    const expected = line.expectedLastByte - line.firstByte + 1;
-    const actual   = line.lastByte         - line.firstByte + 1;
+    const expected = lineNextAddr(prog, lineIdx) - lineFirstAddr(prog, lineIdx);
+    const actual   = line.lastByte - line.firstByte + 1;
     statuses.push({ message: `Line length error (expected ${expected} bytes, found ${actual})`, severity: 'error' });
   }
   if (line.nonMonotonic) {
@@ -1017,11 +1036,10 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     endIdx = firstContentIdx + (endAddr - startAddr) - 1;
   }
 
-  // Program lines.
-  // correctionOffset converts memory addresses (from next-line pointers) to byte indices.
-  // Initialised from the header's startAddr and adjusted for each length error.
-  let correctionOffset = startAddr - nextByte;
-  let lineMemAddr = startAddr; // memory address of the line we are about to push
+  // Program lines.  lenErr is computed per-line via the self-consistency
+  // equation (declared size = nextAddr - firstAddr vs actual = lastByte -
+  // firstByte + 1), with firstAddr tracked across iterations.
+  let currentFirstAddr = startAddr;
   while (true) {
     const lineStart = nextByte;
 
@@ -1032,10 +1050,9 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     if (nextByte > endIdx - 2) break;
 
     // Read the raw pointer first; a zero value signals end-of-program.
-    // The correctionOffset is applied afterwards, matching the Go original.
-    const rawLineStart = getByte() + 256 * getByte();
+    const rawNextAddr = getByte() + 256 * getByte();
     if (!ok) break;
-    if (rawLineStart === 0) {
+    if (rawNextAddr === 0) {
       // Condition 1 handles the common end-of-program where only 2 bytes
       // (the 0x00 0x00 marker) remain.  However, endAddr (exclusive) sometimes
       // points one byte past the marker, leaving one extra byte in range when
@@ -1049,7 +1066,6 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
       }
       break;
     }
-    const nextLineStart = rawLineStart - correctionOffset;
 
     // Read line number (2 bytes) and content bytes (until 0x00 terminator)
     // to advance nextByte.
@@ -1059,30 +1075,27 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
       if (b === 0) break;
     }
 
+    const declaredSize = rawNextAddr - currentFirstAddr;
+    const actualSize   = nextByte - lineStart;
     const lineInfo: LineInfo = {
       v: '',
       elements: [],
       firstByte: lineStart,
       lastByte:  nextByte - 1,
-      expectedLastByte: nextLineStart - 1,
-      lenErr: nextLineStart !== nextByte,
-      memAddr: lineMemAddr,
+      lenErr: declaredSize !== actualSize,
     };
     prog.lines.push(lineInfo);
     buildLineElements(lineInfo, prog.bytes);
-    correctionOffset += nextLineStart - nextByte;
-    // rawLineStart is the memory address of the *next* line.
-    lineMemAddr = rawLineStart;
+    currentFirstAddr = rawNextAddr;  // next iteration's first line starts here
   }
 
-  // Without a header, startAddr is guessed — derive it from the first line's pointer
-  // and suppress the first line's length check.
+  // Without a header, startAddr is guessed — derive it from the first line's
+  // pointer and suppress the first line's length check.
   if (skipHeader && prog.lines.length > 0) {
     const firstLine = prog.lines[0];
     const ptr = prog.bytes[firstLine.firstByte].v | (prog.bytes[firstLine.firstByte + 1].v << 8);
     prog.header.startAddr = ptr - (firstLine.lastByte - firstLine.firstByte + 1);
     firstLine.lenErr = false;
-    firstLine.expectedLastByte = firstLine.lastByte;
   }
 
 }
@@ -1144,23 +1157,17 @@ export function flagNonMonotonicLines(prog: Program): void {
 
 /**
  * TODO: development aid — comment out when not debugging editing.
- * Recalculate lenErr for all lines by comparing each line's next-line pointer
- * against where its content ends.
+ * Recalculate lenErr for all lines by comparing each line's declared extent
+ * (nextAddr - firstAddr) against its actual extent (lastByte - firstByte + 1).
+ * Per-line self-consistency check — no accumulator needed.
  */
 export function flagLenErrors(prog: Program): void {
-  if (prog.lines.length === 0) return;
-  // Converts a memory address to a byte index: byteIdx = memAddr + addrToByte.
-  // Adjusted after each length error to account for gaps in the byte stream.
-  let addrToByte = prog.lines[0].firstByte - prog.header.startAddr;
-
   for (let li = 0; li < prog.lines.length; li++) {
     const line = prog.lines[li];
-    const ptr = prog.bytes[line.firstByte].v | (prog.bytes[line.firstByte + 1].v << 8);
-    const nextLineBytePos = ptr + addrToByte;
-    const errorAmount = nextLineBytePos - (line.lastByte + 1);
-    line.lenErr = (errorAmount !== 0);
+    const declaredSize = lineNextAddr(prog, li) - lineFirstAddr(prog, li);
+    const actualSize   = line.lastByte - line.firstByte + 1;
+    line.lenErr = (declaredSize !== actualSize);
     invalidateLineHealth(line);
-    if (errorAmount !== 0) addrToByte -= errorAmount;
   }
 }
 
@@ -1238,9 +1245,7 @@ function hasPointerAndTerminatorIssues(prog: Program): boolean {
       prog.bytes[endMarkerIdx + 1]?.v !== 0x00) return true;
 
   // 3. Any line with an incorrect next-line pointer?  Uses the lenErr flag,
-  //    which reflects "pointer doesn't match extent".  Assumes the lenErr /
-  //    expectedLastByte paradigm keeps pace with edits — any gaps there are
-  //    tracked under a separate todo.
+  //    which reflects "pointer doesn't match extent".
   for (const line of prog.lines) {
     if (line.lenErr) return true;
   }

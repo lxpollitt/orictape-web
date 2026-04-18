@@ -343,16 +343,12 @@ export function restoreLineToOriginalBytes(prog: Program, lineIdx: number): void
     const segOriginal = fullOriginal.slice(seg.startOffset, Math.min(seg.endOffset + 1, fullOriginal.length));
     const lineFirstByte = oldFirst + seg.startOffset;
     const lineLastByte = oldFirst + seg.endOffset;
-    // TODO: expectedLastByte should be derived from pointer value with correction offset.
-    // For now use lastByte as placeholder — flagLenErrors will set lenErr correctly.
     const newLine: LineInfo = {
       v: '',
       elements: [],
       firstByte: lineFirstByte,
       lastByte: lineLastByte,
-      expectedLastByte: lineLastByte, // TODO: this is wrong! Needs to be derived from next-line pointer bytes
-      lenErr: false,
-      memAddr: 0,
+      lenErr: false,  // flagLenErrors (called via flagAll) will set correctly.
     };
     buildLineElements(newLine, prog.bytes);
     storeOriginalBytesDelta(prog, newLine, segOriginal);
@@ -435,7 +431,7 @@ function spliceMergedBytes(
 /**
  * Adjust a range of lines' byte stream pointers and line info by a delta.
  * For each line: offsets the next-line pointer value in the byte stream,
- * then shifts firstByte/lastByte/expectedLastByte.
+ * then shifts firstByte/lastByte.
  */
 function adjustLineOffsets(prog: Program, delta: number, firstLineIdx: number, lastLineIdx?: number): void {
   if (delta === 0) return;
@@ -445,7 +441,6 @@ function adjustLineOffsets(prog: Program, delta: number, firstLineIdx: number, l
     // Update line info first so getFullOriginalBytes reads the correct position.
     l.firstByte += delta;
     l.lastByte  += delta;
-    l.expectedLastByte += delta;
     // Snapshot original bytes before replacing the pointer.
     const fullOriginal = getFullOriginalBytes(prog, l);
     // Offset existing pointer values in the byte stream by delta.
@@ -543,7 +538,6 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
 
   const delta = spliceMergedBytes(prog.bytes, oldFirst, oldLast, mergedLine);
   line.lastByte = oldFirst + mergedLine.length - 1;
-  line.expectedLastByte = line.lastByte;
   line.lenErr = false;
 
   // Update the edited line's elements and display text from its bytes.
@@ -687,7 +681,6 @@ export function splitLineWithEdits(
   // Update the first line's info.
   const firstLineLastByteIndex = oldFirstByteIndex + firstMerged.length - 1;
   oldLine.lastByte = firstLineLastByteIndex;
-  oldLine.expectedLastByte = firstLineLastByteIndex;
   oldLine.lenErr = false;
   buildLineElements(oldLine, prog.bytes);
   storeOriginalBytesDelta(prog, oldLine, firstOriginalBytes);
@@ -700,9 +693,7 @@ export function splitLineWithEdits(
     elements: [],
     firstByte: secondLineFirstByteIndex,
     lastByte: secondLineLastByteIndex,
-    expectedLastByte: secondLineLastByteIndex,
     lenErr: false,
-    memAddr: 0,
   };
   prog.lines.splice(lineIdx + 1, 0, newLine);
   buildLineElements(newLine, prog.bytes);
@@ -804,7 +795,6 @@ export function joinLinesWithEdit(
 
   // Update the first (surviving) line's info.
   first.lastByte = first.firstByte + mergedLine.length - 1;
-  first.expectedLastByte = first.lastByte;
   first.lenErr = false;
   buildLineElements(first, prog.bytes);
   storeOriginalBytesDelta(prog, first, fullOriginal);
@@ -971,9 +961,8 @@ function tokenise(content: string): number[] {
  * automatic-edit ByteInfo entries when they disagree.  Preserves the original
  * ByteInfo when the computed value happens to match the original tape byte.
  *
- * Also reconciles per-line length-derived state: expectedLastByte is set to
- * lastByte, and lenErr is cleared (the pointer now matches the line's actual
- * extent by construction).
+ * Clears lenErr on every line — the pointer now matches the line's actual
+ * extent by construction.
  *
  * Safe to call at any time: if every line's pointer already agrees with its
  * layout, this is a no-op on prog.bytes.
@@ -1006,8 +995,6 @@ function fixLinePointers(prog: Program): void {
       storeOriginalBytesDelta(prog, line, fullOriginal);
     }
 
-    // Pointer now matches actual layout — reconcile length-derived state.
-    line.expectedLastByte = line.lastByte;
     line.lenErr = false;
   }
 }
