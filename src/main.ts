@@ -472,6 +472,14 @@ function renderAll(): void {
   basicTypeEl.textContent = prog ? 'BASIC program' : '';
   wrapLabelEl.hidden = !prog;
   fixLabelEl.hidden = !prog;
+  if (prog) {
+    // Reflect whether the program has any pointer/terminator issues: checkbox
+    // is unchecked + enabled when there are issues to fix, checked + disabled
+    // when everything is already clean ("in fixed state").
+    const hasIssues = !!prog.pointerAndTerminatorIssues;
+    fixToggle.checked  = !hasIssues;
+    fixToggle.disabled = !hasIssues;
+  }
   if (!prog) { clearPanels(); return; }
   renderHex(prog);
   renderBasic(prog);

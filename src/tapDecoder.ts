@@ -1,5 +1,5 @@
 import type { ByteInfo, BitStream, Program } from './decoder';
-import { readProgramLines, flagNonMonotonicLines, flagElementErrors } from './decoder';
+import { readProgramLines, flagNonMonotonicLines, flagElementErrors, flagPointerAndTerminatorIssues } from './decoder';
 import { flagTokenisationMismatches } from './editor';
 import { TAP_META_MAGIC, type TapMetadata } from './tapCommon';
 
@@ -248,6 +248,7 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     flagNonMonotonicLines(prog);
     flagTokenisationMismatches(prog);
     flagElementErrors(prog);
+    flagPointerAndTerminatorIssues(prog);
 
     // Include the program if it has BASIC lines OR a valid header (machine code).
     if (prog.lines.length > 0 || prog.header.fileType !== 0) {

@@ -36,7 +36,27 @@
 
 import { KEYWORDS, TOKEN_REM, TOKEN_BANG, TOKEN_DATA, INVALID_CODE_LITERALS } from './decoder';
 import type { Program, ByteInfo, LineInfo } from './decoder';
-import { flagNonMonotonicLines, flagElementErrors, buildLineElements, invalidateLineHealth } from './decoder';
+import {
+  flagNonMonotonicLines, flagElementErrors, flagLenErrors, flagEarlyEnd,
+  flagPointerAndTerminatorIssues, buildLineElements, invalidateLineHealth,
+} from './decoder';
+
+/**
+ * Recompute every program-level and line-level flag in one go.  Called by each
+ * editor operation at the end, after the operation has mutated prog.bytes /
+ * prog.lines, so all status fields reflect the current state.  The order
+ * matters: flagLenErrors must run before flagPointerAndTerminatorIssues (which
+ * reads line.lenErr) and before flagEarlyEnd (not order-sensitive itself but
+ * grouped with the other length-related flags for readability).
+ */
+export function flagAll(prog: Program): void {
+  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
+  flagEarlyEnd(prog);
+  flagPointerAndTerminatorIssues(prog);
+  flagNonMonotonicLines(prog);
+  flagTokenisationMismatches(prog);
+  flagElementErrors(prog);
+}
 
 export interface ParsedLine {
   lineNum: number;
@@ -175,74 +195,6 @@ export function flagTokenisationMismatches(prog: Program): void {
 }
 
 /**
- * Re-evaluate earlyEnd (on the last line) and earlyTermination (program-level)
- * from current state.  Idempotent: callable at any time after a byte-count
- * change to keep the flags in sync with reality.
- *
- * Mirrors the decoder's original check in readProgramLines: the program-end
- * marker (0x00 0x00) is present and its position is at least 2 bytes before
- * the byte position implied by the header's endAddr.  The "at least 2"
- * tolerance absorbs a known off-by-one case where endAddr sometimes points
- * exactly one byte past the marker (not treated as genuinely early).
- */
-export function flagEarlyEnd(prog: Program): void {
-  // Clear across all lines defensively, in case line structure has changed
-  // (e.g. lines added/removed by an edit).  Only the last line may genuinely
-  // carry this flag on re-evaluation.
-  for (const line of prog.lines) {
-    if (line.earlyEnd) {
-      line.earlyEnd = undefined;
-      invalidateLineHealth(line);
-    }
-  }
-  prog.earlyTermination = undefined;
-
-  if (prog.lines.length === 0) return;
-
-  const lastLine = prog.lines[prog.lines.length - 1];
-  const endMarkerIdx = lastLine.lastByte + 1;
-
-  // If the end-of-program marker isn't present at the expected position,
-  // the early-end condition doesn't apply in its usual form.
-  const hasEndMarker =
-    prog.bytes[endMarkerIdx]?.v === 0x00 &&
-    prog.bytes[endMarkerIdx + 1]?.v === 0x00;
-  if (!hasEndMarker) return;
-
-  const firstLineOffset = prog.lines[0].firstByte;
-  const endIdx = firstLineOffset + (prog.header.endAddr - prog.header.startAddr) - 1;
-  const nextByteIdx = endMarkerIdx + 2;
-
-  if (nextByteIdx < endIdx) {
-    prog.earlyTermination = true;
-    lastLine.earlyEnd = true;
-    invalidateLineHealth(lastLine);
-  }
-}
-
-/**
- * TODO: development aid — comment out when not debugging editing.
- * Recalculate lenErr for all lines by comparing each line's next-line pointer
- * against where its content ends.
- */
-function flagLenErrors(prog: Program): void {
-  if (prog.lines.length === 0) return;
-  // Converts a memory address to a byte index: byteIdx = memAddr + addrToByte.
-  // Adjusted after each length error to account for gaps in the byte stream.
-  let addrToByte = prog.lines[0].firstByte - prog.header.startAddr;
-
-  for (let li = 0; li < prog.lines.length; li++) {
-    const line = prog.lines[li];
-    const ptr = prog.bytes[line.firstByte].v | (prog.bytes[line.firstByte + 1].v << 8);
-    const nextLineBytePos = ptr + addrToByte;
-    const errorAmount = nextLineBytePos - (line.lastByte + 1);
-    line.lenErr = (errorAmount !== 0);
-    invalidateLineHealth(line);
-    if (errorAmount !== 0) addrToByte -= errorAmount;
-  }
-}
-
-/**
  * Reconstruct the full original bytes for a line from its delta and current bytes.
  * Combines non-edited current bytes with the stored delta, sorted by originalIndex.
  */
@@ -330,11 +282,7 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
   storeOriginalBytesDelta(prog, prog.lines[adjustedInheritIdx], inheritOriginal);
 
   // Re-run all post-processing flags.
-  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
-  flagEarlyEnd(prog);
-  flagNonMonotonicLines(prog);
-  flagTokenisationMismatches(prog);
-  flagElementErrors(prog);
+  flagAll(prog);
 }
 
 /**
@@ -418,11 +366,7 @@ export function restoreLineToOriginalBytes(prog: Program, lineIdx: number): void
   adjustLineOffsets(prog, delta, lineIdx + lineInfos.length);
 
   // Re-run all post-processing flags.
-  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
-  flagEarlyEnd(prog);
-  flagNonMonotonicLines(prog);
-  flagTokenisationMismatches(prog);
-  flagElementErrors(prog);
+  flagAll(prog);
 }
 
 /**
@@ -613,11 +557,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   adjustLineOffsets(prog, delta, lineIdx + 1);
 
   // Re-run all post-processing flags.
-  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
-  flagEarlyEnd(prog);
-  flagNonMonotonicLines(prog);
-  flagTokenisationMismatches(prog);
-  flagElementErrors(prog);
+  flagAll(prog);
 }
 
 /**
@@ -773,11 +713,7 @@ export function splitLineWithEdits(
   adjustLineOffsets(prog, delta, lineIdx + 2);
 
   // Re-run all post-processing flags.
-  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
-  flagEarlyEnd(prog);
-  flagNonMonotonicLines(prog);
-  flagTokenisationMismatches(prog);
-  flagElementErrors(prog);
+  flagAll(prog);
 
   return lineIdx + 1;
 }
@@ -880,11 +816,7 @@ export function joinLinesWithEdit(
   adjustLineOffsets(prog, delta, secondIdx);
 
   // Re-run all post-processing flags.
-  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
-  flagEarlyEnd(prog);
-  flagNonMonotonicLines(prog);
-  flagTokenisationMismatches(prog);
-  flagElementErrors(prog);
+  flagAll(prog);
 
   return joinPoint;
 }
@@ -1146,9 +1078,5 @@ export function fixPointersAndTerminators(prog: Program): void {
   fixLinePointers(prog);
 
   // Re-run post-processing flags to reflect the now-normalised state.
-  flagLenErrors(prog);  // TODO: development aid — comment out when not debugging editing.
-  flagEarlyEnd(prog);
-  flagNonMonotonicLines(prog);
-  flagTokenisationMismatches(prog);
-  flagElementErrors(prog);
+  flagAll(prog);
 }

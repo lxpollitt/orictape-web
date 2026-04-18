@@ -323,6 +323,11 @@ header h1 {
    in the right-side group within basic-header's space-between layout. */
 #fix-label { margin-left: auto; }
 #wrap-label { margin-left: 10px; }
+/* When the fix checkbox is disabled (program is in fixed state), make the
+   whole label much more subtle so it recedes visually — the user knows it's
+   there but it doesn't compete for attention. */
+#fix-label:has(:disabled) { opacity: 0.3; cursor: default; }
+#fix-label:has(:disabled):hover { opacity: 0.3; }
 
 #basic-view {
   flex: 1;

@@ -406,6 +406,11 @@ export interface Program {
    *  pointer sits right at endAddr–2, so this flag fires only when the
    *  pointer appears unexpectedly early. */
   earlyTermination?: boolean;
+  /** True when the program has one or more issues that
+   *  fixPointersAndTerminators would address — i.e. a missing line
+   *  terminator, missing end-of-program marker, or a next-line pointer
+   *  inconsistent with a line's actual extent. */
+  pointerAndTerminatorIssues?: boolean;
 }
 
 export const KEYWORDS: string[] = [
@@ -859,6 +864,7 @@ export function readPrograms(streams: BitStream[]): Program[] {
       flagNonMonotonicLines(prog);
       flagTokenisationMismatches(prog);
       flagElementErrors(prog);
+      flagPointerAndTerminatorIssues(prog);
       programs.push(prog);
     }
   }
@@ -1134,4 +1140,110 @@ export function flagNonMonotonicLines(prog: Program): void {
     prog.lines[i].nonMonotonic = !inLIS[i] || undefined;
     invalidateLineHealth(prog.lines[i]);
   }
+}
+
+/**
+ * TODO: development aid — comment out when not debugging editing.
+ * Recalculate lenErr for all lines by comparing each line's next-line pointer
+ * against where its content ends.
+ */
+export function flagLenErrors(prog: Program): void {
+  if (prog.lines.length === 0) return;
+  // Converts a memory address to a byte index: byteIdx = memAddr + addrToByte.
+  // Adjusted after each length error to account for gaps in the byte stream.
+  let addrToByte = prog.lines[0].firstByte - prog.header.startAddr;
+
+  for (let li = 0; li < prog.lines.length; li++) {
+    const line = prog.lines[li];
+    const ptr = prog.bytes[line.firstByte].v | (prog.bytes[line.firstByte + 1].v << 8);
+    const nextLineBytePos = ptr + addrToByte;
+    const errorAmount = nextLineBytePos - (line.lastByte + 1);
+    line.lenErr = (errorAmount !== 0);
+    invalidateLineHealth(line);
+    if (errorAmount !== 0) addrToByte -= errorAmount;
+  }
+}
+
+/**
+ * Re-evaluate earlyEnd (on the last line) and earlyTermination (program-level)
+ * from current state.  Idempotent: callable at any time after a byte-count
+ * change to keep the flags in sync with reality.
+ *
+ * Mirrors the decoder's original check in readProgramLines: the program-end
+ * marker (0x00 0x00) is present and its position is at least 2 bytes before
+ * the byte position implied by the header's endAddr.  The "at least 2"
+ * tolerance absorbs a known off-by-one case where endAddr sometimes points
+ * exactly one byte past the marker (not treated as genuinely early).
+ */
+export function flagEarlyEnd(prog: Program): void {
+  // Clear across all lines defensively, in case line structure has changed
+  // (e.g. lines added/removed by an edit).  Only the last line may genuinely
+  // carry this flag on re-evaluation.
+  for (const line of prog.lines) {
+    if (line.earlyEnd) {
+      line.earlyEnd = undefined;
+      invalidateLineHealth(line);
+    }
+  }
+  prog.earlyTermination = undefined;
+
+  if (prog.lines.length === 0) return;
+
+  const lastLine = prog.lines[prog.lines.length - 1];
+  const endMarkerIdx = lastLine.lastByte + 1;
+
+  // If the end-of-program marker isn't present at the expected position,
+  // the early-end condition doesn't apply in its usual form.
+  const hasEndMarker =
+    prog.bytes[endMarkerIdx]?.v === 0x00 &&
+    prog.bytes[endMarkerIdx + 1]?.v === 0x00;
+  if (!hasEndMarker) return;
+
+  const firstLineOffset = prog.lines[0].firstByte;
+  const endIdx = firstLineOffset + (prog.header.endAddr - prog.header.startAddr) - 1;
+  const nextByteIdx = endMarkerIdx + 2;
+
+  if (nextByteIdx < endIdx) {
+    prog.earlyTermination = true;
+    lastLine.earlyEnd = true;
+    invalidateLineHealth(lastLine);
+  }
+}
+
+/**
+ * Set prog.pointerAndTerminatorIssues to reflect whether fixPointersAndTerminators
+ * would make any byte change on the program: missing line terminator, missing
+ * end-of-program marker, or a next-line pointer inconsistent with a line's
+ * actual extent.
+ *
+ * Relies on line.lenErr being fresh — callers should invoke this after
+ * flagLenErrors in the flag cascade.
+ */
+export function flagPointerAndTerminatorIssues(prog: Program): void {
+  prog.pointerAndTerminatorIssues = hasPointerAndTerminatorIssues(prog) || undefined;
+}
+
+function hasPointerAndTerminatorIssues(prog: Program): boolean {
+  if (prog.lines.length === 0) return false;
+
+  // 1. Any line missing its 0x00 terminator?
+  for (const line of prog.lines) {
+    if (prog.bytes[line.lastByte]?.v !== 0x00) return true;
+  }
+
+  // 2. End-of-program marker absent?
+  const lastLine = prog.lines[prog.lines.length - 1];
+  const endMarkerIdx = lastLine.lastByte + 1;
+  if (prog.bytes[endMarkerIdx]?.v !== 0x00 ||
+      prog.bytes[endMarkerIdx + 1]?.v !== 0x00) return true;
+
+  // 3. Any line with an incorrect next-line pointer?  Uses the lenErr flag,
+  //    which reflects "pointer doesn't match extent".  Assumes the lenErr /
+  //    expectedLastByte paradigm keeps pace with edits — any gaps there are
+  //    tracked under a separate todo.
+  for (const line of prog.lines) {
+    if (line.lenErr) return true;
+  }
+
+  return false;
 }
