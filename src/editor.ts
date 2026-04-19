@@ -42,6 +42,29 @@ import {
 } from './decoder';
 
 /**
+ * Verbose debug logging for edit-related operations — off by default to keep
+ * tool output (snapshot.ts, compareTaps.ts) readable and the browser console
+ * quiet.  Enable at runtime without rebuilding:
+ *   - Browser: in devtools, run `localStorage.debug = '1'` and reload
+ *   - Node (snapshot / compareTaps): run with `DEBUG=1 npx tsx …`
+ * Evaluated once at module load so no per-call overhead when off.  console.warn
+ * calls (genuine error conditions) are never gated.  We read `process.env` via
+ * globalThis with a minimal structural cast to avoid needing @types/node just
+ * for this one reference.
+ */
+const DEBUG = (() => {
+  // Browser: localStorage.debug === '1'.  Node exposes a partial localStorage
+  // declaration in recent versions (22+) that passes `typeof !== 'undefined'`
+  // but throws on getItem without --experimental-webstorage, so we also check
+  // that getItem is actually callable.
+  const ls = (globalThis as { localStorage?: Storage }).localStorage;
+  if (ls && typeof ls.getItem === 'function' && ls.getItem('debug') === '1') return true;
+  // Node: DEBUG env var.  Read via globalThis to avoid needing @types/node.
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  return proc?.env?.DEBUG === '1';
+})();
+
+/**
  * Recompute every program-level and line-level flag in one go.  Called by each
  * editor operation at the end, after the operation has mutated prog.bytes /
  * prog.lines, so all status fields reflect the current state.  The order
@@ -209,12 +232,14 @@ function getFullOriginalBytesInRange(
   const nonEdited = currentBytes.filter(b => !b.edited);
   const deltaBytes = delta || [];
   const result = [...nonEdited, ...deltaBytes].sort((a, b) => (a.originalIndex ?? 0) - (b.originalIndex ?? 0));
-  const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
-  console.log(`getFullOriginalBytesInRange [${firstByte}..${lastByte}]: ${result.length} original (${nonEdited.length} non-edited + ${deltaBytes.length} delta)`,
-    `\n  current: [${currentBytes.map(hx).join(' ')}]`,
-    `\n  non-edited: [${nonEdited.map(hx).join(' ')}]`,
-    `\n  delta: [${deltaBytes.map(hx).join(' ')}]`,
-    `\n  result: [${result.map(hx).join(' ')}]`);
+  if (DEBUG) {
+    const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
+    console.log(`getFullOriginalBytesInRange [${firstByte}..${lastByte}]: ${result.length} original (${nonEdited.length} non-edited + ${deltaBytes.length} delta)`,
+      `\n  current: [${currentBytes.map(hx).join(' ')}]`,
+      `\n  non-edited: [${nonEdited.map(hx).join(' ')}]`,
+      `\n  delta: [${deltaBytes.map(hx).join(' ')}]`,
+      `\n  result: [${result.map(hx).join(' ')}]`);
+  }
   return result;
 }
 
@@ -235,13 +260,15 @@ function computeOriginalBytesDelta(
       .map(b => b.originalIndex)
   );
   const delta = fullOriginal.filter(b => !keptIndices.has(b.originalIndex));
-  const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
-  const currentBytes = prog.bytes.slice(firstByte, lastByte + 1);
-  console.log(`computeOriginalBytesDelta [${firstByte}..${lastByte}]: ${fullOriginal.length} original, ${delta.length} delta`,
-    `\n  fullOriginal: [${fullOriginal.map(hx).join(' ')}]`,
-    `\n  current: [${currentBytes.map(hx).join(' ')}]`,
-    `\n  kept: [${currentBytes.filter(b => !b.edited).map(hx).join(' ')}]`,
-    `\n  delta: [${delta.map(hx).join(' ')}]`);
+  if (DEBUG) {
+    const hx = (b: ByteInfo) => `${b.v.toString(16).padStart(2, '0')}${b.edited ? '(' + b.edited[0] + ')' : ''}`;
+    const currentBytes = prog.bytes.slice(firstByte, lastByte + 1);
+    console.log(`computeOriginalBytesDelta [${firstByte}..${lastByte}]: ${fullOriginal.length} original, ${delta.length} delta`,
+      `\n  fullOriginal: [${fullOriginal.map(hx).join(' ')}]`,
+      `\n  current: [${currentBytes.map(hx).join(' ')}]`,
+      `\n  kept: [${currentBytes.filter(b => !b.edited).map(hx).join(' ')}]`,
+      `\n  delta: [${delta.map(hx).join(' ')}]`);
+  }
   return delta.length > 0 ? delta : undefined;
 }
 
@@ -666,20 +693,22 @@ export function splitLineWithEdits(
   const matches = computeLcs(newValues, oldValues);
 
   // Debug: log the LCS results for verification.
-  const hex = (arr: number[]) => arr.map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
-  console.log('splitLineWithEdits LCS:', {
-    firstText,
-    secondText,
-    newFirstHalf: hex(newValues.slice(0, splitPoint)),
-    newSecondHalf: hex(newValues.slice(splitPoint)),
-    oldValues: hex(oldValues),
-    splitPoint,
-    matches,
-    matchesInFirst: matches.filter(m => m.newIdx < splitPoint).length
-      + ' — ' + hex(matches.filter(m => m.newIdx < splitPoint).map(m => newValues[m.newIdx])),
-    matchesInSecond: matches.filter(m => m.newIdx >= splitPoint).length
-      + ' — ' + hex(matches.filter(m => m.newIdx >= splitPoint).map(m => newValues[m.newIdx])),
-  });
+  if (DEBUG) {
+    const hex = (arr: number[]) => arr.map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    console.log('splitLineWithEdits LCS:', {
+      firstText,
+      secondText,
+      newFirstHalf: hex(newValues.slice(0, splitPoint)),
+      newSecondHalf: hex(newValues.slice(splitPoint)),
+      oldValues: hex(oldValues),
+      splitPoint,
+      matches,
+      matchesInFirst: matches.filter(m => m.newIdx < splitPoint).length
+        + ' — ' + hex(matches.filter(m => m.newIdx < splitPoint).map(m => newValues[m.newIdx])),
+      matchesInSecond: matches.filter(m => m.newIdx >= splitPoint).length
+        + ' — ' + hex(matches.filter(m => m.newIdx >= splitPoint).map(m => newValues[m.newIdx])),
+    });
+  }
 
   // --- Build merged bytes for each half ---
   const firstMerged = buildMergedBytes(newValues, fullOriginalBytes, matches, 0, splitPoint - 1);
@@ -705,11 +734,13 @@ export function splitLineWithEdits(
   if (firstMerged[1].edited === 'explicit') firstMerged[1].edited = 'automatic';
 
   // Debug: log the merged results for verification.
-  const hexBI = (arr: ByteInfo[]) => arr.map(b => (b.edited ? '*' : '') + '0x' + b.v.toString(16).toUpperCase().padStart(2, '0')).join(' ');
-  console.log('splitLineWithEdits merged:', {
-    firstMerged: hexBI(firstMerged),
-    secondMerged: hexBI(secondMerged),
-  });
+  if (DEBUG) {
+    const hexBI = (arr: ByteInfo[]) => arr.map(b => (b.edited ? '*' : '') + '0x' + b.v.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    console.log('splitLineWithEdits merged:', {
+      firstMerged: hexBI(firstMerged),
+      secondMerged: hexBI(secondMerged),
+    });
+  }
 
   // --- Partition original bytes between the two lines ---
 
@@ -894,7 +925,7 @@ export function parseLine(text: string, noLineNumber?: boolean, originalBytes?: 
   ];
 
   // Debug comparison against original bytes (if provided).
-  if (originalBytes) {
+  if (DEBUG && originalBytes) {
     const hex = (arr: number[]) => arr.map(b => b.toString(16).padStart(2, '0')).join(' ');
     if (bytes.length === originalBytes.length && bytes.every((b, i) => b === originalBytes[i])) {
       console.log(`%c✓ Line ${lineNum}: bytes match (${bytes.length} bytes)`, 'color: #4ec94e');
