@@ -39,6 +39,7 @@ import type { Program, ByteInfo, LineInfo } from './decoder';
 import {
   flagNonMonotonicLines, flagElementErrors, flagLenErrors, flagEarlyEnd,
   flagPointerAndTerminatorIssues, buildLineElements, invalidateLineHealth,
+  lineFirstAddr,
 } from './decoder';
 
 /**
@@ -596,9 +597,8 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   // Calculate the correct next-line pointer value.
   // Based on where the next line will be after the splice:
   // this line's start + 2 (pointer bytes) + content length.
-  const startAddr = prog.header.startAddr;
-  const firstLineOffset = prog.lines[0].firstByte;
-  const ptrValue = startAddr + (oldFirst + 2 + parsed.bytes.length - firstLineOffset);
+  const firstAddr = lineFirstAddr(prog, lineIdx);
+  const ptrValue  = firstAddr + 2 + parsed.bytes.length;
 
   // Include pointer bytes in the LCS so matching originals are preserved.
   // Always LCS against original bytes to get the minimum diff from the tape.
@@ -668,15 +668,13 @@ export function splitLineWithEdits(
     return null;
   }
 
-  const progStartAddr = prog.header.startAddr;
-  const progStartIndex = prog.lines[0].firstByte;
   const oldLine = prog.lines[lineIdx];
   const oldFirstByteIndex = oldLine.firstByte;
   const oldLastByteIndex = oldLine.lastByte;
 
   // --- Get full original bytes and compute pointers ---
   const fullOriginalBytes = getFullOriginalBytes(prog, oldLine);
-  
+
   // Build content for each half excluding their next-line pointers.
   // Exclude dummy line number bytes from LCS so they can't steal matches.
   const firstForLcs = parsedFirst.hasDummyLineNumber ? parsedFirst.bytes.slice(2) : parsedFirst.bytes;
@@ -684,9 +682,9 @@ export function splitLineWithEdits(
 
   // Calculate next-line pointer values.
   // First line's pointer: points to where the second new line will start.
-  const ptr1Value = progStartAddr + (oldFirstByteIndex + 2 + parsedFirst.bytes.length - progStartIndex);
-  // Second line's pointer: points to where the line after both new lines will start.
-  const ptr2Value = progStartAddr + (oldFirstByteIndex + 2 + parsedFirst.bytes.length + 2 + parsedSecond.bytes.length - progStartIndex);
+  const firstAddr1 = lineFirstAddr(prog, lineIdx);
+  const ptr1Value  = firstAddr1 + 2 + parsedFirst.bytes.length;
+  const ptr2Value  = ptr1Value  + 2 + parsedSecond.bytes.length;
 
   // --- Build full new values and run LCS against original bytes ---
 
@@ -856,9 +854,8 @@ export function joinLinesWithEdit(
   const fullOriginal = [...fullOriginalFirst, ...fullOriginalSecond];
 
   // Calculate the next-line pointer for the merged line.
-  const startAddr = prog.header.startAddr;
-  const firstLineOffset = prog.lines[0].firstByte;
-  const ptrValue = startAddr + (first.firstByte + 2 + parsed.bytes.length - firstLineOffset);
+  const firstAddr = lineFirstAddr(prog, firstIdx);
+  const ptrValue  = firstAddr + 2 + parsed.bytes.length;
 
   // --- Build new values with pointer and run LCS against original bytes ---
 
