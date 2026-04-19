@@ -8,6 +8,7 @@ import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './dec
 import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit, restoreLineToOriginalBytes, fixPointersAndTerminators } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
+  hexViewProgram, progLineIdxForCol, mliForProgLineIdx,
   type MergedProgram,
 } from './merger';
 import { linesFromProgram, linesFromMerged, encodeTapFile, encodeTapMetadata, downloadTap, type TapBlock, type TapEntry } from './tapEncoder';
@@ -19,6 +20,7 @@ const statusEl   = document.getElementById('status')           as HTMLParagraphE
 const progTabs   = document.getElementById('prog-tabs')        as HTMLElement;
 const hexPanelOuter = document.getElementById('hex-panel')     as HTMLElement;
 const hexPanel      = document.getElementById('hex-view')      as HTMLElement;
+const hexTitleEl    = document.getElementById('hex-title')     as HTMLElement;
 const basicPanel    = document.getElementById('basic-view')    as HTMLElement;
 const waveCanvas = document.getElementById('waveform-canvas')  as HTMLCanvasElement;
 const statusBar  = document.getElementById('statusbar')        as HTMLElement;
@@ -506,6 +508,31 @@ function renderAll(): void {
 }
 
 /**
+ * Build the HTML label for a Program, in "{filename} {prog-num-badge} {name}"
+ * format.  Shared by merge-view column headers and hex-panel headers so the
+ * two visually match.  `fallbackProgIdx` is used if the Program is missing
+ * (shouldn't happen in practice but keeps the call site total).
+ *
+ * Returned HTML is safe — filename/name are escaped, progNumber is numeric.
+ */
+function progHeaderHtml(
+  prog:            Program | undefined,
+  filenameLabel:   string,
+  fallbackProgIdx: number,
+): string {
+  const pn   = prog?.progNumber ?? fallbackProgIdx + 1;
+  const name = prog?.name ?? '';
+  return `${escHtml(filenameLabel)}<span class="prog-num">${pn}</span>${escHtml(name)}`;
+}
+
+/** Build the hex header HTML for a tape-mode program (current active tape). */
+function tapeHexHeaderHtml(prog: Program): string {
+  const tape = tapes[activeTapeIdx];
+  const base = tape ? shortName(tape.filename) : `Tape ${activeTapeIdx + 1}`;
+  return progHeaderHtml(prog, base, activeProgIdx);
+}
+
+/**
  * Render a Program's byte stream into the hex panel.
  *
  * Used for both tape programs (tape view) and merged output (merge view).
@@ -515,12 +542,18 @@ function renderAll(): void {
  *                              highlight its containing line with hb-line.
  *   - selectedLineIdx (optional): if no selectedByte, use this LineInfo
  *                                 index to drive the hb-line highlight.
+ *   - labelHtml (optional): HTML shown in the hex panel's header bar so the
+ *                           user knows which program the hex bytes belong
+ *                           to.  Defaults to tapeHexHeaderHtml(prog) which
+ *                           matches the merge-view column header format.
  */
 function renderHex(
   prog: Program,
   selectedByte: number | null = null,
   selectedLineIdx: number | null = null,
+  labelHtml?: string,
 ): void {
+  hexTitleEl.innerHTML = labelHtml ?? tapeHexHeaderHtml(prog);
   const firstContent = prog.lines[0]?.firstByte                          ?? prog.bytes.length;
   const lastLine     = prog.lines[prog.lines.length - 1];
   const lastContent  = lastLine ? lastLine.lastByte + 1 : 0;
@@ -1160,21 +1193,8 @@ function renderMergeView(merged: MergedProgram): void {
   }
 
   const progs    = mergeProgs();
-  const merge    = userMerges[activeProgIdx]!;
   const ti0      = 0;   // slot index for left column
   const ti1      = 1;   // slot index for right column
-  const ati0     = merge.sources[0].tapeIdx;   // actual tape index (for display only)
-  const ati1     = merge.sources[1].tapeIdx;
-  // Filename is a TapeData property so we look it up live; if the tape has
-  // been closed we fall back to a generic label.  Program name and progNumber
-  // come from the merge's own snapshot so headers render correctly even if
-  // the source tabs no longer exist.
-  const base0     = tapes[ati0] ? shortName(tapes[ati0].filename) : `Tape ${ati0 + 1}`;
-  const base1     = tapes[ati1] ? shortName(tapes[ati1].filename) : `Tape ${ati1 + 1}`;
-  const progName0 = progs[0]?.name ?? '';
-  const progName1 = progs[1]?.name ?? '';
-  const pn0 = progs[0]?.progNumber ?? merge.sources[0].progIdx + 1;
-  const pn1 = progs[1]?.progNumber ?? merge.sources[1].progIdx + 1;
 
   const rowsHtml = merged.lines.map((line, i) => {
     const rowSel = i === selMergeLine ? ' sel' : '';
@@ -1244,11 +1264,13 @@ function renderMergeView(merged: MergedProgram): void {
   // The header row lives inside .merge-rows so it scrolls horizontally with the
   // columns. Each cell is a full .merge-col (13px font → correct ch units for
   // min-width) containing a .merge-col-head span that applies the 11px styling.
+  // Column header content uses the same helper as the hex panel header so the
+  // two visually match.
   const headerHtml =
     `<div class="merge-row-head">` +
-      `<div class="merge-col"><span class="merge-col-head">${escHtml(base0)}<span class="prog-num">${pn0}</span>${escHtml(progName0)}</span></div>` +
+      `<div class="merge-col"><span class="merge-col-head">${mergeHexHeaderHtml(merged, 0)}</span></div>` +
       `<div class="merge-col merge-col-result"><span class="merge-col-head merge-col-head-result">Merged</span></div>` +
-      `<div class="merge-col"><span class="merge-col-head">${escHtml(base1)}<span class="prog-num">${pn1}</span>${escHtml(progName1)}</span></div>` +
+      `<div class="merge-col"><span class="merge-col-head">${mergeHexHeaderHtml(merged, 2)}</span></div>` +
     `</div>`;
 
   basicPanel.innerHTML =
@@ -1324,17 +1346,49 @@ function applyMergeColumnWidths(): void {
 }
 
 /**
- * Render the merged output's byte stream in the hex panel.  Delegates to the
- * shared renderHex(); selection is driven by selByte (which selectMergeElem
- * keeps in sync with the element selection, and selectMergeByteAt updates on
- * hex clicks / keyboard navigation).  Falls back to line-only highlighting
- * when selByte is null but a merged line is selected.
+ * Render the hex panel in merge view, following the currently selected merge
+ * column: col 0 → left source, col 1 → merged output, col 2 → right source.
+ *
+ * Delegates to shared renderHex() with the column's Program, the line within
+ * that Program corresponding to selMergeLine (if any), and a header label
+ * identifying what the user is looking at.
+ *
+ * selByte is interpreted as "byte in the currently displayed program".
+ * selectMergeElem and selectMergeByteAt keep it in sync with the column
+ * switch, so renderMergedHex just passes it through.
  */
 function renderMergedHex(merged: MergedProgram): void {
-  const selOutputLineIdx = selMergeLine !== null
-    ? outputLineIdxForMli(merged, selMergeLine)
+  const col = (selMergeCol ?? 1) as 0 | 1 | 2;
+  const prog = hexViewProgram(merged, col);
+  if (!prog) {
+    // Source slot is absent (edge case: a tape/program was removed before
+    // the merge could snapshot it).  Clear the panel cleanly.
+    hexTitleEl.innerHTML = '';
+    hexPanel.innerHTML   = '';
+    return;
+  }
+  const progLineIdx = selMergeLine !== null
+    ? progLineIdxForCol(merged, selMergeLine, col)
     : -1;
-  renderHex(merged.output, selByte, selOutputLineIdx >= 0 ? selOutputLineIdx : null);
+  const labelHtml = mergeHexHeaderHtml(merged, col);
+  renderHex(prog, selByte, progLineIdx >= 0 ? progLineIdx : null, labelHtml);
+}
+
+/**
+ * Build the hex header HTML for the given merge-view column.  For col 1
+ * (merged output) returns the simple "Merged" label.  For source columns
+ * returns the "{filename} {prog-num-badge} {name}" format that matches the
+ * basic-view column headers.
+ */
+function mergeHexHeaderHtml(merged: MergedProgram, col: 0 | 1 | 2): string {
+  if (col === 1) return 'Merged';
+  const userMerge = userMerges[activeProgIdx];
+  if (!userMerge) return '';
+  const slotIdx = col === 0 ? 0 : 1;
+  const src  = userMerge.sources[slotIdx];
+  const tape = tapes[src.tapeIdx];
+  const base = tape ? shortName(tape.filename) : `Tape ${src.tapeIdx + 1}`;
+  return progHeaderHtml(merged.sources[slotIdx], base, src.progIdx);
 }
 
 // ── TAP builder modal ─────────────────────────────────────────────────────────
@@ -1617,7 +1671,10 @@ hexPanel.addEventListener('click', (e) => {
       selectByte(byteIdx);
     }
   } else {
-    selectMergeByteAt(byteIdx);
+    // Merge mode: the byte index refers to whichever column's Program is
+    // currently shown.  Default to the merged-output column (1) when no
+    // column is selected yet.
+    selectMergeByteAt((selMergeCol ?? 1) as 0 | 1 | 2, byteIdx);
   }
 });
 hexPanel.addEventListener('dblclick', (e) => {
@@ -1629,7 +1686,7 @@ hexPanel.addEventListener('dblclick', (e) => {
     // Double-click always zooms to 400%.
     waveform.zoomTo(4);
   } else {
-    selectMergeByteAt(byteIdx);
+    selectMergeByteAt((selMergeCol ?? 1) as 0 | 1 | 2, byteIdx);
   }
 });
 
@@ -1731,36 +1788,11 @@ function selectByte(i: number): void {
 }
 
 /**
- * Translate an AlignedLine index (mli) to its corresponding merged.output
- * line index, counting non-rejected aligned lines.  Returns -1 if the
- * aligned line is rejected (no output counterpart).
- */
-function outputLineIdxForMli(merged: MergedProgram, mli: number): number {
-  if (mli < 0 || mli >= merged.lines.length || merged.lines[mli].rejected) return -1;
-  let outIdx = 0;
-  for (let i = 0; i < mli; i++) if (!merged.lines[i].rejected) outIdx++;
-  return outIdx;
-}
-
-/**
- * Translate a merged.output line index back to the AlignedLine index (mli).
- * Inverse of outputLineIdxForMli.
- */
-function mliForOutputLineIdx(merged: MergedProgram, outputLineIdx: number): number {
-  let count = 0;
-  for (let i = 0; i < merged.lines.length; i++) {
-    if (merged.lines[i].rejected) continue;
-    if (count === outputLineIdx) return i;
-    count++;
-  }
-  return -1;
-}
-
-/**
  * Select a specific element in the merged basic view.
  * Updates state, DOM selection classes, hex panel, and status bar.  Also
- * computes the corresponding byte in merged.output and stores it in selByte
- * so the hex panel can highlight it with byte-level precision.
+ * computes the corresponding byte in the column's Program and stores it in
+ * selByte so the hex panel (which follows selMergeCol) can highlight it
+ * with byte-level precision.
  */
 function selectMergeElem(mli: number, col: 0 | 1 | 2, ei: number): void {
   selMergeLine = mli;
@@ -1778,20 +1810,19 @@ function selectMergeElem(mli: number, col: 0 | 1 | 2, ei: number): void {
   elemEl?.classList.add('sel');
   rowEl?.scrollIntoView({ block: 'nearest' });
 
-  // Compute and store the byte in merged.output that corresponds to this
-  // element, so the hex panel can highlight it (byte-level parity with
-  // tape-mode behaviour).  For rejected lines the element has no output
-  // counterpart — clear selByte instead.
+  // Compute selByte in the context of the column's Program (the one the hex
+  // panel is about to render).  Each column maps to its own Program with its
+  // own line byte layout; selByte must index into that Program's bytes.
   const merged = userMerges[activeProgIdx]?.result;
   if (merged) {
-    const outputLineIdx = outputLineIdxForMli(merged, mli);
-    if (outputLineIdx >= 0) {
-      const outputLine = merged.output.lines[outputLineIdx];
-      // Clamp ei to what the output line actually has — source-column
-      // element selections may index past the output's element count when
-      // the columns disagree; in that case fall back to the last element.
-      const safeEi = Math.min(ei, outputLine.elements.length - 1);
-      selByte = byteForElem(outputLine, Math.max(0, safeEi));
+    const prog        = hexViewProgram(merged, col);
+    const progLineIdx = progLineIdxForCol(merged, mli, col);
+    if (prog && progLineIdx >= 0) {
+      const progLine = prog.lines[progLineIdx];
+      // Clamp ei to this Program's element count — source columns can have
+      // fewer elements than the output when content differs between sources.
+      const safeEi = Math.min(ei, progLine.elements.length - 1);
+      selByte = byteForElem(progLine, Math.max(0, safeEi));
     } else {
       selByte = null;
     }
@@ -1802,32 +1833,35 @@ function selectMergeElem(mli: number, col: 0 | 1 | 2, ei: number): void {
 }
 
 /**
- * Select a byte in the merged.output byte stream (called from hex click or
- * keyboard navigation in the merge view).  Mirrors selectByte for tape mode
- * but updates merge-specific selection state (selMergeLine/Col/Elem) and
- * omits waveform interaction (merges have no single-tape waveform backing).
+ * Select a byte in the currently-displayed merge hex panel (called from hex
+ * click or keyboard navigation in the merge view).  `col` identifies which
+ * column's Program the byte index refers to — the click handler and cursor
+ * keys pass the current selMergeCol so the byte resolves against the right
+ * Program.
+ *
+ * Updates merge-specific selection state (selMergeLine/Col/Elem) and selByte.
+ * Omits waveform interaction (merges have no single-tape waveform backing).
  */
-function selectMergeByteAt(byteIdx: number): void {
+function selectMergeByteAt(col: 0 | 1 | 2, byteIdx: number): void {
   const merged = userMerges[activeProgIdx]?.result;
   if (!merged) return;
+  const prog = hexViewProgram(merged, col);
+  if (!prog) return;
 
-  selByte = byteIdx;
+  selByte     = byteIdx;
+  selMergeCol = col;
 
-  // Find which output line (if any) contains this byte.  Bytes in
-  // sync/header/name/end-marker sections don't belong to any line — clear
-  // the merge element selection in that case; the hex highlight alone
-  // conveys the selection.
-  const out = merged.output;
-  const outputLineIdx = out.lines.findIndex(l => byteIdx >= l.firstByte && byteIdx <= l.lastByte);
-  if (outputLineIdx >= 0) {
-    const mli = mliForOutputLineIdx(merged, outputLineIdx);
-    const ei  = elemIdxForByte(out.lines[outputLineIdx], byteIdx);
+  // Find which line (if any) in the column's Program contains this byte.
+  // Bytes in sync/header/name/end-marker don't belong to any line — clear
+  // the merge element selection in that case.
+  const progLineIdx = prog.lines.findIndex(l => byteIdx >= l.firstByte && byteIdx <= l.lastByte);
+  if (progLineIdx >= 0) {
+    const mli = mliForProgLineIdx(merged, col, progLineIdx);
+    const ei  = elemIdxForByte(prog.lines[progLineIdx], byteIdx);
     selMergeLine = mli >= 0 ? mli : null;
-    selMergeCol  = 1;  // hex reflects the merged output — middle column
     selMergeElem = ei >= 0 ? ei : null;
   } else {
     selMergeLine = null;
-    selMergeCol  = null;
     selMergeElem = null;
   }
 
@@ -2451,8 +2485,12 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     if (focusedPanel === 'hex') {
       const merged = userMerges[activeProgIdx]?.result;
       if (merged) {
-        e.preventDefault();
-        navigateHex(e.key, e.altKey, merged.output, selectMergeByteAt);
+        const col  = (selMergeCol ?? 1) as 0 | 1 | 2;
+        const prog = hexViewProgram(merged, col);
+        if (prog) {
+          e.preventDefault();
+          navigateHex(e.key, e.altKey, prog, (byteIdx) => selectMergeByteAt(col, byteIdx));
+        }
       }
     }
     return;

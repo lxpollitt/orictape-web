@@ -367,6 +367,71 @@ export function mergeLineBytes(
   return null;
 }
 
+// ── Column ↔ program mapping helpers (for merge-view hex panel) ──────────────
+
+/**
+ * Return the Program shown in the given merge-view column:
+ *   col 0 → left source (merged.sources[0])
+ *   col 1 → merged output (merged.output)
+ *   col 2 → right source (merged.sources[1])
+ *
+ * Returns undefined when the requested source slot has no Program.
+ */
+export function hexViewProgram(merged: MergedProgram, col: 0 | 1 | 2): Program | undefined {
+  if (col === 1) return merged.output;
+  return merged.sources[col === 0 ? 0 : 1];
+}
+
+/**
+ * Translate an AlignedLine index (mli) to a line index in the given column's
+ * Program.  For col 1 this walks the non-rejected aligned lines.  For col 0/2
+ * it looks up the LineSource that matches the column's slot.  Returns -1 when
+ * the column's source does not contribute to this aligned line (e.g. partial
+ * coverage) or when the aligned line is rejected.
+ */
+export function progLineIdxForCol(
+  merged: MergedProgram,
+  mli:    number,
+  col:    0 | 1 | 2,
+): number {
+  if (mli < 0 || mli >= merged.lines.length) return -1;
+  const alignedLine = merged.lines[mli];
+  if (alignedLine.rejected && col === 1) return -1;
+  if (col === 1) {
+    let outIdx = 0;
+    for (let i = 0; i < mli; i++) if (!merged.lines[i].rejected) outIdx++;
+    return outIdx;
+  }
+  const slotIdx = col === 0 ? 0 : 1;
+  const srcRef  = alignedLine.sources.find(s => s.tapeIdx === slotIdx);
+  return srcRef ? srcRef.lineIdx : -1;
+}
+
+/**
+ * Inverse of progLineIdxForCol: given a line index in the column's Program,
+ * return the AlignedLine index (mli) it corresponds to.  Returns -1 when no
+ * match is found.
+ */
+export function mliForProgLineIdx(
+  merged:      MergedProgram,
+  col:         0 | 1 | 2,
+  progLineIdx: number,
+): number {
+  if (col === 1) {
+    let outIdx = 0;
+    for (let i = 0; i < merged.lines.length; i++) {
+      if (merged.lines[i].rejected) continue;
+      if (outIdx === progLineIdx) return i;
+      outIdx++;
+    }
+    return -1;
+  }
+  const slotIdx = col === 0 ? 0 : 1;
+  return merged.lines.findIndex(
+    l => l.sources.some(s => s.tapeIdx === slotIdx && s.lineIdx === progLineIdx),
+  );
+}
+
 // ── Byte-stream output synthesis ──────────────────────────────────────────────
 
 /**

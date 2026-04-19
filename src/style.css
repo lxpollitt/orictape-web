@@ -224,8 +224,38 @@ header h1 {
 
 #hex-panel {
   border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#hex-header {
+  display: flex;
+  align-items: center;
+  padding: 3px 10px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+#hex-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#hex-view {
   overflow: auto;
   padding: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* Tape mode: basic-view is the scrollable content container. */
