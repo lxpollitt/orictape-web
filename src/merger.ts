@@ -65,6 +65,14 @@ export interface MergedByte {
 export interface MergedProgram {
   /** Total number of tape slots (some may be undefined/absent). */
   tapeCount:  number;
+  /** Deep-copied snapshot of the source programs taken at merge creation time.
+   *  Indexed by slot position — matches LineSource.tapeIdx.  Snapshots are
+   *  independent of the original Programs: edits or closures applied to the
+   *  originals after merge creation do not affect the snapshot.  BitStream is
+   *  shared by reference (large, never mutated).  Undefined slots are preserved
+   *  for 1:1 indexing, but in practice are never dereferenced because no lines
+   *  reference an absent source. */
+  sources:    (Program | undefined)[];
   lines:      AlignedLine[];
   // Summary counts for badges / status bar (based on LineQuality)
   total:        number;
@@ -76,6 +84,21 @@ export interface MergedProgram {
   unverified:   number;   // single-source or partial lines
 }
 
+// ── Source snapshot ──────────────────────────────────────────────────────────
+
+/**
+ * Deep-copy a Program for storage on MergedProgram.sources.  All mutable state
+ * (bytes, lines, header, and nested originalBytesDelta) is cloned so edits to
+ * the original Program do not affect the merged snapshot.  The BitStream is
+ * shared by reference — it is large (waveform data) and never mutated after
+ * initial decode, so sharing is safe and saves significant memory.
+ */
+function cloneProgramForSnapshot(prog: Program): Program {
+  const { stream, ...rest } = prog;
+  const cloned = structuredClone(rest);
+  return { ...cloned, stream };
+}
+
 // ── Primary algorithm: line-level alignment ───────────────────────────────────
 
 /**
@@ -84,6 +107,11 @@ export interface MergedProgram {
  * `programs` is indexed by tapeIdx; entries may be undefined if a given tape
  * does not contain a program at this ordinal position. This preserves the
  * tapeIdx ↔ array-index correspondence throughout the codebase.
+ *
+ * A deep-copied snapshot of the input programs is stored on the returned
+ * MergedProgram.sources, so later edits or closures of the original Programs
+ * do not affect this merge.  All references to sources from the merge result
+ * (LineSource.tapeIdx) index into merged.sources, not into the original array.
  *
  * Steps:
  *   1. Extract monotonically-increasing line-number sequences per tape,
@@ -94,9 +122,16 @@ export interface MergedProgram {
  * Complexity: O(L log L) where L = total decoded lines across all tapes.
  */
 export function alignPrograms(
-  programs: ReadonlyArray<Program | undefined>,
+  programsIn: ReadonlyArray<Program | undefined>,
 ): MergedProgram {
-  const tapeCount = programs.length;
+  const tapeCount = programsIn.length;
+
+  // Snapshot the source programs up-front so all downstream logic reads from
+  // the merge's own copy.  The snapshot is write-once — never updated after
+  // creation — making the merge a self-contained artifact.
+  const programs: (Program | undefined)[] = programsIn.map(p =>
+    p ? cloneProgramForSnapshot(p) : undefined,
+  );
 
   // Step 1 — per-tape partition into monotonic and non-monotonic lines.
   const extracted = programs.map((prog, tapeIdx) =>
@@ -254,28 +289,40 @@ export function alignPrograms(
   // Classify issue lines: hard errors vs unclear-only.
   let issuesError = 0;
   for (const line of issueLines) {
-    const src  = bestSource(line, programs);
+    const src  = pickBestSource(line, programs);
     const prog = programs[src.tapeIdx];
     if (prog && lineHasHardError(prog, src.lineIdx)) issuesError++;
   }
   const issuesUnclear = issues - issuesError;
 
-  return { tapeCount, lines, total: active.length, clean, issues, issuesError, issuesUnclear, recovered, unverified };
+  return { tapeCount, sources: programs, lines, total: active.length, clean, issues, issuesError, issuesUnclear, recovered, unverified };
 }
 
 /**
  * Choose the best available source for a line — the one most likely to have
  * the correct byte content. Used by the UI to pick a default rendering.
+ * Reads from merged.sources, the merge's own snapshot.
  *
  * Priority: no lenErr > fewer unclear bytes > earlier tape index.
  */
 export function bestSource(
-  line:     AlignedLine,
-  programs: ReadonlyArray<Program | undefined>,
+  merged: MergedProgram,
+  line:   AlignedLine,
+): LineSource {
+  return pickBestSource(line, merged.sources);
+}
+
+/**
+ * Internal helper that takes the sources array directly, so alignPrograms can
+ * use it before the MergedProgram result object is constructed.
+ */
+function pickBestSource(
+  line:    AlignedLine,
+  sources: ReadonlyArray<Program | undefined>,
 ): LineSource {
   return line.sources.reduce((best, candidate) => {
-    const bProg = programs[best.tapeIdx];
-    const cProg = programs[candidate.tapeIdx];
+    const bProg = sources[best.tapeIdx];
+    const cProg = sources[candidate.tapeIdx];
     if (!cProg) return best;
     if (!bProg) return candidate;
     const bLine = bProg.lines[best.lineIdx];
@@ -293,8 +340,8 @@ export function bestSource(
  * Returns null until implemented.
  */
 export function mergeLineBytes(
-  _line:     AlignedLine,
-  _programs: ReadonlyArray<Program | undefined>,
+  _merged: MergedProgram,
+  _line:   AlignedLine,
 ): MergedByte[] | null {
   return null;
 }

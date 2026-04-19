@@ -76,6 +76,19 @@ interface UserMerge {
 let tapes:        TapeData[]              = [];
 let activeTapeIdx = 0;
 let activeProgIdx = 0;
+/** Monotonic counter for assigning Program.progNumber values.  Starts at 1
+ *  and only ever increments — closing a tab does not free a number, and
+ *  reloading a file does not reuse one.  This gives each loaded program a
+ *  stable user-facing identity that survives tape reorderings, closures,
+ *  and merge-snapshot lookups. */
+let nextProgNumber = 1;
+
+/** Stamp each program in the array with a fresh progNumber from the global
+ *  counter.  Called once per batch of newly-loaded programs. */
+function assignProgNumbers(progs: Program[]): void {
+  for (const p of progs) p.progNumber = nextProgNumber++;
+}
+
 let viewMode:     'tape' | 'merged'       = 'tape';
 let userMerges:   UserMerge[]             = [];
 let selByte:      number | null            = null;
@@ -211,6 +224,7 @@ fileInput.addEventListener('change', async () => {
       let programs: Program[];
       try { programs = parseTapFile(buffer); }
       catch (err) { showError(`${file.name}: ${err}`); return; }
+      assignProgNumbers(programs);
       tapes.push({
         filename: file.name,
         samples:  new Int16Array(0),
@@ -227,6 +241,7 @@ fileInput.addEventListener('change', async () => {
       const result = await decodeInWorker(buffer);
       if (!result.ok) { showError(`${file.name}: ${result.error}`); return; }
 
+      assignProgNumbers(result.programs);
       tapes.push({ filename: file.name, samples, sampleRate, programs: result.programs, fromTap: false });
     }
   }
@@ -385,7 +400,7 @@ function renderTabs(): void {
           ? '<span class="badge badge-warn">warnings</span>'
           : '';
       btn.innerHTML =
-        `<div class="prog-tab-name"><span class="prog-num">${pi + 1}</span>${escHtml(prog.name || `Prog ${pi + 1}`)}</div>` +
+        `<div class="prog-tab-name"><span class="prog-num">${prog.progNumber}</span>${escHtml(prog.name || `Prog ${prog.progNumber}`)}</div>` +
         `<div class="prog-tab-info">${infoText}</div>` +
         `<div class="prog-tab-badges">${badgesHtml}</div>`;
       progTabs.appendChild(btn);
@@ -415,11 +430,13 @@ function renderTabs(): void {
       if (merged.unverified > 0 && merged.issues === 0)
         badge += ` <span class="badge badge-warn">${merged.unverified} unverified</span>`;
 
-      const s0 = merge.sources[0];
-      const s1 = merge.sources[1];
+      // Read program numbers from the merge's own snapshot so the tab label
+      // stays stable even if the original source tabs are later closed.
+      const pn0 = merged.sources[0]?.progNumber ?? merge.sources[0].progIdx + 1;
+      const pn1 = merged.sources[1]?.progNumber ?? merge.sources[1].progIdx + 1;
       btn.innerHTML =
-        `<span class="prog-num">${s0.progIdx + 1}</span>` +
-        `<span class="prog-num">${s1.progIdx + 1}</span>Merged` +
+        `<span class="prog-num">${pn0}</span>` +
+        `<span class="prog-num">${pn1}</span>Merged` +
         badge;
       progTabs.appendChild(btn);
     });
@@ -1070,12 +1087,9 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
 const TAPE_COLORS = ['#4a9eff', '#c97aff', '#4affb0', '#ffa04a', '#ff6b6b', '#ffd93d'];
 
 function mergeProgs(): ReadonlyArray<Program | undefined> {
-  const merge = userMerges[activeProgIdx];
-  if (!merge) return [];
-  // Index by slot position (0, 1) rather than actual tapeIdx so that two
-  // programs from the same tape are kept separate.  LineSource.tapeIdx values
-  // produced by alignPrograms therefore mean "slot index", not "tape index".
-  return merge.sources.map(src => tapes[src.tapeIdx]?.programs[src.progIdx]);
+  // Read from the merge's own snapshot so rendering is independent of live
+  // tape/program state (edits, tab closures) on the original sources.
+  return userMerges[activeProgIdx]?.result.sources ?? [];
 }
 
 /**
@@ -1126,10 +1140,16 @@ function renderMergeView(merged: MergedProgram): void {
   const ti1      = 1;   // slot index for right column
   const ati0     = merge.sources[0].tapeIdx;   // actual tape index (for display only)
   const ati1     = merge.sources[1].tapeIdx;
+  // Filename is a TapeData property so we look it up live; if the tape has
+  // been closed we fall back to a generic label.  Program name and progNumber
+  // come from the merge's own snapshot so headers render correctly even if
+  // the source tabs no longer exist.
   const base0     = tapes[ati0] ? shortName(tapes[ati0].filename) : `Tape ${ati0 + 1}`;
   const base1     = tapes[ati1] ? shortName(tapes[ati1].filename) : `Tape ${ati1 + 1}`;
-  const progName0 = tapes[ati0]?.programs[merge.sources[0].progIdx]?.name ?? '';
-  const progName1 = tapes[ati1]?.programs[merge.sources[1].progIdx]?.name ?? '';
+  const progName0 = progs[0]?.name ?? '';
+  const progName1 = progs[1]?.name ?? '';
+  const pn0 = progs[0]?.progNumber ?? merge.sources[0].progIdx + 1;
+  const pn1 = progs[1]?.progNumber ?? merge.sources[1].progIdx + 1;
 
   const rowsHtml = merged.lines.map((line, i) => {
     const rowSel = i === selMergeLine ? ' sel' : '';
@@ -1161,7 +1181,7 @@ function renderMergeView(merged: MergedProgram): void {
         `</div>`;
     }
 
-    const src = bestSource(line, progs);
+    const src = bestSource(merged, line);
 
     // Left column — source 0 tape
     const srcLeft  = line.sources.find(s => s.tapeIdx === ti0);
@@ -1201,9 +1221,9 @@ function renderMergeView(merged: MergedProgram): void {
   // min-width) containing a .merge-col-head span that applies the 11px styling.
   const headerHtml =
     `<div class="merge-row-head">` +
-      `<div class="merge-col"><span class="merge-col-head">${escHtml(base0)}<span class="prog-num">${merge.sources[0].progIdx + 1}</span>${escHtml(progName0)}</span></div>` +
+      `<div class="merge-col"><span class="merge-col-head">${escHtml(base0)}<span class="prog-num">${pn0}</span>${escHtml(progName0)}</span></div>` +
       `<div class="merge-col merge-col-result"><span class="merge-col-head merge-col-head-result">Merged</span></div>` +
-      `<div class="merge-col"><span class="merge-col-head">${escHtml(base1)}<span class="prog-num">${merge.sources[1].progIdx + 1}</span>${escHtml(progName1)}</span></div>` +
+      `<div class="merge-col"><span class="merge-col-head">${escHtml(base1)}<span class="prog-num">${pn1}</span>${escHtml(progName1)}</span></div>` +
     `</div>`;
 
   basicPanel.innerHTML =
@@ -1290,20 +1310,19 @@ function renderMergedHex(merged: MergedProgram): void {
     return;
   }
 
-  const progs  = mergeProgs();
   const um     = userMerges[activeProgIdx]!;
   const ti0    = 0;   // slot index for left column
   const ti1    = 1;   // slot index for right column
 
   // Show bytes from the selected column's source; fall back to best source.
-  const best = bestSource(line, progs);
+  const best = bestSource(merged, line);
   const src = selMergeCol === 0
     ? (line.sources.find(s => s.tapeIdx === ti0) ?? best)
     : selMergeCol === 2
       ? (line.sources.find(s => s.tapeIdx === ti1) ?? best)
       : best;
 
-  const prog = progs[src.tapeIdx];
+  const prog = merged.sources[src.tapeIdx];
   if (!prog) { hexPanel.innerHTML = ''; return; }
 
   const lineData = prog.lines[src.lineIdx];
@@ -1375,8 +1394,8 @@ function renderTapBuilder(): void {
       const btn    = inQ ? '' : `<button class="tap-btn" data-add-kind="tape" data-add-ti="${ti}" data-add-pi="${pi}">→</button>`;
       availHtml +=
         `<div class="tap-item${dimmed}">` +
-        `<span class="prog-num">${pi + 1}</span>` +
-        `<span class="tap-item-name">${escHtml(prog.name || `Prog ${pi + 1}`)}</span>` +
+        `<span class="prog-num">${prog.progNumber}</span>` +
+        `<span class="tap-item-name">${escHtml(prog.name || `Prog ${prog.progNumber}`)}</span>` +
         btn +
         `</div>`;
     });
@@ -1389,11 +1408,13 @@ function renderTapBuilder(): void {
       const inQ    = queued.has(key);
       const dimmed = inQ ? ' tap-item-dimmed' : '';
       const btn    = inQ ? '' : `<button class="tap-btn" data-add-kind="merged" data-add-ti="0" data-add-pi="${mi}">→</button>`;
-      const s0 = merge.sources[0];
-      const s1 = merge.sources[1];
+      // Read program numbers from the merge's own snapshot so labels are
+      // stable if source tabs are later closed.
+      const pn0 = merge.result.sources[0]?.progNumber ?? merge.sources[0].progIdx + 1;
+      const pn1 = merge.result.sources[1]?.progNumber ?? merge.sources[1].progIdx + 1;
       const label =
-        `<span class="prog-num">${s0.progIdx + 1}</span>` +
-        `<span class="prog-num">${s1.progIdx + 1}</span>Merged`;
+        `<span class="prog-num">${pn0}</span>` +
+        `<span class="prog-num">${pn1}</span>Merged`;
       availHtml +=
         `<div class="tap-item${dimmed}">` +
         label +
@@ -1413,14 +1434,16 @@ function renderTapBuilder(): void {
     let sub: string;
     if (entry.kind === 'tape') {
       const prog = tapes[entry.tapeIdx]?.programs[entry.progIdx];
-      name = prog?.name || `Prog ${entry.progIdx + 1}`;
+      name = prog?.name || `Prog ${prog?.progNumber ?? entry.progIdx + 1}`;
       sub  = `Tape ${entry.tapeIdx + 1}`;
     } else {
       const um = userMerges[entry.progIdx];
       if (um) {
-        const s0 = um.sources[0];
-        const s1 = um.sources[1];
-        name = `[${s0.progIdx + 1}][${s1.progIdx + 1}] Merged`;
+        // Read program numbers from the merge's own snapshot so labels are
+        // stable if source tabs are later closed.
+        const pn0 = um.result.sources[0]?.progNumber ?? um.sources[0].progIdx + 1;
+        const pn1 = um.result.sources[1]?.progNumber ?? um.sources[1].progIdx + 1;
+        name = `[${pn0}][${pn1}] Merged`;
       } else {
         name = 'Merged';
       }
@@ -1490,12 +1513,13 @@ function doDownloadTap(): void {
       const um = userMerges[entry.progIdx];
       if (!um) continue;
       const merged = um.result;
-      // Build progs array by slot index (matches LineSource.tapeIdx).
-      const progs = um.sources.map(src => tapes[src.tapeIdx]?.programs[src.progIdx]);
-      const name = progs.find(p => p?.name)?.name ?? 'MERGED';
-      const block: TapBlock = { name, lines: linesFromMerged(merged, progs), autorun: entry.autorun };
+      // Read from the merge's own snapshot so a TAP built from a merge is
+      // independent of live source edits or tab closures that happened after
+      // the merge was created.
+      const name = merged.sources.find(p => p?.name)?.name ?? 'MERGED';
+      const block: TapBlock = { name, lines: linesFromMerged(merged), autorun: entry.autorun };
       // For merged programs, use the first available source for metadata.
-      const metaProg = includeMeta ? progs.find(p => p !== undefined) : undefined;
+      const metaProg = includeMeta ? merged.sources.find(p => p !== undefined) : undefined;
       entries.push({ block, metadata: metaProg ? encodeTapMetadata(metaProg) : undefined });
     }
   }
@@ -1545,8 +1569,8 @@ function renderMergePicker(): void {
       html +=
         `<div class="merge-pick-item${checked ? ' merge-pick-sel' : ''}" ` +
         `data-pick-ti="${ti}" data-pick-pi="${pi}">` +
-        `<span class="prog-num">${pi + 1}</span>` +
-        `<span class="tap-item-name">${escHtml(prog.name || `Prog ${pi + 1}`)}</span>` +
+        `<span class="prog-num">${prog.progNumber}</span>` +
+        `<span class="tap-item-name">${escHtml(prog.name || `Prog ${prog.progNumber}`)}</span>` +
         `</div>`;
     });
   });
@@ -1744,18 +1768,18 @@ function selectMergeElem(mli: number, col: 0 | 1 | 2, ei: number): void {
 function mergeColSource(col: 0|1|2, mli: number): { prog: Program; lineIdx: number } | null {
   const um = userMerges[activeProgIdx];
   if (!um) return null;
-  const line = um.result.lines[mli];
+  const merged = um.result;
+  const line = merged.lines[mli];
   if (!line) return null;
-  const progs = mergeProgs();
   const ti0 = 0;   // slot index for left column
   const ti1 = 1;   // slot index for right column
   let src: { tapeIdx: number; lineIdx: number } | undefined;
   if      (col === 0) src = line.sources.find(s => s.tapeIdx === ti0);
   else if (col === 2) src = line.sources.find(s => s.tapeIdx === ti1);
   else if (line.rejected) return null;  // rejected lines have no merged content
-  else                src = bestSource(line, progs);
+  else                src = bestSource(merged, line);
   if (!src) return null;
-  const prog = progs[src.tapeIdx];
+  const prog = merged.sources[src.tapeIdx];
   return prog ? { prog, lineIdx: src.lineIdx } : null;
 }
 
@@ -2555,9 +2579,8 @@ function updateMergedStatusBar(): void {
       clean:      `<span style="color:var(--green)">Clean</span>`,
       recovered:  `<span style="color:var(--green)">Recovered · clean source chosen over corrupt</span>`,
       issue:      (() => {
-                    const progs = mergeProgs();
-                    const src = bestSource(line, progs);
-                    const prog = progs[src.tapeIdx];
+                    const src = bestSource(merged, line);
+                    const prog = merged.sources[src.tapeIdx];
                     const hasHardErr = prog && lineHasHardError(prog, src.lineIdx);
                     const cls = hasHardErr ? 'sb-err' : 'sb-warn';
                     const errWord = hasHardErr ? 'errors' : 'unclear';

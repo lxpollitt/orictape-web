@@ -43,16 +43,16 @@ export function linesFromProgram(prog: Program): TapLine[] {
 
 /**
  * Extract BASIC lines from a MergedProgram, choosing the best source per line.
+ * Reads from merged.sources — the merge's own snapshot of its source programs —
+ * so the output is stable even if the original Programs have since been edited
+ * or closed.
  */
-export function linesFromMerged(
-  merged: MergedProgram,
-  progs:  ReadonlyArray<Program | undefined>,
-): TapLine[] {
+export function linesFromMerged(merged: MergedProgram): TapLine[] {
   const lines: TapLine[] = [];
   for (const alignedLine of merged.lines) {
     if (alignedLine.rejected) continue;
-    const src  = bestSource(alignedLine, progs);
-    const prog = progs[src.tapeIdx];
+    const src  = bestSource(merged, alignedLine);
+    const prog = merged.sources[src.tapeIdx];
     if (!prog) continue;
     const line   = prog.lines[src.lineIdx];
     const tokens: number[] = [];
@@ -62,7 +62,7 @@ export function linesFromMerged(
     // Some corrupt programs may be missing 0x00 terminator in rare cases.
     // Known example is from the last line of the program, but this code is
     // more defensive and copes with all lines.
-    if (prog.bytes[line.lastByte].v !== 0) { 
+    if (prog.bytes[line.lastByte].v !== 0) {
       tokens.push(prog.bytes[line.lastByte].v);
     }
     lines.push({ lineNum: alignedLine.lineNum, tokens });

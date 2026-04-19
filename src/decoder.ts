@@ -421,6 +421,11 @@ export interface Program {
   bytes: ByteInfo[];
   lines: LineInfo[];
   name: string;
+  /** Stable user-facing identifier assigned once at load time.  Monotonic:
+   *  never reused after a program is closed.  Used for display in tab titles,
+   *  merge source labels, TAP builder UI, etc.  Set by main.ts after the
+   *  program is produced by readPrograms / parseTapFile. */
+  progNumber: number;
   /** Parsed header fields. Set by readProgramLines. */
   header: ProgramHeader;
   /** Set when the BASIC end-of-program null pointer (0x00 0x00) was
@@ -895,7 +900,8 @@ export function readPrograms(streams: BitStream[]): Program[] {
 }
 
 export function readProgramBytes(stream: BitStream, skipSync = false): Program {
-  const prog: Program = { stream, bytes: [], lines: [], name: '', header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false } };
+  // progNumber is a placeholder here; main.ts stamps the real value after load.
+  const prog: Program = { stream, bytes: [], lines: [], name: '', progNumber: 0, header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false } };
   let currentBit = 0;
   let byteUnclear = false;
 
