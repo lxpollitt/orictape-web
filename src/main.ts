@@ -498,7 +498,7 @@ function renderAll(): void {
     fixToggle.disabled = !hasIssues;
   }
   if (!prog) { clearPanels(); return; }
-  renderHex(prog);
+  renderHex(prog, selByte);
   renderBasic(prog);
   const activeTape = tapes[activeTapeIdx];
   if (prog && activeTape && !activeTape.fromTap && leftSamples) {
@@ -509,13 +509,35 @@ function renderAll(): void {
   updateStatusBar();
 }
 
-function renderHex(prog: Program): void {
+/**
+ * Render a Program's byte stream into the hex panel.
+ *
+ * Used for both tape programs (tape view) and merged output (merge view).
+ * Selection is supplied by the caller so there's no implicit coupling to
+ * the `selByte` / `selMergeLine` globals:
+ *   - selectedByte (optional): highlight this specific byte with hb-sel and
+ *                              highlight its containing line with hb-line.
+ *   - selectedLineIdx (optional): if no selectedByte, use this LineInfo
+ *                                 index to drive the hb-line highlight.
+ */
+function renderHex(
+  prog: Program,
+  selectedByte: number | null = null,
+  selectedLineIdx: number | null = null,
+): void {
   const firstContent = prog.lines[0]?.firstByte                          ?? prog.bytes.length;
   const lastLine     = prog.lines[prog.lines.length - 1];
   const lastContent  = lastLine ? lastLine.lastByte + 1 : 0;
-  const selLine = selByte !== null
-    ? prog.lines.findIndex(l => selByte! >= l.firstByte && selByte! <= l.lastByte)
-    : -1;
+
+  // Determine which line (if any) should be highlighted.  selectedByte takes
+  // precedence: its containing line gets highlighted.  Otherwise fall back to
+  // the explicit selectedLineIdx.
+  let selLine = -1;
+  if (selectedByte !== null) {
+    selLine = prog.lines.findIndex(l => selectedByte >= l.firstByte && selectedByte <= l.lastByte);
+  } else if (selectedLineIdx !== null && selectedLineIdx >= 0 && selectedLineIdx < prog.lines.length) {
+    selLine = selectedLineIdx;
+  }
   const lineFirst = selLine >= 0 ? prog.lines[selLine].firstByte : -1;
   const lineLast  = selLine >= 0 ? prog.lines[selLine].lastByte  : -1;
 
@@ -528,10 +550,19 @@ function renderHex(prog: Program): void {
     if (b.edited === 'explicit')         cls.push('hb-edited');
     else if (b.edited === 'automatic')   cls.push('hb-auto-edited');
     if (i >= lineFirst && i <= lineLast) cls.push('hb-line');
-    if (i === selByte)                   cls.push('hb-sel');
+    if (i === selectedByte)              cls.push('hb-sel');
     html += `<span class="${cls.join(' ')}" data-i="${i}">${b.v.toString(16).padStart(2, '0')}</span>`;
   });
   hexPanel.innerHTML = html + '</div>';
+
+  // Auto-scroll: selected byte wins over selected line.
+  const scrollTarget = selectedByte !== null
+    ? selectedByte
+    : (lineFirst >= 0 ? lineFirst : -1);
+  if (scrollTarget >= 0) {
+    hexPanel.querySelector<HTMLElement>(`[data-i="${scrollTarget}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }
 }
 
 function elemIdxForByte(line: { firstByte: number; lastByte: number }, byteIdx: number): number {
@@ -654,7 +685,7 @@ function renderBasic(prog: Program): void {
       prog.name = '';
       readProgramLines(prog, true);
       flagNonMonotonicLines(prog);
-      renderHex(prog);
+      renderHex(prog, selByte);
       renderBasic(prog);
       updateStatusBar();
     });
@@ -663,7 +694,7 @@ function renderBasic(prog: Program): void {
       prog.bytes = rebuilt.bytes;
       prog.lines = [];
       prog.name = '';
-      renderHex(prog);
+      renderHex(prog, selByte);
       renderBasic(prog);
       updateStatusBar();
     });
@@ -765,7 +796,7 @@ function insertNewLine(prog: Program, insertAt: number): void {
   }
 
   // Render and enter edit mode on the new line.
-  renderHex(prog);
+  renderHex(prog, selByte);
   renderBasic(prog);
   editIsNewLine = true;
   enterEditMode(insertAt);
@@ -828,7 +859,7 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
       editInput = null;
       editIsNewLine = false;
 
-      renderHex(prog);
+      renderHex(prog, selByte);
       if (selByte !== null && prog.bytes[selByte]?.edited) {
         waveform.selectByte(null);
       }
@@ -869,7 +900,7 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
         editInput = null;
         editIsNewLine = false;
         restoreLineToOriginalBytes(prog, savedLineIdx);
-        renderHex(prog);
+        renderHex(prog, selByte);
         renderBasic(prog);
         selectByte(byteForElem(prog.lines[savedLineIdx], 0));
       }
@@ -891,7 +922,7 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
 
       const joinPoint = joinLinesWithEdit(prog, savedLineIdx, curText, -1);
 
-      renderHex(prog);
+      renderHex(prog, selByte);
       if (selByte !== null && prog.bytes[selByte]?.edited) {
         waveform.selectByte(null);
       }
@@ -921,7 +952,7 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
 
       const joinPoint = joinLinesWithEdit(prog, savedLineIdx, curText, 1);
 
-      renderHex(prog);
+      renderHex(prog, selByte);
       if (selByte !== null && prog.bytes[selByte]?.edited) {
         waveform.selectByte(null);
       }
@@ -1024,11 +1055,11 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
         // Empty input — delete the line.
         deleteLineEdit(prog, editingLine);
         selByte = null;
-        renderHex(prog);
+        renderHex(prog, selByte);
         waveform.selectByte(null);
       } else {
         applyLineEdit(prog, editingLine, text);
-        renderHex(prog);
+        renderHex(prog, selByte);
         // Clear waveform selection only if the selected byte is now edited.
         if (selByte !== null && prog.bytes[selByte]?.edited) {
           waveform.selectByte(null);
@@ -1042,7 +1073,7 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
       if (prog && editingLine !== null && editingLine < prog.lines.length) {
         deleteLineEdit(prog, editingLine);
         selByte = null;
-        renderHex(prog);
+        renderHex(prog, selByte);
         waveform.selectByte(null);
       }
     }
@@ -1083,8 +1114,6 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
 }
 
 // ── Merged view rendering ─────────────────────────────────────────────────────
-// One colour per tape slot — up to 6 tapes before cycling.
-const TAPE_COLORS = ['#4a9eff', '#c97aff', '#4affb0', '#ffa04a', '#ff6b6b', '#ffd93d'];
 
 function mergeProgs(): ReadonlyArray<Program | undefined> {
   // Read from the merge's own snapshot so rendering is independent of live
@@ -1298,56 +1327,25 @@ function applyMergeColumnWidths(): void {
   }
 }
 
+/**
+ * Render the merged output's byte stream in the hex panel.  Delegates to the
+ * shared renderHex(), translating selMergeLine (an AlignedLine index) into
+ * the corresponding merged.output.lines index via a non-rejected-count walk.
+ */
 function renderMergedHex(merged: MergedProgram): void {
-  if (selMergeLine === null) {
-    hexPanel.innerHTML = '<p class="hint">Select a BASIC line to inspect its bytes.</p>';
-    return;
+  // Translate selMergeLine → output line index.  Rejected aligned lines have
+  // no output counterpart and produce no highlight.
+  let selOutputLineIdx: number | null = null;
+  if (selMergeLine !== null && selMergeLine >= 0 && selMergeLine < merged.lines.length) {
+    if (!merged.lines[selMergeLine].rejected) {
+      let outIdx = 0;
+      for (let i = 0; i < selMergeLine; i++) {
+        if (!merged.lines[i].rejected) outIdx++;
+      }
+      selOutputLineIdx = outIdx;
+    }
   }
-
-  const line = merged.lines[selMergeLine];
-  if (!line || !line.sources.length) {
-    hexPanel.innerHTML = '<p class="hint">No byte data available for this line.</p>';
-    return;
-  }
-
-  const um     = userMerges[activeProgIdx]!;
-  const ti0    = 0;   // slot index for left column
-  const ti1    = 1;   // slot index for right column
-
-  // Show bytes from the selected column's source; fall back to best source.
-  const best = bestSource(merged, line);
-  const src = selMergeCol === 0
-    ? (line.sources.find(s => s.tapeIdx === ti0) ?? best)
-    : selMergeCol === 2
-      ? (line.sources.find(s => s.tapeIdx === ti1) ?? best)
-      : best;
-
-  const prog = merged.sources[src.tapeIdx];
-  if (!prog) { hexPanel.innerHTML = ''; return; }
-
-  const lineData = prog.lines[src.lineIdx];
-  const firstB   = lineData.firstByte;
-  const lastB    = lineData.lastByte;
-
-  // src.tapeIdx is a slot index; map to actual tape index for display.
-  const actualTi  = um.sources[src.tapeIdx]?.tapeIdx ?? src.tapeIdx;
-  const tapeColor = TAPE_COLORS[actualTi % TAPE_COLORS.length];
-  let html = `<div class="hex-grid">` +
-    `<span class="hex-source-label" style="color:${tapeColor}">` +
-    `Tape ${actualTi + 1} · BASIC line ${line.lineNum}` +
-    `</span>`;
-
-  for (let i = firstB; i <= lastB; i++) {
-    const b   = prog.bytes[i];
-    const cls = ['hb',
-      ...(b.chkErr  ? ['hb-err']     : []),
-      ...(b.unclear ? ['hb-unclear'] : []),
-      ...(b.edited === 'explicit'  ? ['hb-edited']      : []),
-      ...(b.edited === 'automatic' ? ['hb-auto-edited'] : []),
-    ].join(' ');
-    html += `<span class="${cls}">${b.v.toString(16).padStart(2, '0')}</span>`;
-  }
-  hexPanel.innerHTML = html + '</div>';
+  renderHex(merged.output, null, selOutputLineIdx);
 }
 
 // ── TAP builder modal ─────────────────────────────────────────────────────────
@@ -2246,7 +2244,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
       if (li >= 0) {
         e.preventDefault();
         restoreLineToOriginalBytes(prog, li);
-        renderHex(prog);
+        renderHex(prog, selByte);
         renderBasic(prog);
         selectByte(byteForElem(prog.lines[li], 0));
       }
@@ -2301,7 +2299,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
         const textBefore = lineText.slice(0, charStart);
         const textAfter = lineText.slice(charStart);
         const newLineIdx = splitLineWithEdits(prog, li, textBefore, textAfter);
-        renderHex(prog);
+        renderHex(prog, selByte);
         if (selByte !== null && prog.bytes[selByte]?.edited) {
           waveform.selectByte(null);
         }
@@ -2333,7 +2331,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
           // Last element on the line: join with next line.
           e.preventDefault();
           joinLinesWithEdit(prog2, li2, undefined, 1);
-          renderHex(prog2);
+          renderHex(prog2, selByte);
           renderBasic(prog2);
           selectByte(byteForElem(prog2.lines[li2], ei2));
         } else if (ei2 >= 0 && ei2 < line2.elements.length - 1) {

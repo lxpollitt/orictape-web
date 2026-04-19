@@ -1,26 +1,7 @@
-import type { ByteInfo, BitStream, Program } from './decoder';
-import { readProgramLines, flagNonMonotonicLines, flagElementErrors, flagPointerAndTerminatorIssues } from './decoder';
+import type { ByteInfo, Program } from './decoder';
+import { readProgramLines, flagNonMonotonicLines, flagElementErrors, flagPointerAndTerminatorIssues, emptyBitStream } from './decoder';
 import { flagTokenisationMismatches } from './editor';
 import { TAP_META_MAGIC, type TapMetadata } from './tapCommon';
-
-/** A minimal empty BitStream for programs loaded from TAP (no waveform data). */
-function emptyStream(format: 'fast' | 'slow' = 'fast'): BitStream {
-  return {
-    format:         'fast',
-    bitCount:       0,
-    bitV:           new Uint8Array(0),
-    bitL1:          new Uint16Array(0),
-    bitFirstSample: new Uint32Array(0),
-    bitLastSample:  new Uint32Array(0),
-    bitUnclear:     new Uint8Array(0),
-    bitMaxIndex:    new Uint32Array(0),
-    bitMinIndex:    new Uint32Array(0),
-    firstSample:    0,
-    lastSample:     0,
-    minVal:         0,
-    maxVal:         0,
-  };
-}
 
 /**
  * Search for ORICTAPE_META magic in a byte range and parse the JSON metadata.
@@ -178,7 +159,7 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     const meta = findMetadata(data, start, end);
 
     const prog: Program = {
-      stream: emptyStream(meta?.format),
+      stream: emptyBitStream(meta?.format),
       bytes,
       lines:  [],
       name:   '',

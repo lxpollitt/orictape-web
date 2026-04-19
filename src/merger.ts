@@ -1,5 +1,6 @@
-import type { Program } from './decoder';
-import { lineHasHardError, lineHealth } from './decoder';
+import type { Program, ByteInfo, LineInfo } from './decoder';
+import { lineHasHardError, lineHealth, lineFirstAddr, lineNextAddr, emptyBitStream, invalidateLineHealth } from './decoder';
+import { getFullOriginalBytes, getHeaderOriginalBytes, storeOriginalBytesDelta, storeHeaderOriginalBytesDelta, flagAll } from './editor';
 
 // ── Source references ─────────────────────────────────────────────────────────
 // We store indices rather than copies of data. All raw data lives in
@@ -74,6 +75,22 @@ export interface MergedProgram {
    *  reference an absent source. */
   sources:    (Program | undefined)[];
   lines:      AlignedLine[];
+  /** Byte-level merged output — a synthesized Program whose bytes are the
+   *  concatenation of the best source's bytes for each non-rejected aligned
+   *  line, with next-line pointers and header end-address rewritten to match
+   *  the merged address space.
+   *
+   *  Derived once at merge creation from `sources` and `lines`.  Used by
+   *  tapEncoder for serialization, and available as a uniform Program view
+   *  for anything else that wants to consume the merged result.
+   *
+   *  Per-byte/per-line edit state from sources is preserved: edit flags and
+   *  originalBytesDelta ride along (with originalIndex rewritten into the
+   *  merged output's original-byte sequence).  Pointer / endAddr rewrites
+   *  use the standard editor paradigm — byte values that already match are
+   *  left alone; values that need to change get `edited: 'automatic'` and
+   *  displaced originals flow into delta. */
+  output:     Program;
   // Summary counts for badges / status bar (based on LineQuality)
   total:        number;
   clean:        number;   // all sources agree and all are byte-perfect
@@ -295,7 +312,11 @@ export function alignPrograms(
   }
   const issuesUnclear = issues - issuesError;
 
-  return { tapeCount, sources: programs, lines, total: active.length, clean, issues, issuesError, issuesUnclear, recovered, unverified };
+  // Synthesize the byte-level output Program from the aligned lines + source
+  // snapshots.  Done as a final step after all per-line decisions are made.
+  const output = buildMergedOutput(programs, lines);
+
+  return { tapeCount, sources: programs, lines, output, total: active.length, clean, issues, issuesError, issuesUnclear, recovered, unverified };
 }
 
 /**
@@ -344,6 +365,222 @@ export function mergeLineBytes(
   _line:   AlignedLine,
 ): MergedByte[] | null {
   return null;
+}
+
+// ── Byte-stream output synthesis ──────────────────────────────────────────────
+
+/**
+ * Clone a ByteInfo, optionally offsetting its originalIndex.  Used when
+ * copying bytes from a source program into the merged output — non-edit
+ * bytes' originalIndex values must be re-anchored into the merged output's
+ * original-byte sequence.  Edit bytes keep originalIndex=undefined.
+ */
+function cloneByteWithOffset(b: ByteInfo, offset: number): ByteInfo {
+  const c: ByteInfo = { ...b };
+  if (c.originalIndex !== undefined) c.originalIndex += offset;
+  return c;
+}
+
+/**
+ * Build the byte-level merged output Program for a MergedProgram.
+ *
+ * Per-line algorithm (matching the two-phase "copy verbatim, then apply edit
+ * via standard editor paradigm" approach):
+ *
+ *   1. Copy source line verbatim: bytes + originalBytesDelta, with
+ *      originalIndex rewritten into the merged output's sequential
+ *      original-byte space.
+ *   2. If the source line's next-line pointer value (which came along in the
+ *      verbatim copy) disagrees with the value the merged address space
+ *      requires, apply a targeted edit to the two pointer bytes — using the
+ *      same pattern as editor.ts fixLinePointers: match-against-original
+ *      first (so a coincidental match keeps the original ByteInfo), then
+ *      edited='automatic' otherwise, and storeOriginalBytesDelta to record
+ *      any displaced original.
+ *
+ * Sync bytes, header bytes (including originalBytesDelta), name bytes and
+ * the end-of-program marker get analogous treatment:
+ *   - Sync / name / end-marker: copied verbatim (sync+name from header
+ *     source; end-marker freshly synthesized with sequential originalIndex).
+ *   - Header endAddr bytes: copied verbatim first, then if the merged
+ *     endAddr differs from source's, apply the edit via
+ *     storeHeaderOriginalBytesDelta.
+ *
+ * Result: merged.output is a self-consistent Program.  A merge of two
+ * identical clean sources produces output bytes bit-for-bit identical to
+ * either source (no spurious 'automatic' flags).  Divergent content produces
+ * automatic-edit flags only where byte values genuinely had to change.
+ *
+ * The output's progNumber is left at 0 — merges don't participate in the
+ * progNumber identity scheme (they are labelled by their sources' numbers).
+ */
+function buildMergedOutput(
+  sources: ReadonlyArray<Program | undefined>,
+  lines:   ReadonlyArray<AlignedLine>,
+): Program {
+  // Pick a header source.  For MVP: first non-undefined source.  This suffices
+  // because all sources in a merge are takes of the same program, so their
+  // header metadata (startAddr, fileType, name) should agree.  Differences in
+  // endAddr are fixed up below.
+  const headerSource = sources.find(p => p !== undefined);
+
+  const out: Program = {
+    stream:     emptyBitStream(),
+    bytes:      [],
+    lines:      [],
+    name:       headerSource?.name ?? '',
+    progNumber: 0,
+    header: {
+      byteIndex: 0,
+      fileType:  headerSource?.header.fileType ?? 0,
+      startAddr: headerSource?.header.startAddr ?? 0x0501,
+      endAddr:   0,                                             // patched below
+      autorun:   headerSource?.header.autorun ?? false,
+    },
+  };
+
+  if (!headerSource || headerSource.lines.length === 0) {
+    return out;  // empty merge — nothing to synthesize
+  }
+
+  // ── Copy sync + header + name section from the header source ────────────
+  // Source layout: [0..byteIndex-1] sync, [byteIndex..byteIndex+8] header,
+  // [byteIndex+9..firstLineByte-1] name + null terminator.
+  //
+  // Sync and name bytes are assumed unedited (standard for any decoded
+  // program that hasn't been bulk-edited in those regions); we copy them
+  // with offset=0 so their originalIndex values carry through unchanged.
+  //
+  // Header bytes may be edited (e.g. fixPointersAndTerminators has run on
+  // source and changed endAddr) — we copy the current bytes AND clone
+  // header.originalBytesDelta so the "full original" reconstruction still
+  // works in the merged output.
+  const srcFirstLineByte = headerSource.lines[0].firstByte;
+  for (let i = 0; i < srcFirstLineByte; i++) {
+    out.bytes.push(cloneByteWithOffset(headerSource.bytes[i], 0));
+  }
+  out.header.byteIndex = headerSource.header.byteIndex;
+  if (headerSource.header.originalBytesDelta) {
+    out.header.originalBytesDelta = headerSource.header.originalBytesDelta.map(
+      b => cloneByteWithOffset(b, 0),
+    );
+  }
+
+  // nextOriginalIdx tracks the position in the merged output's original-byte
+  // sequence — advances by the full-original size (current bytes + delta) of
+  // each section we add, so that line and delta bytes slot in at the right
+  // positions regardless of source edit history.
+  //
+  // For the header section we just added, the original size equals
+  // srcFirstLineByte (header delta slots are accounted for by the 9 header
+  // bytes; sync and name bytes are unedited so their position == their
+  // originalIndex).
+  let nextOriginalIdx = srcFirstLineByte;
+
+  // ── Per-line copy ───────────────────────────────────────────────────────
+  for (const alignedLine of lines) {
+    if (alignedLine.rejected) continue;
+    const src = pickBestSource(alignedLine, sources);
+    const sourceProg = sources[src.tapeIdx];
+    if (!sourceProg) continue;
+    const sourceLine = sourceProg.lines[src.lineIdx];
+
+    // ── Phase 1: verbatim copy ────────────────────────────────────────────
+    // Offset = merged_first_original - source_first_original.  Both refer to
+    // the position of the first original byte of the line's full-original
+    // sequence in their respective original-byte streams.
+    const sourceFullOriginal = getFullOriginalBytes(sourceProg, sourceLine);
+    if (sourceFullOriginal.length === 0) continue;  // all edited? should not happen
+    const sourceFirstOriginalIdx = sourceFullOriginal[0].originalIndex ?? 0;
+    const offset = nextOriginalIdx - sourceFirstOriginalIdx;
+
+    const mergedLineFirstByte = out.bytes.length;
+
+    // Copy current bytes from source line into merged output.
+    for (let i = sourceLine.firstByte; i <= sourceLine.lastByte; i++) {
+      out.bytes.push(cloneByteWithOffset(sourceProg.bytes[i], offset));
+    }
+
+    // Clone LineInfo carrying all per-line metadata (elements, v, syntax
+    // counters, ignoreErrors, etc.); relocate firstByte/lastByte and
+    // offset the delta's originalIndex values.
+    const mergedLine: LineInfo = structuredClone(sourceLine);
+    mergedLine.firstByte = mergedLineFirstByte;
+    mergedLine.lastByte  = out.bytes.length - 1;
+    if (mergedLine.originalBytesDelta) {
+      mergedLine.originalBytesDelta = mergedLine.originalBytesDelta.map(
+        b => cloneByteWithOffset(b, offset),
+      );
+    }
+    // Position-dependent / cached fields will be recomputed by flagAll.
+    mergedLine.lenErr       = false;
+    mergedLine.earlyEnd     = undefined;
+    mergedLine.nonMonotonic = undefined;
+    invalidateLineHealth(mergedLine);
+
+    out.lines.push(mergedLine);
+
+    // ── Phase 2: apply pointer edit if required ───────────────────────────
+    // Desired pointer = merged_lineFirstAddr + source_declaredSize.
+    // Preserves source's lenErr character: if source was clean, desired
+    // matches the actual bytes at merged_lineLast+1; if source had lenErr,
+    // the mismatch carries through.
+    const mergedLineIdx      = out.lines.length - 1;
+    const mergedLineFirstAddr = lineFirstAddr(out, mergedLineIdx);
+    const sourceDeclaredSize  = lineNextAddr(sourceProg, src.lineIdx)
+                              - lineFirstAddr(sourceProg, src.lineIdx);
+    const desiredPtrValue = (mergedLineFirstAddr + sourceDeclaredSize) & 0xFFFF;
+    const currentPtrValue = out.bytes[mergedLine.firstByte].v
+                          | (out.bytes[mergedLine.firstByte + 1].v << 8);
+    if (currentPtrValue !== desiredPtrValue) {
+      const desiredLo = desiredPtrValue & 0xFF;
+      const desiredHi = (desiredPtrValue >> 8) & 0xFF;
+      const fullOriginal = getFullOriginalBytes(out, mergedLine);
+      out.bytes[mergedLine.firstByte] = fullOriginal.length > 0 && desiredLo === fullOriginal[0].v
+        ? fullOriginal[0]
+        : { v: desiredLo, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+      out.bytes[mergedLine.firstByte + 1] = fullOriginal.length > 1 && desiredHi === fullOriginal[1].v
+        ? fullOriginal[1]
+        : { v: desiredHi, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+      storeOriginalBytesDelta(out, mergedLine, fullOriginal);
+    }
+
+    // Advance original-index cursor by this line's full-original size.
+    nextOriginalIdx += sourceFullOriginal.length;
+  }
+
+  // ── End-of-program marker ────────────────────────────────────────────────
+  // Freshly synthesized (2 × 0x00) — no source to inherit from.  These are
+  // considered "original" to the merged output, with sequential originalIndex.
+  out.bytes.push({ v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, originalIndex: nextOriginalIdx++ });
+  out.bytes.push({ v: 0x00, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, originalIndex: nextOriginalIdx++ });
+
+  // ── Patch header endAddr ────────────────────────────────────────────────
+  // endAddr (exclusive) = startAddr + (bytes from first line to past end marker).
+  // Out.bytes.length is the position one past the second end-marker byte,
+  // which is exactly where endAddr should resolve to.
+  if (out.lines.length > 0) {
+    const firstLineOffset = out.lines[0].firstByte;
+    const newEndAddr = out.header.startAddr + (out.bytes.length - firstLineOffset);
+    if (out.header.endAddr !== newEndAddr) {
+      const newEndHi = (newEndAddr >> 8) & 0xFF;
+      const newEndLo = newEndAddr & 0xFF;
+      const hiIdx = out.header.byteIndex + 4;
+      const loIdx = out.header.byteIndex + 5;
+      const fullOriginal = getHeaderOriginalBytes(out);
+      out.bytes[hiIdx] = fullOriginal.length > 4 && newEndHi === fullOriginal[4].v
+        ? fullOriginal[4]
+        : { v: newEndHi, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+      out.bytes[loIdx] = fullOriginal.length > 5 && newEndLo === fullOriginal[5].v
+        ? fullOriginal[5]
+        : { v: newEndLo, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+      storeHeaderOriginalBytesDelta(out, fullOriginal);
+      out.header.endAddr = newEndAddr;
+    }
+  }
+
+  flagAll(out);
+  return out;
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────

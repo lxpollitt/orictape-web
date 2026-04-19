@@ -398,6 +398,28 @@ export function streamBitAt(s: BitStream, i: number): BitInfo {
   };
 }
 
+/**
+ * Build a minimal empty BitStream — used for Programs that have no waveform
+ * data (e.g. loaded from TAP files, or synthesized by the merger).
+ */
+export function emptyBitStream(format: 'fast' | 'slow' = 'fast'): BitStream {
+  return {
+    format,
+    bitCount:       0,
+    bitV:           new Uint8Array(0),
+    bitL1:          new Uint16Array(0),
+    bitFirstSample: new Uint32Array(0),
+    bitLastSample:  new Uint32Array(0),
+    bitUnclear:     new Uint8Array(0),
+    bitMaxIndex:    new Uint32Array(0),
+    bitMinIndex:    new Uint32Array(0),
+    firstSample:    0,
+    lastSample:     0,
+    minVal:         0,
+    maxVal:         0,
+  };
+}
+
 export interface ProgramHeader {
   /** Byte index of the first header byte (after the 0x24 sync marker)
    *  within the bytes[] array. */
