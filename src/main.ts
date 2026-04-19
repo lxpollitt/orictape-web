@@ -1329,23 +1329,16 @@ function applyMergeColumnWidths(): void {
 
 /**
  * Render the merged output's byte stream in the hex panel.  Delegates to the
- * shared renderHex(), translating selMergeLine (an AlignedLine index) into
- * the corresponding merged.output.lines index via a non-rejected-count walk.
+ * shared renderHex(); selection is driven by selByte (which selectMergeElem
+ * keeps in sync with the element selection, and selectMergeByteAt updates on
+ * hex clicks / keyboard navigation).  Falls back to line-only highlighting
+ * when selByte is null but a merged line is selected.
  */
 function renderMergedHex(merged: MergedProgram): void {
-  // Translate selMergeLine → output line index.  Rejected aligned lines have
-  // no output counterpart and produce no highlight.
-  let selOutputLineIdx: number | null = null;
-  if (selMergeLine !== null && selMergeLine >= 0 && selMergeLine < merged.lines.length) {
-    if (!merged.lines[selMergeLine].rejected) {
-      let outIdx = 0;
-      for (let i = 0; i < selMergeLine; i++) {
-        if (!merged.lines[i].rejected) outIdx++;
-      }
-      selOutputLineIdx = outIdx;
-    }
-  }
-  renderHex(merged.output, null, selOutputLineIdx);
+  const selOutputLineIdx = selMergeLine !== null
+    ? outputLineIdxForMli(merged, selMergeLine)
+    : -1;
+  renderHex(merged.output, selByte, selOutputLineIdx >= 0 ? selOutputLineIdx : null);
 }
 
 // ── TAP builder modal ─────────────────────────────────────────────────────────
@@ -1516,9 +1509,12 @@ function doDownloadTap(): void {
       // the merge was created.
       const name = merged.sources.find(p => p?.name)?.name ?? 'MERGED';
       const block: TapBlock = { name, lines: linesFromMerged(merged), autorun: entry.autorun };
-      // For merged programs, use the first available source for metadata.
-      const metaProg = includeMeta ? merged.sources.find(p => p !== undefined) : undefined;
-      entries.push({ block, metadata: metaProg ? encodeTapMetadata(metaProg) : undefined });
+      // Metadata describes the merged output's error/edit state — the Program
+      // whose bytes actually went into the block above.  Using a source
+      // Program here would produce flags and lineDeltas at offsets that don't
+      // match the merged content whenever bestSource picked different sources
+      // for different lines.
+      entries.push({ block, metadata: includeMeta ? encodeTapMetadata(merged.output) : undefined });
     }
   }
 
@@ -1613,26 +1609,32 @@ mergeOkBtn.addEventListener('click', () => {
 
 hexPanelOuter.addEventListener('focus', () => { focusedPanel = 'hex'; });
 hexPanel.addEventListener('click', (e) => {
-  if (viewMode !== 'tape') return;
   focusedPanel = 'hex';
   const el = (e.target as Element).closest<HTMLElement>('[data-i]');
   if (!el) return;
   const byteIdx = +el.dataset.i!;
-  if (byteIdx === selByte) {
-    // Already selected — toggle between 100% and 400% byte-level zoom.
-    waveform.zoomTo(waveform.getZoomFactor() >= 4 ? 1 : 4);
+  if (viewMode === 'tape') {
+    if (byteIdx === selByte) {
+      // Already selected — toggle between 100% and 400% byte-level zoom.
+      waveform.zoomTo(waveform.getZoomFactor() >= 4 ? 1 : 4);
+    } else {
+      selectByte(byteIdx);
+    }
   } else {
-    selectByte(byteIdx);
+    selectMergeByteAt(byteIdx);
   }
 });
 hexPanel.addEventListener('dblclick', (e) => {
-  if (viewMode !== 'tape') return;
   const el = (e.target as Element).closest<HTMLElement>('[data-i]');
   if (!el) return;
   const byteIdx = +el.dataset.i!;
-  if (byteIdx !== selByte) selectByte(byteIdx);
-  // Double-click always zooms to 400%.
-  waveform.zoomTo(4);
+  if (viewMode === 'tape') {
+    if (byteIdx !== selByte) selectByte(byteIdx);
+    // Double-click always zooms to 400%.
+    waveform.zoomTo(4);
+  } else {
+    selectMergeByteAt(byteIdx);
+  }
 });
 
 // Prevent Safari's swipe-back/forward navigation gesture from firing when the
@@ -1733,8 +1735,36 @@ function selectByte(i: number): void {
 }
 
 /**
+ * Translate an AlignedLine index (mli) to its corresponding merged.output
+ * line index, counting non-rejected aligned lines.  Returns -1 if the
+ * aligned line is rejected (no output counterpart).
+ */
+function outputLineIdxForMli(merged: MergedProgram, mli: number): number {
+  if (mli < 0 || mli >= merged.lines.length || merged.lines[mli].rejected) return -1;
+  let outIdx = 0;
+  for (let i = 0; i < mli; i++) if (!merged.lines[i].rejected) outIdx++;
+  return outIdx;
+}
+
+/**
+ * Translate a merged.output line index back to the AlignedLine index (mli).
+ * Inverse of outputLineIdxForMli.
+ */
+function mliForOutputLineIdx(merged: MergedProgram, outputLineIdx: number): number {
+  let count = 0;
+  for (let i = 0; i < merged.lines.length; i++) {
+    if (merged.lines[i].rejected) continue;
+    if (count === outputLineIdx) return i;
+    count++;
+  }
+  return -1;
+}
+
+/**
  * Select a specific element in the merged basic view.
- * Updates state, DOM selection classes, hex panel, and status bar.
+ * Updates state, DOM selection classes, hex panel, and status bar.  Also
+ * computes the corresponding byte in merged.output and stores it in selByte
+ * so the hex panel can highlight it with byte-level precision.
  */
 function selectMergeElem(mli: number, col: 0 | 1 | 2, ei: number): void {
   selMergeLine = mli;
@@ -1752,10 +1782,62 @@ function selectMergeElem(mli: number, col: 0 | 1 | 2, ei: number): void {
   elemEl?.classList.add('sel');
   rowEl?.scrollIntoView({ block: 'nearest' });
 
-  // Update hex panel to show the selected column's source bytes.
+  // Compute and store the byte in merged.output that corresponds to this
+  // element, so the hex panel can highlight it (byte-level parity with
+  // tape-mode behaviour).  For rejected lines the element has no output
+  // counterpart — clear selByte instead.
   const merged = userMerges[activeProgIdx]?.result;
-  if (merged) renderMergedHex(merged);
+  if (merged) {
+    const outputLineIdx = outputLineIdxForMli(merged, mli);
+    if (outputLineIdx >= 0) {
+      const outputLine = merged.output.lines[outputLineIdx];
+      // Clamp ei to what the output line actually has — source-column
+      // element selections may index past the output's element count when
+      // the columns disagree; in that case fall back to the last element.
+      const safeEi = Math.min(ei, outputLine.elements.length - 1);
+      selByte = byteForElem(outputLine, Math.max(0, safeEi));
+    } else {
+      selByte = null;
+    }
+    renderMergedHex(merged);
+  }
 
+  updateStatusBar();
+}
+
+/**
+ * Select a byte in the merged.output byte stream (called from hex click or
+ * keyboard navigation in the merge view).  Mirrors selectByte for tape mode
+ * but updates merge-specific selection state (selMergeLine/Col/Elem) and
+ * omits waveform interaction (merges have no single-tape waveform backing).
+ */
+function selectMergeByteAt(byteIdx: number): void {
+  const merged = userMerges[activeProgIdx]?.result;
+  if (!merged) return;
+
+  selByte = byteIdx;
+
+  // Find which output line (if any) contains this byte.  Bytes in
+  // sync/header/name/end-marker sections don't belong to any line — clear
+  // the merge element selection in that case; the hex highlight alone
+  // conveys the selection.
+  const out = merged.output;
+  const outputLineIdx = out.lines.findIndex(l => byteIdx >= l.firstByte && byteIdx <= l.lastByte);
+  if (outputLineIdx >= 0) {
+    const mli = mliForOutputLineIdx(merged, outputLineIdx);
+    const ei  = elemIdxForByte(out.lines[outputLineIdx], byteIdx);
+    selMergeLine = mli >= 0 ? mli : null;
+    selMergeCol  = 1;  // hex reflects the merged output — middle column
+    selMergeElem = ei >= 0 ? ei : null;
+  } else {
+    selMergeLine = null;
+    selMergeCol  = null;
+    selMergeElem = null;
+  }
+
+  // Re-render both panels so basic-view highlight tracks the selection.
+  renderMergeView(merged);
+  renderMergedHex(merged);
   updateStatusBar();
 }
 
@@ -2025,7 +2107,12 @@ function hexBytesPerRow(): number {
   return Math.max(1, Math.floor(hexPanel.clientWidth / cellW));
 }
 
-function navigateHex(key: string, shift: boolean, prog: Program): void {
+/**
+ * Keyboard navigation for the hex panel.  `select` is the byte-selection
+ * callback — selectByte for tape mode, selectMergeByteAt for merge mode.
+ * This keeps the navigation logic mode-agnostic.
+ */
+function navigateHex(key: string, shift: boolean, prog: Program, select: (i: number) => void): void {
   const n   = prog.bytes.length;
   const cur = selByte ?? prog.lines[0]?.firstByte ?? 0;
 
@@ -2037,7 +2124,7 @@ function navigateHex(key: string, shift: boolean, prog: Program): void {
       ArrowUp:    Math.max(0,     cur - bpr),
       ArrowDown:  Math.min(n - 1, cur + bpr),
     };
-    selectByte(next[key] ?? cur);
+    select(next[key] ?? cur);
     return;
   }
 
@@ -2045,10 +2132,10 @@ function navigateHex(key: string, shift: boolean, prog: Program): void {
   if (key === 'ArrowLeft' || key === 'ArrowRight') {
     const step = key === 'ArrowLeft' ? -1 : 1;
     for (let i = cur + step; i >= 0 && i < n; i += step) {
-      if (isErrByte(prog.bytes[i])) { selectByte(i); return; }
+      if (isErrByte(prog.bytes[i])) { select(i); return; }
     }
     // No error found — go to the start or end of the file as end-of-search feedback.
-    selectByte(step < 0 ? 0 : n - 1);
+    select(step < 0 ? 0 : n - 1);
     return;
   }
 
@@ -2062,12 +2149,12 @@ function navigateHex(key: string, shift: boolean, prog: Program): void {
     const rowStart = row * bpr;
     const rowEnd   = Math.min(rowStart + bpr - 1, n - 1);
     for (let b = rowStart; b <= rowEnd; b++) {
-      if (isErrByte(prog.bytes[b])) { selectByte(b); return; }
+      if (isErrByte(prog.bytes[b])) { select(b); return; }
     }
     row += step;
   }
   // No error row found — go to the start or end of the file as end-of-search feedback.
-  selectByte(step < 0 ? 0 : n - 1);
+  select(step < 0 ? 0 : n - 1);
 }
 
 function navigateBasic(key: string, shift: boolean, prog: Program): void {
@@ -2364,7 +2451,14 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
 
   if (!NAV_KEYS.has(e.key)) return;
   if (viewMode === 'merged') {
-    if (focusedPanel === 'basic') { e.preventDefault(); navigateMerge(e.key, e.altKey); }
+    if (focusedPanel === 'basic') { e.preventDefault(); navigateMerge(e.key, e.altKey); return; }
+    if (focusedPanel === 'hex') {
+      const merged = userMerges[activeProgIdx]?.result;
+      if (merged) {
+        e.preventDefault();
+        navigateHex(e.key, e.altKey, merged.output, selectMergeByteAt);
+      }
+    }
     return;
   }
   if (viewMode !== 'tape') return;
@@ -2372,7 +2466,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (!prog) return;
   if (focusedPanel === 'hex') {
     e.preventDefault();
-    navigateHex(e.key, e.altKey, prog);
+    navigateHex(e.key, e.altKey, prog, selectByte);
   } else if (focusedPanel === 'basic') {
     e.preventDefault();
     navigateBasic(e.key, e.altKey, prog);
