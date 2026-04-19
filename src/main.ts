@@ -472,15 +472,11 @@ function renderAll(): void {
     if (!merged) { clearPanels(); return; }
     renderMergeView(merged);
     renderMergedHex(merged);
-    // Show waveform from the first merge source (if it's a WAV tape).
-    const primSrc     = userMerge!.sources[0];
-    const primTape    = tapes[primSrc.tapeIdx];
-    const primProg    = primTape?.programs[primSrc.progIdx];
-    if (primProg && primTape && !primTape.fromTap) {
-      waveform.setData(primTape.samples, primProg, primTape.sampleRate, buildStreamInfos(primTape));
-    } else {
-      waveform.clearData();
-    }
+    // Merge view has no single tape backing — samples aren't snapshotted
+    // (they're tape-level, not Program-level), so the waveform is always
+    // empty here.  Any attempt to show source samples would break the
+    // merge's self-contained guarantee.
+    waveform.clearData();
     updateStatusBar();
     return;
   }
