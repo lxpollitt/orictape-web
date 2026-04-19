@@ -25,7 +25,7 @@ import { readFileSync, readdirSync, existsSync, statSync } from 'fs';
 import { join, basename } from 'path';
 import { parseTapFile } from '../src/tapDecoder';
 import { alignPrograms, isLineClean, type LineSource } from '../src/merger';
-import type { Program } from '../src/decoder';
+import type { Program, ByteInfo } from '../src/decoder';
 
 // ── ANSI colour helpers (disabled when piped) ────────────────────────────────
 
@@ -36,6 +36,7 @@ const c = {
   yellow: (s: string) => isTTY ? `\x1b[33m${s}\x1b[0m` : s,
   red:    (s: string) => isTTY ? `\x1b[31m${s}\x1b[0m` : s,
   dim:    (s: string) => isTTY ? `\x1b[2m${s}\x1b[0m`  : s,
+  grey:   (s: string) => isTTY ? `\x1b[90m${s}\x1b[0m` : s,
 };
 
 // ── Character sanitisation ───────────────────────────────────────────────────
@@ -102,12 +103,20 @@ interface LineStats {
   errorCount:   number;  // chkErr bytes + structural issues
   unclearCount: number;  // unclear-only bytes (not also chkErr)
   totalIssues:  number;  // errorCount + unclearCount
+  // Edit-metadata counts — not health-affecting, but tracked so differences
+  // between baseline and current can be flagged as 'changed' (useful for
+  // detecting drift in edit-provenance tracking through the tapEncoder).
+  editedExplicitCount:  number;  // bytes with edited === 'explicit'
+  editedAutomaticCount: number;  // bytes with edited === 'automatic'
+  deltaCount:           number;  // line.originalBytesDelta?.length ?? 0
 }
 
 function getLineStats(prog: Program, lineIdx: number): LineStats {
   const line = prog.lines[lineIdx];
   let errorCount = 0;
   let unclearCount = 0;
+  let editedExplicitCount = 0;
+  let editedAutomaticCount = 0;
 
   // Structural issues count as errors.
   if (line.lenErr || line.earlyEnd || line.nonMonotonic) errorCount++;
@@ -119,15 +128,29 @@ function getLineStats(prog: Program, lineIdx: number): LineStats {
 
   for (let i = line.firstByte; i <= line.lastByte; i++) {
     const b = prog.bytes[i];
-    if (b?.chkErr)       errorCount++;
-    else if (b?.unclear) unclearCount++;
+    if (b?.chkErr)                         errorCount++;
+    else if (b?.unclear)                   unclearCount++;
+    if (b?.edited === 'explicit')          editedExplicitCount++;
+    else if (b?.edited === 'automatic')    editedAutomaticCount++;
   }
+
+  const deltaCount = line.originalBytesDelta?.length ?? 0;
 
   const health: LineHealth = errorCount > 0 ? 'error'
     : unclearCount > 0 ? 'warning'
     : 'clean';
 
-  return { health, errorCount, unclearCount, totalIssues: errorCount + unclearCount };
+  return {
+    health, errorCount, unclearCount, totalIssues: errorCount + unclearCount,
+    editedExplicitCount, editedAutomaticCount, deltaCount,
+  };
+}
+
+/** True if any edit-provenance counts (edit flags or delta count) differ. */
+function editMetaDiffers(a: LineStats, b: LineStats): boolean {
+  return a.editedExplicitCount  !== b.editedExplicitCount
+      || a.editedAutomaticCount !== b.editedAutomaticCount
+      || a.deltaCount           !== b.deltaCount;
 }
 
 /**
@@ -188,12 +211,16 @@ type ElemHealth = 'clean' | 'unclear' | 'error';
 /** Element-level health: ok or error (unknown keyword, non-monotonic line number). */
 type ElemStatus = 'ok' | 'error';
 
+/** Edit-provenance status of the byte(s) backing an element. */
+type ElemEditStatus = 'none' | 'explicit' | 'automatic' | 'mixed';
+
 interface ElemInfo {
-  elemStatus: ElemStatus;  // element-level: ok or error
-  byteHealth: ElemHealth;  // byte-level: clean, unclear, or error
+  elemStatus: ElemStatus;      // element-level: ok or error
+  byteHealth: ElemHealth;      // byte-level: clean, unclear, or error
+  editStatus: ElemEditStatus;  // byte-level edit provenance
 }
 
-/** Determine the element status and byte health for a single element. */
+/** Determine the element status, byte health, and edit status for a single element. */
 function getElemInfo(prog: Program, lineIdx: number, elemIdx: number): ElemInfo {
   const line = prog.lines[lineIdx];
   const elem = line.elements[elemIdx];
@@ -204,20 +231,28 @@ function getElemInfo(prog: Program, lineIdx: number, elemIdx: number): ElemInfo 
     (elemIdx === 0 && line.nonMonotonic) ? 'error' :
     'ok';
 
-  // Byte-level health.
+  // Byte-level health and edit status.  Element 0 spans 2 bytes (line number);
+  // the others are single bytes.
   let byteHealth: ElemHealth;
+  let editStatus: ElemEditStatus;
+  const editOf = (e: ByteInfo['edited']): Exclude<ElemEditStatus, 'mixed'> =>
+    e === 'explicit' ? 'explicit' : e === 'automatic' ? 'automatic' : 'none';
   if (elemIdx === 0) {
     const b2 = prog.bytes[line.firstByte + 2];
     const b3 = prog.bytes[line.firstByte + 3];
     byteHealth = (b2?.chkErr || b3?.chkErr) ? 'error'
       : (b2?.unclear || b3?.unclear) ? 'unclear'
       : 'clean';
+    const e2 = editOf(b2?.edited);
+    const e3 = editOf(b3?.edited);
+    editStatus = e2 === e3 ? e2 : 'mixed';
   } else {
     const b = prog.bytes[line.firstByte + 3 + elemIdx];
     byteHealth = b?.chkErr ? 'error' : b?.unclear ? 'unclear' : 'clean';
+    editStatus = editOf(b?.edited);
   }
 
-  return { elemStatus, byteHealth };
+  return { elemStatus, byteHealth, editStatus };
 }
 
 /** Build per-element info arrays for a line. */
@@ -226,17 +261,90 @@ function lineElemInfos(prog: Program, lineIdx: number): ElemInfo[] {
   return line.elements.map((_, ei) => getElemInfo(prog, lineIdx, ei));
 }
 
+/** Format a delta-byte array as ` [0x11 0x32]` in grey, or empty string when empty. */
+function formatDelta(delta: ByteInfo[] | undefined): string {
+  if (!delta || delta.length === 0) return '';
+  const hex = delta.map(b => '0x' + b.v.toString(16).padStart(2, '0')).join(' ');
+  return c.grey(` [${hex}]`);
+}
+
+/**
+ * Format delta suffixes for a paired baseline/current line, aligning the
+ * visual representation: if either side has non-empty deltas, both sides
+ * show the bracket (empty side shows ` []`).  If both are empty, both
+ * sides show nothing.  Matches user's request for visual parity.
+ */
+function formatDeltaPair(
+  aDelta: ByteInfo[] | undefined,
+  bDelta: ByteInfo[] | undefined,
+): [string, string] {
+  const aEmpty = !aDelta || aDelta.length === 0;
+  const bEmpty = !bDelta || bDelta.length === 0;
+  if (aEmpty && bEmpty) return ['', ''];
+  const fmt = (d: ByteInfo[] | undefined, empty: boolean) => {
+    if (empty) return c.grey(' []');
+    const hex = d!.map(b => '0x' + b.v.toString(16).padStart(2, '0')).join(' ');
+    return c.grey(` [${hex}]`);
+  };
+  return [fmt(aDelta, aEmpty), fmt(bDelta, bEmpty)];
+}
+
+// ── Header byte-level comparison ─────────────────────────────────────────────
+
+/** Count edit flags and delta size across the 9 header bytes. */
+function headerEditStats(prog: Program): { explicit: number; automatic: number; deltaCount: number } {
+  const h = prog.header;
+  let explicit = 0, automatic = 0;
+  for (let i = 0; i < 9; i++) {
+    const b = prog.bytes[h.byteIndex + i];
+    if (b?.edited === 'explicit')        explicit++;
+    else if (b?.edited === 'automatic')  automatic++;
+  }
+  return { explicit, automatic, deltaCount: h.originalBytesDelta?.length ?? 0 };
+}
+
+/**
+ * Format the 9 header bytes as side-by-side hex strings with colouring:
+ *   - Blue when the edit-provenance status differs between baseline/current
+ *   - Red when the byte values differ (but edit status matches)
+ *   - No colour when both value and edit status match
+ * Blue wins over red — matches the per-element rule.
+ */
+function formatHeaderBytes(aProg: Program, bProg: Program): { aStr: string; bStr: string } {
+  const BLUE = '\x1b[34m', RED = '\x1b[31m', CLEAR = '\x1b[0m';
+  const aHex: string[] = [], bHex: string[] = [];
+  for (let i = 0; i < 9; i++) {
+    const a = aProg.bytes[aProg.header.byteIndex + i];
+    const b = bProg.bytes[bProg.header.byteIndex + i];
+    const aEdit = a?.edited ?? 'none';
+    const bEdit = b?.edited ?? 'none';
+    const col = !isTTY ? ''
+      : aEdit !== bEdit ? BLUE
+      : a?.v !== b?.v   ? RED
+      : '';
+    const aByte = (a?.v ?? 0).toString(16).padStart(2, '0');
+    const bByte = (b?.v ?? 0).toString(16).padStart(2, '0');
+    aHex.push(col ? `${col}${aByte}${CLEAR}` : aByte);
+    bHex.push(col ? `${col}${bByte}${CLEAR}` : bByte);
+  }
+  return { aStr: aHex.join(' '), bStr: bHex.join(' ') };
+}
+
 // ── Element-level diff for conflict lines ────────────────────────────────────
 
 /**
  * LCS-based element diff with colour rules:
  *
- * Step 1: If element status differs between sides AND own is error → Red
- * Step 2: If both element error AND text changed → Red
- * Step 3: If element text differs OR byte health differs → colour by own byte health:
- *           error → Red, unclear → Yellow,
- *           clean + severity CHANGED → Yellow, clean otherwise → No colour
- * Otherwise: No colour (elements identical in every way)
+ *   Blue overrides everything when the element's edit-provenance status
+ *   differs between sides (matched pair) or when own side is edited and
+ *   unmatched.  Matches app UI convention (hb-edited / hb-auto-edited).
+ *
+ *   Otherwise, existing health-based rules apply:
+ *     - Element error (unknown keyword / non-monotonic) → Red
+ *     - Byte-level chkErr → Red
+ *     - Byte-level unclear → Yellow
+ *     - Clean + severity CHANGED → Yellow
+ *     - Clean otherwise → No colour
  */
 function highlightElementDiffs(
   a: string[], aInfos: ElemInfo[],
@@ -278,6 +386,8 @@ function highlightElementDiffs(
   const aColours = new Array<string>(n).fill('');
   const bColours = new Array<string>(m).fill('');
 
+  const BLUE = '\x1b[34m';
+
   const byteColour = (bh: ElemHealth): string => {
     if (bh === 'error')   return '\x1b[31m';
     if (bh === 'unclear') return '\x1b[33m';
@@ -285,47 +395,50 @@ function highlightElementDiffs(
     return '';
   };
 
-  // Handle text-differing elements (LCS flagged).
+  // Handle text-differing elements (LCS flagged).  Blue wins if own is
+  // edited — we have no counterpart to compare against but the edit
+  // provenance is itself information worth highlighting.
   for (let k = 0; k < n; k++) {
     if (!aFlags[k]) continue;
     const ai = aInfos[k];
-    // Find if the other side has a corresponding diff element with error status.
-    // For step 1, we need to know the other side's elem status.
-    // We don't have a direct pairing for LCS diffs, so check elem status independently.
-    // Step 1: if own elem is error and the element health changed from ok on the other side,
-    // that's covered by: own elem error → Red.
-    // But we need the other side's elem status. For unpaired diffs we can't know directly.
-    // Simplification: for text diffs, step 1 and 2 both resolve to "own elem error → Red".
+    if (ai.editStatus !== 'none') { aColours[k] = BLUE; continue; }
     if (ai.elemStatus === 'error') { aColours[k] = '\x1b[31m'; continue; }
-    // Step 3: colour by byte health.
     aColours[k] = byteColour(ai.byteHealth);
   }
   for (let k = 0; k < m; k++) {
     if (!bFlags[k]) continue;
     const bi = bInfos[k];
+    if (bi.editStatus !== 'none') { bColours[k] = BLUE; continue; }
     if (bi.elemStatus === 'error') { bColours[k] = '\x1b[31m'; continue; }
     bColours[k] = byteColour(bi.byteHealth);
   }
 
-  // Handle matched elements with health differences (post-pass).
+  // Handle matched elements (text identical).  Blue wins when edit status
+  // differs between sides.  Otherwise compare health/element-status.
   for (const [ai, bi] of matchedPairs) {
     const aInfo = aInfos[ai];
     const bInfo = bInfos[bi];
 
-    // Skip if completely identical.
-    if (aInfo.elemStatus === bInfo.elemStatus && aInfo.byteHealth === bInfo.byteHealth) continue;
+    // Skip if completely identical across every dimension we care about.
+    if (aInfo.elemStatus === bInfo.elemStatus
+        && aInfo.byteHealth === bInfo.byteHealth
+        && aInfo.editStatus === bInfo.editStatus) continue;
 
-    // Step 1: element status differs.
+    // Edit status differs — blue overrides everything else.
+    if (aInfo.editStatus !== bInfo.editStatus) {
+      aColours[ai] = BLUE;
+      bColours[bi] = BLUE;
+      continue;
+    }
+
+    // Element status differs.
     if (aInfo.elemStatus !== bInfo.elemStatus) {
       aColours[ai] = aInfo.elemStatus === 'error' ? '\x1b[31m' : byteColour(aInfo.byteHealth);
       bColours[bi] = bInfo.elemStatus === 'error' ? '\x1b[31m' : byteColour(bInfo.byteHealth);
       continue;
     }
 
-    // Both same elem status. Step 2: both error + text changed — can't happen here
-    // (matched pairs have same text by definition). So fall through to step 3.
-
-    // Step 3: byte health differs — colour by own byte health.
+    // Byte health differs — colour by own byte health.
     aColours[ai] = byteColour(aInfo.byteHealth);
     bColours[bi] = byteColour(bInfo.byteHealth);
   }
@@ -598,6 +711,18 @@ for (const pair of pairs) {
     globalSeverity.regression++;
   }
 
+  // Header edit-meta diff — edit flags on the 9 header bytes and the
+  // header's originalBytesDelta.  Treated as a 'changed' severity like line
+  // edit-meta drift: surfaces provenance drift without escalating to a
+  // regression.
+  const baseHdrStats = headerEditStats(baseProg);
+  const currHdrStats = headerEditStats(currProg);
+  const headerEditMetaDiffers =
+    baseHdrStats.explicit  !== currHdrStats.explicit  ||
+    baseHdrStats.automatic !== currHdrStats.automatic ||
+    baseHdrStats.deltaCount !== currHdrStats.deltaCount;
+  if (headerEditMetaDiffers) globalSeverity.changed++;
+
   // Use the merger to do line-level alignment.
   const merged = alignPrograms([baseProg, currProg]);
 
@@ -621,7 +746,19 @@ for (const pair of pairs) {
 
     if (baseSrc && currSrc) {
       if (line.status === 'consensus') {
-        consensusCount++;
+        // Consensus on BASIC text — but still check for edit-metadata drift
+        // (edit flags, originalBytesDelta).  These don't affect the decoded
+        // program's semantics but indicate provenance changes worth surfacing
+        // (e.g. when validating that the tapEncoder / merger preserve edit
+        // tracking faithfully).  Report as 'changed', not a regression.
+        const baseStats = getLineStats(baseProg, baseSrc.lineIdx);
+        const currStats = getLineStats(currProg, currSrc.lineIdx);
+        if (editMetaDiffers(baseStats, currStats)) {
+          classifiedLines.push({ lineNum: line.lineNum, severity: 'changed', kind: 'conflict', baseSrc, currSrc });
+          globalSeverity.changed++;
+        } else {
+          consensusCount++;
+        }
       } else {
         const severity = classifyConflict(baseProg, baseSrc.lineIdx, currProg, currSrc.lineIdx);
         classifiedLines.push({ lineNum: line.lineNum, severity, kind: 'conflict', baseSrc, currSrc });
@@ -636,7 +773,7 @@ for (const pair of pairs) {
     }
   }
 
-  if (classifiedLines.length === 0 && headerDiffs.length === 0 && headerWarnings.length === 0) {
+  if (classifiedLines.length === 0 && headerDiffs.length === 0 && headerWarnings.length === 0 && !headerEditMetaDiffers) {
     // Lines and headers all match — programs are identical.
     if (verbose) {
       if (lastOutput === 'changes') console.log('');
@@ -674,21 +811,24 @@ for (const pair of pairs) {
   console.log(`  ${parts.join(', ')}`);
   lastOutput = 'changes';
 
-  // Show header differences (if any) before line-level details.
-  if (headerDiffs.length > 0) {
-    if (verbose) {
-      for (const hd of headerDiffs) {
-        console.log(`  ${c.yellow(`${hd.field} differs:`)}`);
-        console.log(`    baseline: ${hd.baseVal}`);
-        console.log(`    current:  ${hd.currVal}`);
-      }
-    } else {
-      const fields = headerDiffs.map(hd => hd.field.toLowerCase());
-      console.log(`  ${c.yellow(`Headers differ: ${fields.join(', ')}`)}`);
+  // Show header differences (if any) before line-level details.  Mirrors the
+  // per-line output style: a "Header: CHANGED" label followed by baseline
+  // and current hex bytes with colouring (blue where edit status differs,
+  // red where byte values differ) and a delta-bytes suffix.  Field-level
+  // summaries (name, fileType, etc.) are appended below for context.
+  if (headerDiffs.length > 0 || headerEditMetaDiffers) {
+    const { aStr, bStr } = formatHeaderBytes(baseProg, currProg);
+    const [aDelta, bDelta] = formatDeltaPair(baseProg.header.originalBytesDelta, currProg.header.originalBytesDelta);
+    console.log(`  Header: ${severityLabel('changed')}`);
+    console.log(`    baseline: ${aStr}${aDelta}`);
+    console.log(`    current:  ${bStr}${bDelta}`);
+    for (const hd of headerDiffs) {
+      console.log(`    - ${hd.field}: ${hd.baseVal} → ${hd.currVal}`);
     }
   }
 
-  // Show end-address validity warnings.
+  // Show end-address validity warnings (kept separate — semantic warnings,
+  // not byte-level diffs).
   for (const w of headerWarnings) {
     console.log(`  ${c.red(w)}`);
   }
@@ -701,22 +841,25 @@ for (const pair of pairs) {
     if (!verbose && isSimilar(cl.severity)) continue;
 
     if (cl.kind === 'conflict') {
-      const baseElems = baseProg.lines[cl.baseSrc!.lineIdx].elements;
-      const currElems = currProg.lines[cl.currSrc!.lineIdx].elements;
+      const baseLine = baseProg.lines[cl.baseSrc!.lineIdx];
+      const currLine = currProg.lines[cl.currSrc!.lineIdx];
       const baseInfos = lineElemInfos(baseProg, cl.baseSrc!.lineIdx);
       const currInfos = lineElemInfos(currProg, cl.currSrc!.lineIdx);
-      const { aHighlighted, bHighlighted } = highlightElementDiffs(baseElems, baseInfos, currElems, currInfos, cl.severity);
+      const { aHighlighted, bHighlighted } = highlightElementDiffs(
+        baseLine.elements, baseInfos, currLine.elements, currInfos, cl.severity,
+      );
+      const [aDelta, bDelta] = formatDeltaPair(baseLine.originalBytesDelta, currLine.originalBytesDelta);
       console.log(`  Line ${cl.lineNum}: ${severityLabel(cl.severity)}`);
-      console.log(`    baseline: ${aHighlighted}`);
-      console.log(`    current:  ${bHighlighted}`);
+      console.log(`    baseline: ${aHighlighted}${aDelta}`);
+      console.log(`    current:  ${bHighlighted}${bDelta}`);
     } else if (cl.kind === 'baseline-only') {
-      const elems = baseProg.lines[cl.baseSrc!.lineIdx].elements;
+      const line = baseProg.lines[cl.baseSrc!.lineIdx];
       console.log(`  Line ${cl.lineNum}: ${severityLabel(cl.severity)} (baseline only)`);
-      console.log(`    baseline: ${sanitise(elems.join(''))}`);
+      console.log(`    baseline: ${sanitise(line.elements.join(''))}${formatDelta(line.originalBytesDelta)}`);
     } else {
-      const elems = currProg.lines[cl.currSrc!.lineIdx].elements;
+      const line = currProg.lines[cl.currSrc!.lineIdx];
       console.log(`  Line ${cl.lineNum}: ${severityLabel(cl.severity)} (current only)`);
-      console.log(`    current:  ${sanitise(elems.join(''))}`);
+      console.log(`    current:  ${sanitise(line.elements.join(''))}${formatDelta(line.originalBytesDelta)}`);
     }
   }
 }
