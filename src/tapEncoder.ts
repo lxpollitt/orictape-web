@@ -1,6 +1,4 @@
 import type { Program } from './decoder';
-import type { MergedProgram } from './merger';
-import { bestSource } from './merger';
 import { TAP_META_MAGIC } from './tapCommon';
 
 /**
@@ -17,6 +15,11 @@ interface TapLine {
 
 /**
  * Extract BASIC lines (as token-byte arrays) from a decoded Program.
+ *
+ * Works uniformly for both tape-loaded programs and merged programs: callers
+ * pass `merged.output` to serialize a merge, because buildMergedOutput has
+ * already picked the best source for each line and assembled the byte stream.
+ * No merge-specific code path is needed here.
  */
 export function linesFromProgram(prog: Program): TapLine[] {
   return prog.lines.map(line => {
@@ -32,42 +35,13 @@ export function linesFromProgram(prog: Program): TapLine[] {
     // Some corrupt programs may be missing 0x00 terminator in rare cases.
     // Known example is from the last line of the program, but this code is
     // more defensive and copes with all lines.
-    if (prog.bytes[line.lastByte].v !== 0) { 
+    if (prog.bytes[line.lastByte].v !== 0) {
       tokens.push(prog.bytes[line.lastByte].v);
     }
     // elements[0] is the line-number string e.g. "100 "
     const lineNum = parseInt(line.elements[0] ?? '', 10);
     return { lineNum: isNaN(lineNum) ? 0 : lineNum, tokens };
   });
-}
-
-/**
- * Extract BASIC lines from a MergedProgram, choosing the best source per line.
- * Reads from merged.sources — the merge's own snapshot of its source programs —
- * so the output is stable even if the original Programs have since been edited
- * or closed.
- */
-export function linesFromMerged(merged: MergedProgram): TapLine[] {
-  const lines: TapLine[] = [];
-  for (const alignedLine of merged.lines) {
-    if (alignedLine.rejected) continue;
-    const src  = bestSource(merged, alignedLine);
-    const prog = merged.sources[src.tapeIdx];
-    if (!prog) continue;
-    const line   = prog.lines[src.lineIdx];
-    const tokens: number[] = [];
-    for (let i = line.firstByte + 4; i < line.lastByte; i++) {
-      tokens.push(prog.bytes[i].v);
-    }
-    // Some corrupt programs may be missing 0x00 terminator in rare cases.
-    // Known example is from the last line of the program, but this code is
-    // more defensive and copes with all lines.
-    if (prog.bytes[line.lastByte].v !== 0) {
-      tokens.push(prog.bytes[line.lastByte].v);
-    }
-    lines.push({ lineNum: alignedLine.lineNum, tokens });
-  }
-  return lines;
 }
 
 // ── TAP block encoding ────────────────────────────────────────────────────────

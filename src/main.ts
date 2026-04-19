@@ -11,7 +11,7 @@ import {
   hexViewProgram, progLineIdxForCol, mliForProgLineIdx,
   type MergedProgram,
 } from './merger';
-import { linesFromProgram, linesFromMerged, encodeTapFile, encodeTapMetadata, downloadTap, type TapBlock, type TapEntry } from './tapEncoder';
+import { linesFromProgram, encodeTapFile, encodeTapMetadata, downloadTap, type TapBlock, type TapEntry } from './tapEncoder';
 import { parseTapFile } from './tapDecoder';
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
@@ -1554,11 +1554,12 @@ function doDownloadTap(): void {
       const um = userMerges[entry.progIdx];
       if (!um) continue;
       const merged = um.result;
-      // Read from the merge's own snapshot so a TAP built from a merge is
-      // independent of live source edits or tab closures that happened after
-      // the merge was created.
+      // Serialize the merge's own pre-built byte-level output — a Program like
+      // any other.  Uses the same linesFromProgram path as tape entries, since
+      // buildMergedOutput has already picked the best source for each line and
+      // assembled the bytes.  Independent of live source edits / tab closures.
       const name = merged.sources.find(p => p?.name)?.name ?? 'MERGED';
-      const block: TapBlock = { name, lines: linesFromMerged(merged), autorun: entry.autorun };
+      const block: TapBlock = { name, lines: linesFromProgram(merged.output), autorun: entry.autorun };
       // Metadata describes the merged output's error/edit state — the Program
       // whose bytes actually went into the block above.  Using a source
       // Program here would produce flags and lineDeltas at offsets that don't
