@@ -261,8 +261,10 @@ function lineElemInfos(prog: Program, lineIdx: number): ElemInfo[] {
   return line.elements.map((_, ei) => getElemInfo(prog, lineIdx, ei));
 }
 
-/** Format a delta-byte array as ` [0x11 0x32]` in grey, or empty string when empty. */
+/** Format a delta-byte array as ` [0x11 0x32]` in grey, or empty string when empty.
+ *  Returns empty string unconditionally under --ignore-edits. */
 function formatDelta(delta: ByteInfo[] | undefined): string {
+  if (ignoreEdits) return '';
   if (!delta || delta.length === 0) return '';
   const hex = delta.map(b => '0x' + b.v.toString(16).padStart(2, '0')).join(' ');
   return c.grey(` [${hex}]`);
@@ -273,11 +275,13 @@ function formatDelta(delta: ByteInfo[] | undefined): string {
  * visual representation: if either side has non-empty deltas, both sides
  * show the bracket (empty side shows ` []`).  If both are empty, both
  * sides show nothing.  Matches user's request for visual parity.
+ * Returns empty strings unconditionally under --ignore-edits.
  */
 function formatDeltaPair(
   aDelta: ByteInfo[] | undefined,
   bDelta: ByteInfo[] | undefined,
 ): [string, string] {
+  if (ignoreEdits) return ['', ''];
   const aEmpty = !aDelta || aDelta.length === 0;
   const bEmpty = !bDelta || bDelta.length === 0;
   if (aEmpty && bEmpty) return ['', ''];
@@ -318,8 +322,9 @@ function formatHeaderBytes(aProg: Program, bProg: Program): { aStr: string; bStr
     const b = bProg.bytes[bProg.header.byteIndex + i];
     const aEdit = a?.edited ?? 'none';
     const bEdit = b?.edited ?? 'none';
+    const editDiffers = !ignoreEdits && aEdit !== bEdit;
     const col = !isTTY ? ''
-      : aEdit !== bEdit ? BLUE
+      : editDiffers     ? BLUE
       : a?.v !== b?.v   ? RED
       : '';
     const aByte = (a?.v ?? 0).toString(16).padStart(2, '0');
@@ -397,35 +402,40 @@ function highlightElementDiffs(
 
   // Handle text-differing elements (LCS flagged).  Blue wins if own is
   // edited — we have no counterpart to compare against but the edit
-  // provenance is itself information worth highlighting.
+  // provenance is itself information worth highlighting.  Under
+  // --ignore-edits we bypass the edit-status check entirely.
   for (let k = 0; k < n; k++) {
     if (!aFlags[k]) continue;
     const ai = aInfos[k];
-    if (ai.editStatus !== 'none') { aColours[k] = BLUE; continue; }
+    if (!ignoreEdits && ai.editStatus !== 'none') { aColours[k] = BLUE; continue; }
     if (ai.elemStatus === 'error') { aColours[k] = '\x1b[31m'; continue; }
     aColours[k] = byteColour(ai.byteHealth);
   }
   for (let k = 0; k < m; k++) {
     if (!bFlags[k]) continue;
     const bi = bInfos[k];
-    if (bi.editStatus !== 'none') { bColours[k] = BLUE; continue; }
+    if (!ignoreEdits && bi.editStatus !== 'none') { bColours[k] = BLUE; continue; }
     if (bi.elemStatus === 'error') { bColours[k] = '\x1b[31m'; continue; }
     bColours[k] = byteColour(bi.byteHealth);
   }
 
   // Handle matched elements (text identical).  Blue wins when edit status
   // differs between sides.  Otherwise compare health/element-status.
+  // --ignore-edits suppresses the edit-status comparison.
   for (const [ai, bi] of matchedPairs) {
     const aInfo = aInfos[ai];
     const bInfo = bInfos[bi];
 
+    // Determine whether an edit-status difference should trigger blue.
+    const editStatusDiffers = !ignoreEdits && aInfo.editStatus !== bInfo.editStatus;
+
     // Skip if completely identical across every dimension we care about.
     if (aInfo.elemStatus === bInfo.elemStatus
         && aInfo.byteHealth === bInfo.byteHealth
-        && aInfo.editStatus === bInfo.editStatus) continue;
+        && !editStatusDiffers) continue;
 
     // Edit status differs — blue overrides everything else.
-    if (aInfo.editStatus !== bInfo.editStatus) {
+    if (editStatusDiffers) {
       aColours[ai] = BLUE;
       bColours[bi] = BLUE;
       continue;
@@ -469,8 +479,9 @@ function highlightElementDiffs(
 // ── Argument parsing ─────────────────────────────────────────────────────────
 
 const rawArgs = process.argv.slice(2);
-const verbose = rawArgs.includes('--verbose') || rawArgs.includes('-v');
-const args = rawArgs.filter(a => a !== '--verbose' && a !== '-v');
+const verbose     = rawArgs.includes('--verbose') || rawArgs.includes('-v');
+const ignoreEdits = rawArgs.includes('--ignore-edits');
+const args = rawArgs.filter(a => a !== '--verbose' && a !== '-v' && a !== '--ignore-edits');
 
 const wantsHelp = rawArgs.includes('--help') || rawArgs.includes('-h');
 
@@ -487,8 +498,10 @@ Filter:
   (omit)        Compare all TAP files
 
 Options:
-  -v, --verbose Show identical/structural-only files and SIMILAR line details
-  -h, --help    Show full help
+  -v, --verbose    Show identical/structural-only files and SIMILAR line details
+  --ignore-edits   Suppress edit-provenance differences (edit flags + originalBytesDelta).
+                   Useful when comparing against older baselines that didn't preserve edit state.
+  -h, --help       Show full help
 
 Severity levels:
   REGRESSION    Was clean, now corrupted or missing (red)
@@ -507,8 +520,9 @@ if (args.length < 2) {
   compareTaps [options] <baseline.tap> <current.tap>
 
 Options:
-  -v, --verbose Show identical/structural-only files and SIMILAR line details
-  -h, --help    Show full help`);
+  -v, --verbose    Show identical/structural-only files and SIMILAR line details
+  --ignore-edits   Suppress edit-provenance differences (edit flags + originalBytesDelta)
+  -h, --help       Show full help`);
   process.exit(1);
 }
 
@@ -692,9 +706,14 @@ for (const pair of pairs) {
     while (nameEnd < prog.bytes.length && prog.bytes[nameEnd].v !== 0) nameEnd++;
     nameEnd++;
     const endOffset = nameEnd + (h.endAddr - h.startAddr);
-    const b0 = prog.bytes[endOffset - 2]?.v ?? 0;
-    const b1 = prog.bytes[endOffset - 1]?.v ?? 0;
-    return `0x${h.endAddr.toString(16).padStart(4, '0')} → 0x${b0.toString(16).padStart(2, '0')} 0x${b1.toString(16).padStart(2, '0')}`;
+    // Show "(past end)" when the endAddr-implied position is outside the
+    // byte stream — previously we fell back to 0x00 here, which looked
+    // misleadingly like a valid end marker.
+    const showByte = (idx: number): string => {
+      if (idx < 0 || idx >= prog.bytes.length) return '(past end)';
+      return `0x${prog.bytes[idx].v.toString(16).padStart(2, '0')}`;
+    };
+    return `0x${h.endAddr.toString(16).padStart(4, '0')} → ${showByte(endOffset - 2)} ${showByte(endOffset - 1)}`;
   }
 
   const baseEndOk = hasValidEndAddr(baseProg);
@@ -714,13 +733,14 @@ for (const pair of pairs) {
   // Header edit-meta diff — edit flags on the 9 header bytes and the
   // header's originalBytesDelta.  Treated as a 'changed' severity like line
   // edit-meta drift: surfaces provenance drift without escalating to a
-  // regression.
+  // regression.  Suppressed under --ignore-edits.
   const baseHdrStats = headerEditStats(baseProg);
   const currHdrStats = headerEditStats(currProg);
-  const headerEditMetaDiffers =
+  const headerEditMetaDiffers = !ignoreEdits && (
     baseHdrStats.explicit  !== currHdrStats.explicit  ||
     baseHdrStats.automatic !== currHdrStats.automatic ||
-    baseHdrStats.deltaCount !== currHdrStats.deltaCount;
+    baseHdrStats.deltaCount !== currHdrStats.deltaCount
+  );
   if (headerEditMetaDiffers) globalSeverity.changed++;
 
   // Use the merger to do line-level alignment.
@@ -751,9 +771,10 @@ for (const pair of pairs) {
         // program's semantics but indicate provenance changes worth surfacing
         // (e.g. when validating that the tapEncoder / merger preserve edit
         // tracking faithfully).  Report as 'changed', not a regression.
+        // Suppressed entirely under --ignore-edits.
         const baseStats = getLineStats(baseProg, baseSrc.lineIdx);
         const currStats = getLineStats(currProg, currSrc.lineIdx);
-        if (editMetaDiffers(baseStats, currStats)) {
+        if (!ignoreEdits && editMetaDiffers(baseStats, currStats)) {
           classifiedLines.push({ lineNum: line.lineNum, severity: 'changed', kind: 'conflict', baseSrc, currSrc });
           globalSeverity.changed++;
         } else {
@@ -773,7 +794,34 @@ for (const pair of pairs) {
     }
   }
 
-  if (classifiedLines.length === 0 && headerDiffs.length === 0 && headerWarnings.length === 0 && !headerEditMetaDiffers) {
+  // Next-line pointer comparison — checks consensus lines (text content
+  // matches both sides) for structural drift in the byte-level pointer
+  // chain.  Conflict lines are skipped because their pointers necessarily
+  // differ once line sizes differ — would just be noise.  Reports a summary
+  // "N differ, first at line X" so cascading pointer drifts don't flood the
+  // output.  Only the baseline's pointer is compared against current's;
+  // whether either is "correct" is a separate question.
+  interface PtrDiff { lineNum: number; baseAddr: number; currAddr: number; }
+  const pointerDiffs: PtrDiff[] = [];
+  for (const line of merged.lines) {
+    if (line.rejected) continue;
+    if (line.status !== 'consensus') continue;
+    const baseSrc = line.sources.find(s => s.tapeIdx === 0);
+    const currSrc = line.sources.find(s => s.tapeIdx === 1);
+    if (!baseSrc || !currSrc) continue;
+    const baseLine = baseProg.lines[baseSrc.lineIdx];
+    const currLine = currProg.lines[currSrc.lineIdx];
+    const baseAddr = (baseProg.bytes[baseLine.firstByte]?.v ?? 0)
+                   | ((baseProg.bytes[baseLine.firstByte + 1]?.v ?? 0) << 8);
+    const currAddr = (currProg.bytes[currLine.firstByte]?.v ?? 0)
+                   | ((currProg.bytes[currLine.firstByte + 1]?.v ?? 0) << 8);
+    if (baseAddr !== currAddr) {
+      pointerDiffs.push({ lineNum: line.lineNum, baseAddr, currAddr });
+    }
+  }
+  if (pointerDiffs.length > 0) globalSeverity.changed++;
+
+  if (classifiedLines.length === 0 && headerDiffs.length === 0 && headerWarnings.length === 0 && !headerEditMetaDiffers && pointerDiffs.length === 0) {
     // Lines and headers all match — programs are identical.
     if (verbose) {
       if (lastOutput === 'changes') console.log('');
@@ -831,6 +879,22 @@ for (const pair of pairs) {
   // not byte-level diffs).
   for (const w of headerWarnings) {
     console.log(`  ${c.red(w)}`);
+  }
+
+  // Show next-line pointer summary.  Always one-line summary; verbose mode
+  // adds per-line detail.  Cascading drifts are expected (one structural
+  // change upstream often propagates to all subsequent pointers) so the
+  // summary intentionally doesn't emphasise the count — just notes "first
+  // at line X" so the user can jump to the upstream cause.
+  if (pointerDiffs.length > 0) {
+    console.log(`  ${c.yellow(`Next-line pointers: ${pointerDiffs.length} differ, first at line ${pointerDiffs[0].lineNum}`)}`);
+    if (verbose) {
+      for (const pd of pointerDiffs) {
+        const baseHex = '0x' + pd.baseAddr.toString(16).padStart(4, '0');
+        const currHex = '0x' + pd.currAddr.toString(16).padStart(4, '0');
+        console.log(`    line ${pd.lineNum}: ${baseHex} → ${currHex}`);
+      }
+    }
   }
 
   // Show detail for each classified line.

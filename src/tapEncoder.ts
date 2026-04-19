@@ -1,144 +1,152 @@
 import type { Program } from './decoder';
+import { fixHeaderEndAddr } from './editor';
 import { TAP_META_MAGIC } from './tapCommon';
-
-/**
- * BASIC programs always load at 0x0501 on the Oric-1 / Atmos.
- */
-const START_ADDR = 0x0501;
-
-// ── Line extraction ───────────────────────────────────────────────────────────
-
-interface TapLine {
-  lineNum: number;
-  tokens:  number[];
-}
-
-/**
- * Extract BASIC lines (as token-byte arrays) from a decoded Program.
- *
- * Works uniformly for both tape-loaded programs and merged programs: callers
- * pass `merged.output` to serialize a merge, because buildMergedOutput has
- * already picked the best source for each line and assembled the byte stream.
- * No merge-specific code path is needed here.
- */
-export function linesFromProgram(prog: Program): TapLine[] {
-  return prog.lines.map(line => {
-    const tokens: number[] = [];
-    // prog.bytes layout per line (indices relative to firstByte):
-    //   +0, +1  next-line pointer (recalculated by encoder)
-    //   +2, +3  line number
-    //   +4 … lastByte-1  token content
-    //   lastByte  0x00 terminator
-    for (let i = line.firstByte + 4; i < line.lastByte; i++) {
-      tokens.push(prog.bytes[i].v);
-    }
-    // Some corrupt programs may be missing 0x00 terminator in rare cases.
-    // Known example is from the last line of the program, but this code is
-    // more defensive and copes with all lines.
-    if (prog.bytes[line.lastByte].v !== 0) {
-      tokens.push(prog.bytes[line.lastByte].v);
-    }
-    // elements[0] is the line-number string e.g. "100 "
-    const lineNum = parseInt(line.elements[0] ?? '', 10);
-    return { lineNum: isNaN(lineNum) ? 0 : lineNum, tokens };
-  });
-}
 
 // ── TAP block encoding ────────────────────────────────────────────────────────
 
-export interface TapBlock {
-  /** Program name (max 16 ASCII chars). */
-  name:    string;
-  lines:   TapLine[];
-  /** 0x80 = auto-RUN on load; 0x00 = no autostart. */
-  autorun: boolean;
-}
-
 /**
- * Encode a single TAP block into bytes (sync + header + name + BASIC data).
+ * Encode a Program as a TAP block (sync + header + name + program data).
  *
  * TAP format:
  *   [0x16 × 8]  sync bytes
  *   [0x24]      sync marker
- *   [9 bytes]   header  — [0x00, 0x00, 0x00, autostart, end_hi, end_lo, start_hi, start_lo, 0x00]
+ *   [9 bytes]   header  — [0x00, 0x00, fileType, autorun, end_hi, end_lo, start_hi, start_lo, 0x00]
  *   [name\0]    ASCII program name, null-terminated
- *   [BASIC...]  lines in Oric BASIC memory format, terminated by 0x00 0x00
+ *   [data...]   BASIC lines (in Oric memory format, terminated by 0x00 0x00)
+ *               or machine-code bytes, sized by header endAddr − startAddr.
  *
- * Each BASIC line:
- *   next_ptr_lo  next_ptr_hi   — little-endian absolute address of next line
- *   linenum_lo   linenum_hi    — little-endian line number
- *   token bytes…
- *   0x00                       — line terminator
+ * Largely a byte-level serializer: it copies prog.bytes directly and does
+ * NOT recompute line pointers or line terminators (philosophy: "save what
+ * you see" rather than silently patching the program — fixing those is a
+ * deliberate user action via fixPointersAndTerminators).
  *
- * Note: header addresses are big-endian; in-line pointers are little-endian.
+ * Narrow deviations from verbatim pass-through:
+ *   1. Sync bytes are always the canonical 8× 0x16 + 0x24 (pre-header
+ *      sync in prog.bytes is tape-discovery padding, not program data).
+ *   2. The autorun bit (header byte 3) is overridable via the optional
+ *      `autorun` argument — when omitted, the Program's embedded autorun
+ *      value is used (useful for quick-save flows that should inherit
+ *      whatever was loaded).
+ *   3. When `fixEndAddr` is true (default), the encoder calls
+ *      `fixHeaderEndAddr(prog)` — mutating prog.bytes and header.endAddr
+ *      so the header's end-address matches the actual program layout.
+ *      Displaced original bytes are captured in header.originalBytesDelta
+ *      and the updated bytes are marked `edited: 'automatic'`, so the
+ *      correction round-trips as a tracked edit in the saved TAP's
+ *      metadata.  A mismatched endAddr causes Oric-1 CLOAD to read too
+ *      many or too few bytes — the "too many" case pulls appended
+ *      metadata into RAM, breaking LIST.  Callers can pass false to
+ *      preserve prog.header.endAddr verbatim (forensic / raw-pass-through
+ *      modes).  Mutation note: caller's Program will be modified when
+ *      fixEndAddr=true; encodeTapFile relies on this to generate metadata
+ *      that reflects the correction.
+ *
+ * For programs whose last line lacks a 0x00 terminator (e.g. truncated
+ * fragments), fixHeaderEndAddr's layout-based formula sets endAddr one
+ * byte shy of ideal — a minor imperfection we accept given that the
+ * 3-zero guard in encodeTapFile makes the saved TAP still LIST-loadable
+ * on common Oric-1 emulators, and the user can always apply the full
+ * fix via the UI's "Fix pointers & terminators" checkbox.
  */
-function encodeTapBlock(block: TapBlock): number[] {
-  const { name, lines, autorun } = block;
-
-  // Each line: 2 (next ptr) + 2 (line num) + tokens.length + 1 (0x00)
-  const lineSizes      = lines.map(l => 4 + l.tokens.length + 1);
-  const totalBasicSize = lineSizes.reduce((a, b) => a + b, 0) + 2; // +2 for 0x00 0x00
-  const END_ADDR       = START_ADDR + totalBasicSize; // exclusive: first byte past the data
+export function encodeTapBlock(
+  prog:        Program,
+  autorun?:    boolean,
+  fixEndAddr:  boolean = true,
+): number[] {
+  if (fixEndAddr) fixHeaderEndAddr(prog);
 
   const out: number[] = [];
+  const hdrStart   = prog.header.byteIndex;
+  const useAutorun = autorun ?? prog.header.autorun;
 
-  // Sync
+  // Canonical sync.
   for (let i = 0; i < 8; i++) out.push(0x16);
   out.push(0x24);
 
-  // 9-byte header (addresses big-endian)
-  out.push(
-    0x00,                        // [0] always 0
-    0x00,                        // [1] always 0
-    0x00,                        // [2] file type: 0x00 = BASIC
-    autorun ? 0x80 : 0x00,       // [3] autostart flag
-    (END_ADDR   >> 8) & 0xFF,    // [4] end address high
-     END_ADDR         & 0xFF,    // [5] end address low
-    (START_ADDR >> 8) & 0xFF,    // [6] start address high (= 0x05)
-     START_ADDR       & 0xFF,    // [7] start address low  (= 0x01)
-    0x00,                        // [8] separator
-  );
-
-  // Program name (max 16 chars) + null terminator
-  const nameBytes = Array.from(name.slice(0, 16), c => c.charCodeAt(0) & 0x7F);
-  out.push(...nameBytes, 0x00);
-
-  // BASIC line data with recalculated next-line pointers
-  let currentAddr = START_ADDR;
-  for (let i = 0; i < lines.length; i++) {
-    const { lineNum, tokens } = lines[i];
-    const nextLineAddr = currentAddr + lineSizes[i];
-
-    out.push( nextLineAddr        & 0xFF);  // next ptr low  (little-endian)
-    out.push((nextLineAddr >> 8)  & 0xFF);  // next ptr high
-    out.push( lineNum             & 0xFF);  // line number low
-    out.push((lineNum    >> 8)    & 0xFF);  // line number high
-    out.push(...tokens);
-    out.push(0x00);                          // line terminator
-
-    currentAddr = nextLineAddr;
+  // 9 header bytes — copied verbatim from prog.bytes (possibly updated by
+  // fixHeaderEndAddr above), with byte 3 (autorun) overridden.
+  for (let i = 0; i < 9; i++) {
+    if (i === 3) out.push(useAutorun ? 0x80 : 0x00);
+    else         out.push(prog.bytes[hdrStart + i]?.v ?? 0);
   }
 
-  // End-of-program marker
-  out.push(0x00, 0x00);
+  // Name — copy from byteIndex+9 through the null terminator (inclusive).
+  // If the name region overruns prog.bytes (malformed), synthesize 0x00.
+  let nameEnd = hdrStart + 9;
+  while (nameEnd < prog.bytes.length && prog.bytes[nameEnd].v !== 0) nameEnd++;
+  for (let i = hdrStart + 9; i <= nameEnd; i++) {
+    out.push(i < prog.bytes.length ? prog.bytes[i].v : 0x00);
+  }
+
+  // Program data.
+  //   BASIC (lines present): copy from the first line's firstByte through
+  //     the 2-byte end-marker position (lastByte + 2 inclusive).  Whatever
+  //     values are at those positions get written — if the Program lacks a
+  //     proper end marker, we still write the raw bytes found there.
+  //   Machine code (no lines): copy from the byte after the name null
+  //     through header.endAddr − startAddr bytes of data.
+  // Anything past the derived endpoint (e.g. metadata bytes left in
+  // prog.bytes from a previous round-trip) is intentionally excluded.
+  const firstContentByte = nameEnd + 1;
+  let endExclusive: number;
+  if (prog.lines.length > 0) {
+    const last = prog.lines[prog.lines.length - 1];
+    endExclusive = last.lastByte + 3;   // include bytes at lastByte+1, +2
+  } else {
+    endExclusive = firstContentByte + (prog.header.endAddr - prog.header.startAddr);
+  }
+  endExclusive = Math.min(endExclusive, prog.bytes.length);
+  for (let i = firstContentByte; i < endExclusive; i++) {
+    out.push(prog.bytes[i].v);
+  }
 
   return out;
 }
 
 export interface TapEntry {
-  block:     TapBlock;
-  metadata?: number[];   // optional metadata bytes to append after the block
+  prog:      Program;
+  /** Autorun override.  Defaults to prog.header.autorun when omitted. */
+  autorun?:  boolean;
+  /** Whether to let the encoder correct the header's end-address (default
+   *  true).  When true, encodeTapBlock calls fixHeaderEndAddr on prog —
+   *  so the mutation round-trips as a tracked edit in the metadata.
+   *  See encodeTapBlock docstring for details. */
+  fixEndAddr?:      boolean;
+  /** Whether to append decode-quality metadata (chkErr, unclear, edit flags,
+   *  line deltas, ignoreLineErrors) after the block.  Generated inside
+   *  encodeTapFile — *after* any fixEndAddr mutation — so the metadata
+   *  reflects the encoder's corrections. */
+  includeMetadata?: boolean;
 }
 
 /**
  * Encode one or more TAP entries into a single TAP file byte stream.
- * Each entry has its own sync sequence and header, optionally followed by metadata.
+ * Each entry contributes a TAP block and optionally its metadata bytes.
+ *
+ * Metadata is generated here (rather than by the caller) so it reflects
+ * any mutations made by encodeTapBlock via fixHeaderEndAddr.  Between the
+ * block's program data and the metadata magic we guarantee at least 3
+ * trailing 0x00 bytes — mirrors the canonical end-of-program sequence
+ * "(line terminator 0x00)(program terminator 0x00 0x00)" = three zeros,
+ * so Oric loaders see a well-formed program even when the source Program
+ * was malformed.  No-op when the block already ends with 3 zeros — the
+ * common case.
  */
 export function encodeTapFile(entries: TapEntry[]): Uint8Array {
   const out: number[] = [];
   for (const entry of entries) {
-    out.push(...encodeTapBlock(entry.block));
-    if (entry.metadata) out.push(...entry.metadata);
+    const blockBytes = encodeTapBlock(entry.prog, entry.autorun, entry.fixEndAddr);
+    out.push(...blockBytes);
+    if (entry.includeMetadata) {
+      let trailingZeros = 0;
+      while (trailingZeros < 3
+             && out.length - 1 - trailingZeros >= 0
+             && out[out.length - 1 - trailingZeros] === 0x00) {
+        trailingZeros++;
+      }
+      for (let i = trailingZeros; i < 3; i++) out.push(0x00);
+      out.push(...encodeTapMetadata(entry.prog));
+    }
   }
   return new Uint8Array(out);
 }

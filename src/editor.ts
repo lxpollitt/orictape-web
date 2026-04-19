@@ -53,15 +53,20 @@ import {
  * for this one reference.
  */
 const DEBUG = (() => {
-  // Browser: localStorage.debug === '1'.  Node exposes a partial localStorage
-  // declaration in recent versions (22+) that passes `typeof !== 'undefined'`
-  // but throws on getItem without --experimental-webstorage, so we also check
-  // that getItem is actually callable.
+  // Check Node first via process.versions.node (set only in real Node.js,
+  // not in browsers even when process is polyfilled).  We MUST avoid
+  // touching globalThis.localStorage in Node 22+ because just accessing it
+  // triggers a --localstorage-file warning on stderr.
+  const proc = (globalThis as {
+    process?: { versions?: { node?: string }; env?: Record<string, string | undefined> };
+  }).process;
+  if (proc?.versions?.node) return proc.env?.DEBUG === '1';
+  // Browser path — safely touch localStorage.
   const ls = (globalThis as { localStorage?: Storage }).localStorage;
-  if (ls && typeof ls.getItem === 'function' && ls.getItem('debug') === '1') return true;
-  // Node: DEBUG env var.  Read via globalThis to avoid needing @types/node.
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  return proc?.env?.DEBUG === '1';
+  if (ls && typeof ls.getItem === 'function') {
+    try { return ls.getItem('debug') === '1'; } catch { /* fall through */ }
+  }
+  return false;
 })();
 
 /**
@@ -1089,7 +1094,7 @@ function fixLinePointers(prog: Program): void {
  *
  * No-op on programs with no lines.
  */
-function fixHeaderEndAddr(prog: Program): void {
+export function fixHeaderEndAddr(prog: Program): void {
   if (prog.lines.length === 0) return;
   const lastLine = prog.lines[prog.lines.length - 1];
   const firstLineOffset = prog.lines[0].firstByte;

@@ -2,26 +2,36 @@
 /**
  * Snapshot tool: bulk-decode WAV files and produce TAP files + summary.txt.
  *
- * Usage: npx tsx tests/snapshot.ts <input-dir> <output-dir>
+ * Usage: npx tsx tests/snapshot.ts [--no-fix] <input-dir> <output-dir>
  *
  * For each .wav file in <input-dir>, decodes all programs and writes:
  *   - <output-dir>/summary.txt         — human-readable summary of all programs
  *   - <output-dir>/<file>_<n>.tap      — TAP file for each program with BASIC lines
+ *
+ * By default, fixPointersAndTerminators runs on each program before TAP
+ * encoding — produces TAPs loadable on an Oric-1 / Atmos / emulator even
+ * when the original WAV decoded into a malformed layout (missing line
+ * terminators, wrong endAddr, etc).  Pass --no-fix to skip the fix step
+ * and emit exactly the decoded state; useful for testing the encoder's
+ * pass-through behaviour on raw-decoded output.
  */
 
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, basename } from 'path';
 import { parseWavFile } from '../src/wavfile';
 import { readBitStreams, readPrograms } from '../src/decoder';
-import { linesFromProgram, encodeTapFile, encodeTapMetadata } from '../src/tapEncoder';
+import { encodeTapFile } from '../src/tapEncoder';
+import { fixPointersAndTerminators } from '../src/editor';
 import type { Program } from '../src/decoder';
 
 function usage(): never {
-  console.error('Usage: npx tsx tests/snapshot.ts <input-dir> <output-dir>');
+  console.error('Usage: npx tsx tests/snapshot.ts [--no-fix] <input-dir> <output-dir>');
   process.exit(1);
 }
 
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+const noFix   = rawArgs.includes('--no-fix');
+const args    = rawArgs.filter(a => a !== '--no-fix');
 if (args.length !== 2) usage();
 
 const [inputDir, outputDir] = args;
@@ -138,10 +148,19 @@ for (const filename of wavFiles) {
       const lineFirstSample = prog.stream.bitFirstSample[lineFirstBit];
       const startSec        = Math.floor(lineFirstSample / sampleRate);
 
-      const tapLines = linesFromProgram(prog);
+      // Fix pointer / terminator / endAddr issues before encoding — done
+      // after summariseProgram above so the summary still reflects the raw
+      // decode quality.  --no-fix opts out, emitting the decoded state
+      // verbatim (useful for testing encoder pass-through).  We also pass
+      // fixEndAddr=false to the encoder so its own endAddr correction is
+      // likewise disabled — --no-fix means "absolutely no corrections".
+      if (!noFix) fixPointersAndTerminators(prog);
+
       const tapBytes = encodeTapFile([{
-        block: { name: prog.name, lines: tapLines, autorun: false },
-        metadata: encodeTapMetadata(prog),
+        prog,
+        autorun:         false,
+        fixEndAddr:      !noFix,
+        includeMetadata: true,
       }]);
       const tapFilename = `${base}_${prog.name}_${startSec}s.tap`;
       writeFileSync(join(outputDir, tapFilename), tapBytes);

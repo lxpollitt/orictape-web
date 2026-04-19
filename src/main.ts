@@ -11,7 +11,7 @@ import {
   hexViewProgram, progLineIdxForCol, mliForProgLineIdx,
   type MergedProgram,
 } from './merger';
-import { linesFromProgram, encodeTapFile, encodeTapMetadata, downloadTap, type TapBlock, type TapEntry } from './tapEncoder';
+import { encodeTapFile, downloadTap, type TapEntry } from './tapEncoder';
 import { parseTapFile } from './tapDecoder';
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
@@ -1548,31 +1548,34 @@ function doDownloadTap(): void {
     if (entry.kind === 'tape') {
       const prog = tapes[entry.tapeIdx]?.programs[entry.progIdx];
       if (!prog) continue;
-      const block: TapBlock = { name: prog.name || 'PROG', lines: linesFromProgram(prog), autorun: entry.autorun };
-      entries.push({ block, metadata: includeMeta ? encodeTapMetadata(prog) : undefined });
+      entries.push({
+        prog,
+        autorun:         entry.autorun,
+        includeMetadata: includeMeta,
+      });
     } else {
       const um = userMerges[entry.progIdx];
       if (!um) continue;
       const merged = um.result;
-      // Serialize the merge's own pre-built byte-level output — a Program like
-      // any other.  Uses the same linesFromProgram path as tape entries, since
-      // buildMergedOutput has already picked the best source for each line and
-      // assembled the bytes.  Independent of live source edits / tab closures.
-      const name = merged.sources.find(p => p?.name)?.name ?? 'MERGED';
-      const block: TapBlock = { name, lines: linesFromProgram(merged.output), autorun: entry.autorun };
-      // Metadata describes the merged output's error/edit state — the Program
-      // whose bytes actually went into the block above.  Using a source
-      // Program here would produce flags and lineDeltas at offsets that don't
-      // match the merged content whenever bestSource picked different sources
-      // for different lines.
-      entries.push({ block, metadata: includeMeta ? encodeTapMetadata(merged.output) : undefined });
+      // Serialize the merge's own pre-built byte-level output — a Program
+      // like any other.  Independent of live source edits / tab closures.
+      // Metadata (generated inside encodeTapFile) reflects merged.output's
+      // error/edit state, including any fixEndAddr edits applied at save
+      // time.  Using a source Program here would produce flags and
+      // lineDeltas at offsets that don't match the merged content whenever
+      // bestSource picked different sources for different lines.
+      entries.push({
+        prog:            merged.output,
+        autorun:         entry.autorun,
+        includeMetadata: includeMeta,
+      });
     }
   }
 
   if (entries.length === 0) return;
 
-  // Derive filename from first block's name.
-  const filename = `${entries[0].block.name || 'tape'}.tap`;
+  // Derive filename from the first entry's program name.
+  const filename = `${entries[0].prog.name || 'tape'}.tap`;
   const bytes    = encodeTapFile(entries);
   downloadTap(bytes, filename);
   closeTapBuilder();
