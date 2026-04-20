@@ -29,6 +29,16 @@ const BYTE_BASE_SPP = 3;      // 100% byte zoom
 const MIN_SPP = BYTE_BASE_SPP / 16;  // 1600% byte zoom — maximum zoom in
 const MAX_BYTE_MODE_SPP = BYTE_BASE_SPP / 0.05;  // 5% byte zoom — byte/overview threshold
 
+/** Grace window after a waveform click that changed the selection during
+ *  which the subsequent "double-click on selected byte" behaviour is
+ *  suppressed.  Must be comfortably longer than the system's double-click
+ *  interval so the dblclick event fires inside this window.  500 ms
+ *  covers typical OS settings; slower accessibility settings may fall
+ *  outside, in which case the user gets the zoom-in behaviour they'd
+ *  otherwise avoid on their first click.  We can't query the OS's
+ *  configured interval from the web platform. */
+const DBL_CLICK_SELECTION_GRACE_MS = 500;
+
 export interface StreamInfo {
   progIdx:     number;
   name:        string;
@@ -67,6 +77,13 @@ export class WaveformView {
   private suppressRecentre = false;
   private clickedStream: StreamInfo | null = null;  // stream highlighted by clicking outside current program
   private clickedSample: number = 0;                // sample position of the click (for unmatched regions)
+  /** Time (performance.now()) of the most recent waveform-click that
+   *  *changed* the current selection — used to suppress the "double-click
+   *  on already-selected byte zooms in" behaviour during the grace window
+   *  after the first click of a double-click sequence.  Only bumped by
+   *  clicks in this canvas that changed selByte; not bumped by other
+   *  selection routes (hex panel, keyboard nav).  0 = never set. */
+  private lastWaveClickSelectChange = 0;
   private onByteClick: ((byteIndex: number) => void) | null = null;
   private onStreamSelect: ((progIdx: number) => void) | null = null;
 
@@ -229,6 +246,45 @@ export class WaveformView {
     return this.spp <= MAX_BYTE_MODE_SPP;
   }
 
+  /** True if the view is currently at the canonical "overview fit" state
+   *  for the active program — i.e. the whole program fills the canvas with
+   *  the overview zoom rounding to 100% and viewStart at the program's
+   *  first sample (within a sub-pixel tolerance).  Used as the entry
+   *  condition for the "double-click escalates to byte zoom" behaviour. */
+  private isAtOverviewFit(): boolean {
+    if (!this.prog) return false;
+    const overviewPct  = Math.round(this.overview100Spp() / this.spp * 100);
+    const viewStartOff = Math.abs(this.viewStart - this.prog.stream.firstSample) / this.spp;
+    return overviewPct === 100 && viewStartOff < 1;
+  }
+
+  /** True if the selected byte exists, has valid bit range, and its sample
+   *  midpoint maps to within 1 canvas pixel of the canvas centre at the
+   *  current zoom.  Returns false when there's no selection.  Used by
+   *  incremental-escape paths (reset button, dblclick) to decide whether
+   *  re-centring is needed before escalating. */
+  private isSelectedByteCentred(): boolean {
+    if (this.selByte === null || !this.prog) return false;
+    const b = this.prog.bytes[this.selByte];
+    const stream = this.prog.stream;
+    if (!b || b.firstBit >= stream.bitCount || b.lastBit >= stream.bitCount) return false;
+    const byteMid  = (stream.bitFirstSample[b.firstBit] + stream.bitLastSample[b.lastBit]) / 2;
+    const bytePx   = (byteMid - this.viewStart) / this.spp;
+    const centrePx = this.canvas.width / 2;
+    return Math.abs(bytePx - centrePx) < 1;
+  }
+
+  /** True when `idx` is the currently-selected byte AND the selection was
+   *  made before the current double-click grace window — i.e. the byte
+   *  was already selected when this click sequence started, not freshly
+   *  selected by the first click of a double-click.  Shared by dblclick
+   *  paths that want to treat race-condition selections as "not pre-
+   *  existing". */
+  private isPreExistingSelection(idx: number): boolean {
+    if (idx !== this.selByte) return false;
+    return performance.now() - this.lastWaveClickSelectChange >= DBL_CLICK_SELECTION_GRACE_MS;
+  }
+
   /** Clamp an spp value to the global zoom range [MIN_SPP, maxSpp()]. */
   private clampSpp(spp: number): number {
     return Math.max(MIN_SPP, Math.min(this.maxSpp(), spp));
@@ -306,18 +362,9 @@ export class WaveformView {
 
     // At byte 100%.  If a byte is selected and not already visually
     // centred, re-centre on it without changing zoom.
-    if (this.selByte !== null && this.prog) {
-      const b = this.prog.bytes[this.selByte];
-      const stream = this.prog.stream;
-      if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
-        const byteMid = (stream.bitFirstSample[b.firstBit] + stream.bitLastSample[b.lastBit]) / 2;
-        const bytePx  = (byteMid - this.viewStart) / this.spp;
-        const centrePx = this.canvas.width / 2;
-        if (Math.abs(bytePx - centrePx) >= 1) {
-          this.setSppAnchored(this.spp);  // re-anchors on selected byte at current spp
-          return;
-        }
-      }
+    if (this.selByte !== null && !this.isSelectedByteCentred()) {
+      this.setSppAnchored(this.spp);  // re-anchors on selected byte at current spp
+      return;
     }
 
     this.fitToProgram();
@@ -753,7 +800,15 @@ export class WaveformView {
           // zoom (scroll wheel) or double-click to fit-to-overview.
           this.clickedStream    = null;
           this.suppressRecentre = true;
+          const prevSelByte = this.selByte;
           this.onByteClick(idx);
+          // If this click changed the selection, record the time — a
+          // subsequent dblclick event falling inside the grace window
+          // should treat the selection as "freshly made by this click
+          // sequence", not as a pre-existing selection to escalate on.
+          if (this.selByte !== prevSelByte) {
+            this.lastWaveClickSelectChange = performance.now();
+          }
         } else {
           // Click outside current program.
           const stream = this.sampleToStream(sample);
@@ -776,19 +831,71 @@ export class WaveformView {
       }
     });
 
-    // Double-click: zoom to overview-fit for whichever bitstream is
-    // clicked on.  Inside the current program: fit directly.  On another
-    // program's stream: navigate first (via onStreamSelect — which
-    // restores view, but we override with fitToProgram right after).
-    // Dead space: no action.
+    // Double-click inside the current program — behaviour splits by
+    // current zoom mode:
+    //
+    //   Overview mode:
+    //     • Already at overview fit → zoom to byte 100% on the clicked
+    //       byte (any byte).
+    //     • Clicked on the pre-existing selected byte → zoom to byte 100%
+    //       on that byte (supports "scroll around, dbl-click selection to
+    //       jump back at byte detail").
+    //     • Otherwise → fit to overview.
+    //
+    //   Byte mode:
+    //     • Clicked on the pre-existing selected byte → reset-style
+    //       escalation: if not at 100% + centred, snap to 100% centred
+    //       on it; if already there, escape out to overview fit.
+    //     • Clicked on a different byte (or race-fresh selection) →
+    //       select it, zoom to byte 100% centred.
+    //
+    // On another program's stream → navigate + fit-to-overview for that
+    // program.  Dead space: no action.
+    //
+    // Race safety: `isPreExistingSelection(idx)` returns false when the
+    // current selection was just made by the first click of this double-
+    // click, so the dblclick handler treats race-freshly-selected bytes
+    // as if the user clicked a non-selected byte.
     canvas.addEventListener('dblclick', (e) => {
       const rect   = canvas.getBoundingClientRect();
       const x      = e.clientX - rect.left;
       const sample = this.viewStart + x * this.spp;
       const idx    = this.sampleToByte(sample);
       if (idx !== null) {
-        this.fitToProgram();
-        this.draw();
+        const onSelectedByte = this.isPreExistingSelection(idx);
+        if (!this.isByteMode()) {
+          // ── Overview mode ──
+          const zoomedOutFromByte100 = this.spp > BYTE_BASE_SPP;
+          const shouldZoomIn = this.isAtOverviewFit()
+                            || (onSelectedByte && zoomedOutFromByte100);
+          if (shouldZoomIn && this.onByteClick) {
+            this.onByteClick(idx);
+          } else {
+            this.fitToProgram();
+            this.draw();
+          }
+        } else {
+          // ── Byte mode ──
+          if (onSelectedByte) {
+            // Reset-style escalation: first bring the view to 100% +
+            // centred; if already there, escape out to overview fit.
+            const bytePct  = Math.round(BYTE_BASE_SPP / this.spp * 100);
+            const atTarget = bytePct === 100 && this.isSelectedByteCentred();
+            if (atTarget) {
+              this.fitToProgram();
+            } else {
+              this.setSppAnchored(BYTE_BASE_SPP);
+            }
+          } else if (this.onByteClick) {
+            // Different byte (or race-fresh selection): select + zoom to
+            // 100% centred.  onByteClick changes selection and, in byte
+            // mode, pans to centre on the new byte at current spp; the
+            // setSppAnchored call then snaps spp to BYTE_BASE_SPP while
+            // anchoring on the now-selected byte.
+            this.onByteClick(idx);
+            this.setSppAnchored(BYTE_BASE_SPP);
+          }
+        }
       } else {
         const stream = this.sampleToStream(sample);
         if (stream && this.onStreamSelect) {
