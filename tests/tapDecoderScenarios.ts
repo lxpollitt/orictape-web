@@ -135,14 +135,79 @@ const scenarios: Scenario[] = [
   },
   {
     // A run of 0x16s NOT followed by 0x24 should not be treated as sync.
-    // We place a 5 × 0x16 + non-0x24 run before the real program.
-    name: '0x16 run without 0x24 is not sync',
+    // We place a 5 × 0x16 + non-0x24 run before the real program.  The
+    // spurious bytes now get attached to the first block (per the
+    // "keep all bytes" fix) so the emitted Program's byte count is
+    // larger than the raw program's — verified below.
+    name: '0x16 run without 0x24 is not sync (pre-sync bytes preserved)',
     tapBytes: [
-      0x16, 0x16, 0x16, 0x16, 0x16, 0x41,  // spurious run
+      0x16, 0x16, 0x16, 0x16, 0x16, 0x41,  // spurious run — 6 bytes
       ...buildBasicTapBlock('AFTER', buildBasicBodyRemLine(10, [0x42])),
     ],
     expectedPrograms: 1,
-    expectedNames: ['AFTER'],
+    expectedNames:  ['AFTER'],
+    extraCheck: (progs) => {
+      // The 6 prelude bytes should appear at the start of prog.bytes.
+      // header.byteIndex is set by readProgramLines to the first header
+      // byte — i.e. just past the 0x24 sync release.  For a TAP with our
+      // canonical 8 × 0x16 + 0x24 leader and 6 prelude bytes, that's
+      // byteIndex = 6 + 8 + 1 = 15.
+      const p = progs[0];
+      if (p.header.byteIndex !== 15) {
+        return `header.byteIndex ${p.header.byteIndex} (want 15 — 6 prelude + 8 × 0x16 + 0x24)`;
+      }
+      if (p.bytes[0].v !== 0x16) return `bytes[0].v ${p.bytes[0].v.toString(16)} (want 0x16 — first prelude byte)`;
+      if (p.bytes[5].v !== 0x41) return `bytes[5].v ${p.bytes[5].v.toString(16)} (want 0x41 — last prelude byte)`;
+      return null;
+    },
+  },
+  {
+    // A TAP that starts with bytes before any valid sync — used to be
+    // silently discarded.  Now those bytes should be prepended to the
+    // first block's byte array so the user can see them.
+    name: 'pre-first-sync bytes preserved in first Program',
+    tapBytes: [
+      0xAA, 0xBB, 0xCC,  // 3 prelude bytes (no 0x16, not a sync-looking pattern)
+      ...buildBasicTapBlock('GOOD', buildBasicBodyRemLine(10, [0x42])),
+    ],
+    expectedPrograms: 1,
+    expectedNames:  ['GOOD'],
+    extraCheck: (progs) => {
+      const p = progs[0];
+      if (p.bytes[0].v !== 0xAA) return `bytes[0].v ${p.bytes[0].v.toString(16)} (want 0xAA)`;
+      if (p.bytes[1].v !== 0xBB) return `bytes[1].v ${p.bytes[1].v.toString(16)} (want 0xBB)`;
+      if (p.bytes[2].v !== 0xCC) return `bytes[2].v ${p.bytes[2].v.toString(16)} (want 0xCC)`;
+      // header.byteIndex = 3 prelude + 8 × 0x16 + 0x24 = 12.
+      if (p.header.byteIndex !== 12) {
+        return `header.byteIndex ${p.header.byteIndex} (want 12)`;
+      }
+      return null;
+    },
+  },
+  {
+    // A TAP block whose contents are a valid sync but whose "header" is
+    // garbage so readProgramLines parses no BASIC lines and the fileType
+    // lands at 0 (BASIC by default).  Used to be silently dropped by the
+    // `prog.lines.length > 0 || fileType !== 0` filter.  Now should be
+    // emitted as an unnamed 0-line Program so the user can inspect /
+    // force-decode it.
+    name: 'block with valid sync but garbage body emitted as unnamed Program',
+    tapBytes: [
+      0x16, 0x16, 0x16, 0x16, 0x16, 0x16, 0x16, 0x16, 0x24,  // valid sync
+      // Then garbage — not a valid header / body.  Enough bytes that
+      // readProgramLines can at least read the 9 header bytes + scan for
+      // a name, but no parseable BASIC lines follow.
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x10, 0x00, 0x00,  // header + name terminator
+      0xDE, 0xAD, 0xBE, 0xEF,                                      // garbage "body"
+    ],
+    expectedPrograms: 1,
+    expectedNames:  [''],
+    extraCheck: (progs) => {
+      const p = progs[0];
+      if (p.lines.length !== 0) return `expected 0 lines, got ${p.lines.length}`;
+      if (p.bytes.length === 0) return 'Program has no bytes — should carry all input bytes';
+      return null;
+    },
   },
 ];
 

@@ -177,7 +177,16 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
 
   // ── Parse each block ─────────────────────────────────────────────────────────
   for (let b = 0; b < blockStarts.length; b++) {
-    const start = blockStarts[b];
+    // First block extends back to byte 0 so any pre-first-sync bytes
+    // (padding, external concatenation artefacts, or — the reason we care —
+    // preamble bytes our own tapEncoder accidentally emitted) stay visible
+    // to the user rather than being silently discarded.  Mirrors the WAV
+    // path's "keep all bytes" principle in readPrograms.  readProgramLines
+    // runs its own sync-search so it still finds the real header regardless
+    // of where in prog.bytes the sync sits; encodeTapMetadata stores byte
+    // indices relative to the header byteIndex, so the pre-sync byte count
+    // doesn't affect metadata round-trip.
+    const start = b === 0 ? 0 : blockStarts[b];
     // The block ends at the start of the next block (or EOF).  readProgramLines
     // will stop at the 0x00 0x00 end-of-program marker regardless, so giving it
     // extra trailing bytes is safe.
@@ -268,10 +277,12 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
     flagElementErrors(prog);
     flagPointerAndTerminatorIssues(prog);
 
-    // Include the program if it has BASIC lines OR a valid header (machine code).
-    if (prog.lines.length > 0 || prog.header.fileType !== 0) {
-      programs.push(prog);
-    }
+    // Emit every parsed block — including ones whose contents didn't parse
+    // into recognisable BASIC or machine-code programs.  Keeping all bytes
+    // visible lets the user inspect / force-decode unexpected content and
+    // matches the WAV decoder's "never throw away bytes" behaviour in
+    // readPrograms.
+    programs.push(prog);
   }
 
   return programs;
