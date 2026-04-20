@@ -5,6 +5,30 @@ const YELLOW = '#c9a428';
 const RED    = '#c94040';
 const DIM    = '#444444';
 
+// ── Zoom model ───────────────────────────────────────────────────────────────
+//
+// Zoom is expressed directly as `spp` (samples per pixel) — the physical
+// view parameter.  Higher spp = more zoomed out.
+//
+// Two modes exist, distinguished by the current `spp`:
+//   • Byte mode — fine-grained, individual bytes visible.  "100% byte zoom"
+//     means spp = BYTE_BASE_SPP (3 samples per pixel).  In this mode the
+//     displayed percentage is computed relative to BYTE_BASE_SPP.
+//   • Overview mode — program-level or larger.  "100% overview zoom" means
+//     the current program fills the canvas exactly (spp = programSamples /
+//     canvasWidth).  In this mode the displayed percentage is computed
+//     relative to the current program's overview-fit spp.
+//
+// Modes transition at MAX_BYTE_MODE_SPP: when zoomed out past this point
+// (i.e. bytes getting too small to be useful), the label flips from byte to
+// overview.  The displayed % jumps across the transition because the two
+// reference points are different — this is a true semantic difference, not
+// a bug.  It matches the user's mental model that "bytes this small aren't
+// bytes any more".
+const BYTE_BASE_SPP = 3;      // 100% byte zoom
+const MIN_SPP = BYTE_BASE_SPP / 16;  // 1600% byte zoom — maximum zoom in
+const MAX_BYTE_MODE_SPP = BYTE_BASE_SPP / 0.05;  // 5% byte zoom — byte/overview threshold
+
 export interface StreamInfo {
   progIdx:     number;
   name:        string;
@@ -26,13 +50,13 @@ export class WaveformView {
   private bitIsParityErr: Uint8Array | null = null; // per-bit: 1 only for the parity bit of a chkErr byte (label colouring)
 
   private viewStart   = 0;
-  private spp         = 10;  // samples per pixel (current view)
-  private baseSpp     = 10;  // spp at 100% for the active view mode (overview or byte)
-  private zoomFactor  = 1;   // persistent button zoom: 1 = 100%
+  private spp         = 0;   // samples per pixel — the single source of truth for zoom
+                             // (0 = uninitialised; setData picks overview-fit on first load)
   private selByte:    number | null = null;
   private vZoom       = 1;     // vertical zoom multiplier (1.0 = default, higher = amplified)
   private onNormaliseChange: ((checked: boolean) => void) | null = null;
-  private zoomLabel:  HTMLElement | null = null;
+  private zoomModeEl:  HTMLElement | null = null;
+  private zoomLevelEl: HTMLElement | null = null;
 
   private hoverBit:       number | null = null;  // bit index under mouse cursor
   private hoverSample:    number = 0;            // sample position of mouse cursor
@@ -94,18 +118,36 @@ export class WaveformView {
     this.bitIsError     = bitIsError;
     this.bitIsParityErr = bitIsParityErr;
 
-    // Default view: fit the whole stream, scaled by the persistent zoom factor.
-    const len    = prog.stream.lastSample - prog.stream.firstSample;
-    this.baseSpp  = Math.max(1, len / this.canvas.width);
-    this.spp      = Math.max(0.1875, this.baseSpp / this.zoomFactor);
-    this.viewStart = prog.stream.firstSample;
+    // Zoom policy: preserve the caller-visible spp across program switches
+    // so visual zoom stays constant.  On first load (spp === 0 sentinel),
+    // fit the program to the canvas instead.  Always re-clamp to the new
+    // valid range since max_spp = fileSamples / canvasWidth depends on the
+    // new samples array.
+    if (this.spp === 0) {
+      this.spp = this.overview100Spp();
+    } else {
+      this.spp = this.clampSpp(this.spp);
+    }
+
+    // viewStart policy: preserve if the new program's sample range overlaps
+    // any part of the current visible window — keeps the view visually
+    // stationary across program switches in the common case.  Reset to the
+    // new program's first sample only when there's no overlap (i.e. the
+    // current view would otherwise be looking at empty space outside the
+    // new program).
+    const visEnd = this.viewStart + this.canvas.width * this.spp;
+    const overlaps = visEnd > prog.stream.firstSample && this.viewStart < prog.stream.lastSample;
+    if (!overlaps) {
+      this.viewStart = prog.stream.firstSample;
+    }
     this.clampView();
     this.updateZoomDisplay();
     this.draw();
   }
 
-  setZoomLabel(el: HTMLElement): void {
-    this.zoomLabel = el;
+  setZoomLabel(modeEl: HTMLElement, levelEl: HTMLElement): void {
+    this.zoomModeEl  = modeEl;
+    this.zoomLevelEl = levelEl;
     this.updateZoomDisplay();
   }
 
@@ -164,53 +206,62 @@ export class WaveformView {
     return null;
   }
 
+  /** Program-fit spp for the currently-loaded program — the "100% overview
+   *  zoom" reference point.  Changes per program (depends on program sample
+   *  length).  Falls back to MAX_BYTE_MODE_SPP when no program is loaded. */
+  private overview100Spp(): number {
+    if (!this.prog) return MAX_BYTE_MODE_SPP;
+    const len = this.prog.stream.lastSample - this.prog.stream.firstSample;
+    return Math.max(1, len / this.canvas.width);
+  }
+
+  /** Maximum spp allowed — fits the entire audio file (all samples) into the
+   *  canvas.  Depends only on samples and canvas width, not on which program
+   *  is currently selected.  A program-independent ceiling. */
+  private maxSpp(): number {
+    if (!this.samples) return 20000;
+    return Math.max(MAX_BYTE_MODE_SPP + 1, this.samples.length / this.canvas.width);
+  }
+
+  /** True if the current zoom falls in byte mode (bytes are big enough to
+   *  be individually useful). */
+  private isByteMode(): boolean {
+    return this.spp <= MAX_BYTE_MODE_SPP;
+  }
+
+  /** Clamp an spp value to the global zoom range [MIN_SPP, maxSpp()]. */
+  private clampSpp(spp: number): number {
+    return Math.max(MIN_SPP, Math.min(this.maxSpp(), spp));
+  }
+
   private updateZoomDisplay(): void {
-    if (this.zoomLabel) {
-      this.zoomLabel.textContent = Math.round(this.baseSpp / this.spp * 100) + '%';
+    if (!this.zoomModeEl || !this.zoomLevelEl) return;
+    if (this.isByteMode()) {
+      this.zoomModeEl.textContent  = 'Bytes:';
+      this.zoomLevelEl.textContent = Math.round(BYTE_BASE_SPP / this.spp * 100) + '%';
+    } else {
+      this.zoomModeEl.textContent  = 'Overview:';
+      this.zoomLevelEl.textContent = Math.round(this.overview100Spp() / this.spp * 100) + '%';
     }
   }
 
-  /** Save current view position for restoring after a program switch. */
-  saveView(): { viewStart: number; spp: number } {
-    return { viewStart: this.viewStart, spp: this.spp };
-  }
-
-  /** Restore a previously saved view position. */
-  restoreView(v: { viewStart: number; spp: number }): void {
-    this.spp = v.spp;
-    this.viewStart = v.viewStart;
-    this.clampView();
-    this.updateZoomDisplay();
-    this.draw();
-  }
-
-  /** Check if the current view is at the program overview (program fills the canvas). */
-  isAtOverview(): boolean {
-    if (!this.prog) return true;
-    const len = this.prog.stream.lastSample - this.prog.stream.firstSample;
-    const overviewSpp = Math.max(1, len / this.canvas.width);
-    // Allow small tolerance for floating-point comparison.
-    return Math.abs(this.spp - overviewSpp) < 0.01
-        && Math.abs(this.viewStart - this.prog.stream.firstSample) < this.spp * 2;
-  }
-
-  /** Reset view to show the full program (overview). */
+  /** Reset view to show the full current program (overview 100%). */
   fitToProgram(): void {
     if (!this.prog) return;
-    const len = this.prog.stream.lastSample - this.prog.stream.firstSample;
-    this.baseSpp    = Math.max(1, len / this.canvas.width);
-    this.spp        = this.baseSpp;
-    this.zoomFactor = 1;
-    this.viewStart  = this.prog.stream.firstSample;
+    this.spp       = this.overview100Spp();
+    this.viewStart = this.prog.stream.firstSample;
     this.clampView();
     this.updateZoomDisplay();
     this.draw();
   }
 
-  /** Reset zoom levels to defaults (called on file load). */
+  /** Reset zoom to "not initialised" — next setData will fit to the new
+   *  program's overview.  Called on file load so a fresh file starts at
+   *  the natural overview zoom rather than inheriting zoom from the
+   *  previous file. */
   resetZoom(): void {
     this.vZoom = 1;
-    this.zoomFactor = 1;
+    this.spp   = 0;
     this.updateZoomDisplay();
   }
 
@@ -229,28 +280,73 @@ export class WaveformView {
     this.onNormaliseChange = cb;
   }
 
-  zoomIn():    void { this.zoomFactor = Math.min(16,  this.zoomFactor * 2); this.applyZoom(); }
-  zoomOut():   void { this.zoomFactor = Math.max(0.1875, this.zoomFactor / 2); this.applyZoom(); }
-  zoomReset(): void { this.zoomFactor = 1; this.applyZoom(); }
-  zoomTo(factor: number): void { this.zoomFactor = factor; this.applyZoom(); }
-  getZoomFactor(): number { return this.zoomFactor; }
+  zoomIn():    void { this.setSppAnchored(this.spp / 2); }
+  zoomOut():   void { this.setSppAnchored(this.spp * 2); }
+  /** Reset button — incremental escape sequence.  Each press advances one
+   *  step, skipping steps whose state is already satisfied:
+   *
+   *   1. Byte mode, not at 100% → snap to byte 100% (anchored on selected
+   *      byte or canvas centre).
+   *   2. Byte mode, at 100%, byte selected but not centred on it → stay
+   *      at 100%, recentre on the selected byte.  (Supports the workflow:
+   *      select a byte, scroll around to see nearby bytes, hit reset to
+   *      jump back to the selection.)
+   *   3. Byte mode at 100% & centred (or no selection), or any overview
+   *      mode zoom → overview fit.
+   *
+   *  The "at 100%" check uses the rounded displayed percentage to stay
+   *  robust against floating-point drift in spp.  The "centred" check
+   *  uses canvas-pixel tolerance (< 1 px) so sub-pixel drift from the
+   *  anchoring maths doesn't falsely report off-centre. */
+  zoomReset(): void {
+    if (!this.isByteMode()) { this.fitToProgram(); return; }
 
-  private applyZoom(): void {
-    if (this.selByte !== null) {
-      // Re-centre on the selected byte at the new zoom level.
-      // selectByte updates baseSpp and the display.
-      this.selectByte(this.selByte);
-    } else if (this.samples && this.prog) {
-      // Zoom the overview, anchoring on the current view centre.
-      const len    = this.prog.stream.lastSample - this.prog.stream.firstSample;
-      this.baseSpp  = Math.max(1, len / this.canvas.width);
-      const centre = this.viewStart + (this.canvas.width / 2) * this.spp;
-      this.spp       = Math.max(0.1875, this.baseSpp / this.zoomFactor);
-      this.viewStart = centre - (this.canvas.width / 2) * this.spp;
-      this.clampView();
-      this.updateZoomDisplay();
-      this.draw();
+    const bytePct = Math.round(BYTE_BASE_SPP / this.spp * 100);
+    if (bytePct !== 100) { this.setSppAnchored(BYTE_BASE_SPP); return; }
+
+    // At byte 100%.  If a byte is selected and not already visually
+    // centred, re-centre on it without changing zoom.
+    if (this.selByte !== null && this.prog) {
+      const b = this.prog.bytes[this.selByte];
+      const stream = this.prog.stream;
+      if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
+        const byteMid = (stream.bitFirstSample[b.firstBit] + stream.bitLastSample[b.lastBit]) / 2;
+        const bytePx  = (byteMid - this.viewStart) / this.spp;
+        const centrePx = this.canvas.width / 2;
+        if (Math.abs(bytePx - centrePx) >= 1) {
+          this.setSppAnchored(this.spp);  // re-anchors on selected byte at current spp
+          return;
+        }
+      }
     }
+
+    this.fitToProgram();
+  }
+  /** Set zoom to a specific byte-mode factor (1 = 100% byte zoom, 4 = 400%,
+   *  etc.).  Used by the hex panel's click/dblclick shortcuts. */
+  zoomTo(byteFactor: number): void { this.setSppAnchored(BYTE_BASE_SPP / byteFactor); }
+  /** Current zoom as a byte-mode factor (3/spp).  In overview mode this
+   *  value is < 0.05 (5%), which callers may use to detect "not in byte
+   *  range any more". */
+  getByteZoomFactor(): number { return BYTE_BASE_SPP / this.spp; }
+
+  /** Change spp, anchoring the view on the selected byte (if any) or the
+   *  current view centre (otherwise).  Clamps to the valid zoom range. */
+  private setSppAnchored(newSpp: number): void {
+    if (!this.samples || !this.prog) { this.spp = this.clampSpp(newSpp); return; }
+    let anchorSample: number;
+    const byte = this.selByte !== null ? this.prog.bytes[this.selByte] : null;
+    const stream = this.prog.stream;
+    if (byte && byte.firstBit < stream.bitCount && byte.lastBit < stream.bitCount) {
+      anchorSample = (stream.bitFirstSample[byte.firstBit] + stream.bitLastSample[byte.lastBit]) / 2;
+    } else {
+      anchorSample = this.viewStart + (this.canvas.width / 2) * this.spp;
+    }
+    this.spp = this.clampSpp(newSpp);
+    this.viewStart = anchorSample - (this.canvas.width / 2) * this.spp;
+    this.clampView();
+    this.updateZoomDisplay();
+    this.draw();
   }
 
   selectByte(byteIndex: number | null): void {
@@ -265,9 +361,10 @@ export class WaveformView {
         const s0  = stream.bitFirstSample[b.firstBit];
         const s1  = stream.bitLastSample[b.lastBit];
         const mid = (s0 + s1) / 2;
-        // Centre on the byte at the current zoom level (default spp=3 at 100%).
-        this.baseSpp   = 3;
-        this.spp       = Math.max(0.1875, 3 / this.zoomFactor);
+        // If we're in overview mode, snap to 100% byte zoom so the byte is
+        // visible.  If already in byte mode, preserve the user's current
+        // byte-level zoom — just pan the view to centre on the selection.
+        if (!this.isByteMode()) this.spp = this.clampSpp(BYTE_BASE_SPP);
         this.viewStart = mid - (this.canvas.width / 2) * this.spp;
         this.clampView();
       }
@@ -650,26 +747,27 @@ export class WaveformView {
         const sample = this.viewStart + x * this.spp;
         const idx    = this.sampleToByte(sample);
         if (idx !== null && this.onByteClick) {
-          // Click within current program.
-          this.clickedStream = null;
-          if (!this.isAtOverview()) {
-            // Zoomed out or scrolled — fit to program first.
-            this.fitToProgram();
-          } else {
-            // At overview — select the byte (zoom to bit detail).
-            if (this.selByte !== null) this.suppressRecentre = true;
-            this.onByteClick(idx);
-          }
+          // Click inside the current program — select the byte, never change
+          // the view.  suppressRecentre = true prevents selectByte from
+          // zooming / panning; the user can reach bit detail by explicit
+          // zoom (scroll wheel) or double-click to fit-to-overview.
+          this.clickedStream    = null;
+          this.suppressRecentre = true;
+          this.onByteClick(idx);
         } else {
           // Click outside current program.
           const stream = this.sampleToStream(sample);
           if (stream && this.clickedStream === stream && this.onStreamSelect) {
-            // Second click on the same already-highlighted stream — navigate to it.
+            // Second click on the same already-highlighted stream — navigate
+            // to it.  main.ts's streamSelect handler wraps this in
+            // saveView/restoreView so the view is visually preserved across
+            // the program switch.
             this.clickedStream = null;
             this.clickedSample = 0;
             this.onStreamSelect(stream.progIdx);
           } else {
-            // First click — highlight the stream and show info.
+            // First click — highlight the stream and show info, or record
+            // a dead-space click position for the timestamp readout.
             this.clickedStream = stream;
             this.clickedSample = sample;
           }
@@ -678,18 +776,27 @@ export class WaveformView {
       }
     });
 
+    // Double-click: zoom to overview-fit for whichever bitstream is
+    // clicked on.  Inside the current program: fit directly.  On another
+    // program's stream: navigate first (via onStreamSelect — which
+    // restores view, but we override with fitToProgram right after).
+    // Dead space: no action.
     canvas.addEventListener('dblclick', (e) => {
       const rect   = canvas.getBoundingClientRect();
       const x      = e.clientX - rect.left;
       const sample = this.viewStart + x * this.spp;
       const idx    = this.sampleToByte(sample);
-      if (idx === null) {
-        // Double-click outside current program — navigate directly.
+      if (idx !== null) {
+        this.fitToProgram();
+        this.draw();
+      } else {
         const stream = this.sampleToStream(sample);
         if (stream && this.onStreamSelect) {
           this.clickedStream = null;
           this.clickedSample = 0;
           this.onStreamSelect(stream.progIdx);
+          this.fitToProgram();
+          this.draw();
         }
       }
     });
@@ -707,7 +814,7 @@ export class WaveformView {
         this.onNormaliseChange?.(false);
         // Horizontal zoom, anchored on cursor position.
         const anchor = this.viewStart + e.offsetX * this.spp;
-        this.spp       = Math.max(0.1875, Math.min(20000, this.spp / factor));
+        this.spp       = this.clampSpp(this.spp / factor);
         this.viewStart = anchor - e.offsetX * this.spp;
         this.clampView();
         this.updateZoomDisplay();

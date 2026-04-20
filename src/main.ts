@@ -123,17 +123,23 @@ let programs:    Program[]         = [];
 let leftSamples: Int16Array | null = null;
 
 const waveform = new WaveformView(waveCanvas);
-waveform.setZoomLabel(document.getElementById('zoom-level') as HTMLElement);
+waveform.setZoomLabel(
+  document.getElementById('zoom-mode')  as HTMLElement,
+  document.getElementById('zoom-level') as HTMLElement,
+);
 waveform.setByteClickHandler((i) => {
   if (viewMode === 'tape' && programs[activeProgIdx]) selectByte(i);
 });
 waveform.setStreamSelectHandler((progIdx) => {
   if (viewMode === 'tape') {
-    const savedView = waveform.saveView();
+    // No saveView / restoreView wrapper needed any more — waveform.setData
+    // now preserves spp across program switches and keeps viewStart stable
+    // whenever the new program's sample range overlaps the visible window
+    // (it does for second-click-navigate since the click sample is in the
+    // new program's range by definition).
     activateTape(activeTapeIdx, progIdx);
     selByte = null;
     renderAll();
-    waveform.restoreView(savedView);
   }
 });
 
@@ -178,6 +184,15 @@ function activateTape(ti: number, pi: number): void {
   activeProgIdx = pi;
   programs    = tapes[ti]?.programs ?? [];
   leftSamples = tapes[ti]?.samples  ?? null;
+}
+
+/** Reset the waveform to overview 100% fit for the currently active
+ *  program.  Called from actions that should reset the zoom to
+ *  "show me the whole program" — currently just the tab-bar click,
+ *  but likely to grow to other navigation actions as the UX develops.
+ *  No-op in merged view and for TAP-loaded tapes (no waveform). */
+function showProgramOverview(): void {
+  waveform.fitToProgram();
 }
 
 // ── Worker ────────────────────────────────────────────────────────────────────
@@ -269,6 +284,9 @@ fileInput.addEventListener('change', async () => {
   activateTape(0, 0);
   selByte = null;
   renderAll();
+  // Same policy as tab clicks: when the user lands on a new program, show
+  // it at overview fit so they see the whole thing first.
+  showProgramOverview();
 });
 
 // ── Tab rendering & navigation ────────────────────────────────────────────────
@@ -369,6 +387,11 @@ progTabs.addEventListener('click', (e) => {
       waveform.selectByte(byte?.edited ? null : selByte);
     }
   }
+
+  // Tab clicks always land on overview-fit for the target program, even
+  // when a byte selection has been carried across — overrides any zoom
+  // applied by the selectByte call above.
+  showProgramOverview();
 });
 
 function renderTabs(): void {
@@ -1702,7 +1725,7 @@ hexPanel.addEventListener('click', (e) => {
   if (viewMode === 'tape') {
     if (byteIdx === selByte) {
       // Already selected — toggle between 100% and 400% byte-level zoom.
-      waveform.zoomTo(waveform.getZoomFactor() >= 4 ? 1 : 4);
+      waveform.zoomTo(waveform.getByteZoomFactor() >= 4 ? 1 : 4);
     } else {
       selectByte(byteIdx);
     }

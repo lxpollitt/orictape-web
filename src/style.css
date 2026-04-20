@@ -175,18 +175,32 @@ header h1 {
   gap: 4px;
 }
 
-#zoom-label {
+/* Fixed-width container for the mode + percentage spans.  Right-aligned
+   so both labels sit flush against the zoom buttons, and the two labels
+   sit flush against each other regardless of the mode label's length.
+   Buttons stay put as the inner labels change. */
+#zoom-labels {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  min-width: 130px;   /* fits "Overview:" (~63px) + gap + 60px level */
+}
+
+#zoom-mode {
   font-size: 11px;
   color: var(--text);
   opacity: 0.6;
 }
 
+/* Percentage — natural width.  No min-width or text-align here, otherwise
+   short values (e.g. "100%") would sit right-aligned in a fixed-width box
+   and leave a visible gap between the mode colon and the percentage.
+   The outer #zoom-labels min-width is what anchors the buttons. */
 #zoom-level {
   font-size: 11px;
   font-family: ui-monospace, monospace;
   color: var(--text);
   opacity: 0.6;
-  min-width: 38px;
 }
 
 .zoom-btn {
