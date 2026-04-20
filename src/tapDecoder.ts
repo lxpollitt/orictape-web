@@ -126,18 +126,53 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
   const data = new Uint8Array(buffer);
   const programs: Program[] = [];
 
-  // ── Find all block start positions ──────────────────────────────────────────
-  // A block starts at the first 0x16 in a run of ≥ 4 consecutive 0x16 bytes.
+  // ── Find block start positions ──────────────────────────────────────────────
+  // A block starts at the first byte of a run of ≥ 3 × 0x16 followed
+  // immediately by a 0x24 sync-release byte.  After identifying a valid sync
+  // we use the header's endAddr to skip past the program body before
+  // resuming the scan — mirrors the Oric-1 ROM (count-down body bytes, no
+  // mid-body re-sync) and prevents ≥ 3 × 0x16 runs inside the body from
+  // being mistaken for a new program header.  A naïve "find every 0x16 run"
+  // scan is dangerous because 0x24 = '$' is extremely common in BASIC,
+  // making false mid-body syncs easy to hit.
+  //
+  // endAddr convention matches our encoder (and readProgramLines below):
+  // exclusive (first byte past the saved data), so body length is
+  // endAddr − startAddr.
   const blockStarts: number[] = [];
-  let i = 0;
-  while (i < data.length) {
-    if (data[i] === 0x16) {
-      const runStart = i;
-      while (i < data.length && data[i] === 0x16) i++;
-      if (i - runStart >= 3) blockStarts.push(runStart);
-    } else {
-      i++;
+  let pos = 0;
+  while (pos < data.length) {
+    // Advance to the next 0x16.
+    while (pos < data.length && data[pos] !== 0x16) pos++;
+    if (pos >= data.length) break;
+    const syncStart = pos;
+    // Consume the 0x16 run.
+    while (pos < data.length && data[pos] === 0x16) pos++;
+    // Valid sync requires ≥ 3 consecutive 0x16s and a 0x24 release byte.
+    if (pos - syncStart < 3 || pos >= data.length || data[pos] !== 0x24) {
+      // Bogus run — keep scanning from the non-matching byte.  (pos already
+      // points past the run; the outer loop's next 0x16-seek handles it.)
+      continue;
     }
+    pos++;  // step past the 0x24
+    blockStarts.push(syncStart);
+
+    // Parse just enough of the header to learn the body length, then jump
+    // past body + name so mid-body bytes are never considered for the next
+    // sync scan.  Header layout: 00 00 fileType autorun endHi endLo
+    // startHi startLo 00, followed by a null-terminated filename and then
+    // the body.  A truncated file at this point is unrecoverable — break.
+    if (pos + 9 > data.length) break;
+    const endAddr   = (data[pos + 4] << 8) | data[pos + 5];
+    const startAddr = (data[pos + 6] << 8) | data[pos + 7];
+    pos += 9;
+    // Null-terminated filename.
+    while (pos < data.length && data[pos] !== 0x00) pos++;
+    if (pos < data.length) pos++;  // step past the null
+    // Body.  Clamp to data.length to be robust against malformed headers
+    // (endAddr < startAddr → length 0; body extending past EOF → truncated).
+    const bodyLen = Math.max(0, endAddr - startAddr);
+    pos = Math.min(pos + bodyLen, data.length);
   }
 
   // ── Parse each block ─────────────────────────────────────────────────────────

@@ -420,6 +420,143 @@ export function emptyBitStream(format: 'fast' | 'slow' = 'fast'): BitStream {
   };
 }
 
+/**
+ * Split a BitStream into two at a given bit position.
+ *
+ * Returns [first, second] where `first` holds bits [0, bitPos) and `second`
+ * holds bits [bitPos, bitCount).  Per-bit typed arrays are sliced into fresh
+ * compact copies so the two halves own their own buffers (the original can
+ * be garbage-collected when no longer referenced).
+ *
+ * Per-stream metadata is computed as follows:
+ *   - `format` inherited by both halves
+ *   - `firstSample` / `lastSample`: outer edges match the parent; inner
+ *      edges come from the bit at the split boundary
+ *   - `minVal` / `maxVal` inherited by both halves.  Each half's true
+ *      amplitude range is a subset of the parent's, so inheriting gives
+ *      conservative bounds — re-scanning is unnecessary for the UI
+ *      thresholds that consume these values
+ *
+ * Edge cases:
+ *   - `bitPos === 0` → first is empty, second is the whole stream
+ *   - `bitPos === bitCount` → first is the whole stream, second is empty
+ *
+ * Throws if `bitPos` is outside [0, bitCount].
+ */
+export function splitBitStream(stream: BitStream, bitPos: number): [BitStream, BitStream] {
+  const n = stream.bitCount;
+  if (bitPos < 0 || bitPos > n) {
+    throw new Error(`splitBitStream: bitPos ${bitPos} out of range [0, ${n}]`);
+  }
+  const first: BitStream = {
+    format:         stream.format,
+    bitCount:       bitPos,
+    bitV:           stream.bitV.slice(0, bitPos),
+    bitL1:          stream.bitL1.slice(0, bitPos),
+    bitFirstSample: stream.bitFirstSample.slice(0, bitPos),
+    bitLastSample:  stream.bitLastSample.slice(0, bitPos),
+    bitUnclear:     stream.bitUnclear.slice(0, bitPos),
+    bitMaxIndex:    stream.bitMaxIndex.slice(0, bitPos),
+    bitMinIndex:    stream.bitMinIndex.slice(0, bitPos),
+    firstSample:    stream.firstSample,
+    lastSample:     bitPos > 0 ? stream.bitLastSample[bitPos - 1] : stream.firstSample,
+    minVal:         stream.minVal,
+    maxVal:         stream.maxVal,
+  };
+  const second: BitStream = {
+    format:         stream.format,
+    bitCount:       n - bitPos,
+    bitV:           stream.bitV.slice(bitPos),
+    bitL1:          stream.bitL1.slice(bitPos),
+    bitFirstSample: stream.bitFirstSample.slice(bitPos),
+    bitLastSample:  stream.bitLastSample.slice(bitPos),
+    bitUnclear:     stream.bitUnclear.slice(bitPos),
+    bitMaxIndex:    stream.bitMaxIndex.slice(bitPos),
+    bitMinIndex:    stream.bitMinIndex.slice(bitPos),
+    firstSample:    bitPos < n ? stream.bitFirstSample[bitPos] : stream.lastSample,
+    lastSample:     stream.lastSample,
+    minVal:         stream.minVal,
+    maxVal:         stream.maxVal,
+  };
+  return [first, second];
+}
+
+/**
+ * Concatenate one or more BitStreams into a single stream, in order.
+ *
+ * Per-bit typed arrays are concatenated in input order.  Each bit keeps its
+ * original sample positions — so when the inputs came from non-adjacent
+ * audio regions (e.g. user-initiated join across an audio gap), the result's
+ * bitFirstSample / bitLastSample arrays are NOT monotonic: there will be a
+ * jump at each seam.  This is fine for byte decoding (which indexes by bit
+ * position, not sample position) and the waveform view renders the gap
+ * naturally because it draws each bit at its own sample position.
+ *
+ * Per-stream metadata:
+ *   - `format`: all inputs must match; throws otherwise
+ *   - `firstSample`: first input's firstSample
+ *   - `lastSample`:  last input's lastSample
+ *   - `minVal` / `maxVal`: min / max across all inputs
+ *
+ * Throws if the input array is empty or the formats differ.  A single-stream
+ * join returns the input unchanged (no defensive copy).
+ */
+export function joinBitStreams(streams: BitStream[]): BitStream {
+  if (streams.length === 0) {
+    throw new Error('joinBitStreams: need at least one stream to join');
+  }
+  if (streams.length === 1) return streams[0];
+
+  const format = streams[0].format;
+  for (let i = 1; i < streams.length; i++) {
+    if (streams[i].format !== format) {
+      throw new Error(
+        `joinBitStreams: format mismatch at index ${i} ('${streams[i].format}' vs '${format}')`,
+      );
+    }
+  }
+  const total = streams.reduce((n, s) => n + s.bitCount, 0);
+
+  const bitV           = new Uint8Array(total);
+  const bitL1          = new Uint16Array(total);
+  const bitFirstSample = new Uint32Array(total);
+  const bitLastSample  = new Uint32Array(total);
+  const bitUnclear     = new Uint8Array(total);
+  const bitMaxIndex    = new Uint32Array(total);
+  const bitMinIndex    = new Uint32Array(total);
+  let offset = 0;
+  let minVal = streams[0].minVal;
+  let maxVal = streams[0].maxVal;
+  for (const s of streams) {
+    bitV          .set(s.bitV,           offset);
+    bitL1         .set(s.bitL1,          offset);
+    bitFirstSample.set(s.bitFirstSample, offset);
+    bitLastSample .set(s.bitLastSample,  offset);
+    bitUnclear    .set(s.bitUnclear,     offset);
+    bitMaxIndex   .set(s.bitMaxIndex,    offset);
+    bitMinIndex   .set(s.bitMinIndex,    offset);
+    offset += s.bitCount;
+    if (s.minVal < minVal) minVal = s.minVal;
+    if (s.maxVal > maxVal) maxVal = s.maxVal;
+  }
+
+  return {
+    format,
+    bitCount:       total,
+    bitV,
+    bitL1,
+    bitFirstSample,
+    bitLastSample,
+    bitUnclear,
+    bitMaxIndex,
+    bitMinIndex,
+    firstSample: streams[0].firstSample,
+    lastSample:  streams[streams.length - 1].lastSample,
+    minVal,
+    maxVal,
+  };
+}
+
 export interface ProgramHeader {
   /** Byte index of the first header byte (after the 0x24 sync marker)
    *  within the bytes[] array. */
@@ -905,20 +1042,247 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   return { stream, samplesRead };
 }
 
+/**
+ * Default minimum-0x16 count for the in-stream sync scanner.  The Oric ROM
+ * accepts any run ≥3 × 0x16 followed by 0x24 as a valid sync (see 1a fix
+ * in tapDecoder.ts), but we use a stricter threshold here because this
+ * scanner operates *inside* a single BitStream — where 0x16 is a byte
+ * value that can legitimately appear in body content.  The ROM avoids
+ * false mid-body matches by skipping past the body using endAddr; we
+ * can't rely on that because the overwrite scenario (v2 CSAVE recorded
+ * over partial v1) invalidates v1's endAddr.  A stricter count keeps
+ * false positives on body content extremely rare (10 × 0x16 in a row in
+ * a real BASIC body is almost unheard of), while still matching the
+ * much larger leader runs real tape sync preambles produce.
+ */
+const DEFAULT_IN_STREAM_SYNC_MIN = 10;
+
+/**
+ * Scan a byte stream for positions where a new program's sync pattern
+ * (run of ≥ minSyncBytes × 0x16 immediately followed by 0x24) begins.
+ *
+ * Pure byte scanner — returns every matching pattern's starting position
+ * within [startOffset, bytes.length).  The caller decides where to start
+ * scanning (typically the first program's body start, so the first
+ * program's own sync + header + name region is excluded from the scan).
+ *
+ * Each returned index is the position of the first 0x16 of the detected
+ * run (the starting byte of the next program's block).
+ *
+ * Used by readPrograms to split a single BitStream into multiple
+ * Programs when a WAV recording contains two (or more) CSAVEs in the
+ * same bit stream — either two back-to-back CSAVEs recorded without a
+ * usable audio gap, or a partial overwrite where CSAVE #2 was recorded
+ * over the middle of CSAVE #1.  See splitProgram for how the detected
+ * boundaries are applied.
+ *
+ * This scanner does *not* use the first program's header endAddr to
+ * bound the scan, unlike the TAP decoder's equivalent logic, because
+ * the overwrite case makes endAddr unreliable (it may describe a body
+ * length that extends into the overwriting program's bytes).  The
+ * stricter sync threshold is what keeps false positives rare inside
+ * real program bodies.
+ */
+export function findProgramBoundariesInBytes(
+  bytes:         ByteInfo[],
+  startOffset:   number = 0,
+  minSyncBytes:  number = DEFAULT_IN_STREAM_SYNC_MIN,
+): number[] {
+  const boundaries: number[] = [];
+  let i = Math.max(0, startOffset);
+  while (i < bytes.length) {
+    while (i < bytes.length && bytes[i].v !== 0x16) i++;
+    if (i >= bytes.length) break;
+    const runStart = i;
+    while (i < bytes.length && bytes[i].v === 0x16) i++;
+    // A valid sync requires ≥ minSyncBytes consecutive 0x16s followed
+    // immediately by 0x24.  Anything shorter, or not terminated by 0x24,
+    // is just body data that happens to contain 0x16 — keep scanning.
+    if (i - runStart >= minSyncBytes && i < bytes.length && bytes[i].v === 0x24) {
+      boundaries.push(runStart);
+      i++;  // step past the 0x24
+    }
+  }
+  return boundaries;
+}
+
 export function readPrograms(streams: BitStream[]): Program[] {
   const programs: Program[] = [];
   for (const stream of streams) {
     const prog = readProgramBytes(stream);
-    if (prog.bytes.length > 0) {
-      readProgramLines(prog);
+    if (prog.bytes.length === 0) continue;
+
+    // Parse lines on the initial Program so we know where body starts.
+    // (Flag functions are deferred: if we end up splitting, splitProgram
+    // runs them on each half via rebuildProgram — running them here first
+    // would be wasted work.  If we don't split, we run them below.)
+    readProgramLines(prog);
+
+    // Determine body start.  prog.lines[0].firstByte is the clean answer
+    // when BASIC lines parsed.  Otherwise fall back to just past the
+    // header (byteIndex + 9) — still safe because the header is only 9
+    // bytes so it can't contain a ≥10 × 0x16 run.  If byteIndex === 0
+    // and no lines parsed, readProgramLines didn't find a valid sync at
+    // all: the stream is all noise / unparseable, so there's no
+    // meaningful body start and no secondary program to find.
+    const bodyStart = prog.lines.length > 0
+      ? prog.lines[0].firstByte
+      : (prog.header.byteIndex > 0 ? prog.header.byteIndex + 9 : prog.bytes.length);
+
+    const boundaries = findProgramBoundariesInBytes(prog.bytes, bodyStart);
+
+    if (boundaries.length === 0) {
       flagNonMonotonicLines(prog);
       flagTokenisationMismatches(prog);
       flagElementErrors(prog);
       flagPointerAndTerminatorIssues(prog);
       programs.push(prog);
+    } else {
+      // boundaries[] are indices into the original (undivided) byte
+      // array.  After each split, `current` is the remaining tail whose
+      // byte indexing starts at 0, so we subtract the running offset
+      // (= position of the previous split in the original) to get the
+      // local split point.  splitProgram runs the full parse pipeline
+      // (readProgramLines + all flag functions) on each half via
+      // rebuildProgram — no extra work needed here.
+      let current: Program = prog;
+      let offset = 0;
+      for (const byteIdx of boundaries) {
+        const [first, rest] = splitProgram(current, byteIdx - offset);
+        programs.push(first);
+        current = rest;
+        offset  = byteIdx;
+      }
+      programs.push(current);
     }
   }
   return programs;
+}
+
+/**
+ * Wrap a byte array + bit stream into a fresh Program and run the parse
+ * pipeline (readProgramLines + all flag functions).  Used by splitProgram
+ * and joinPrograms to produce Programs with fully-derived metadata from
+ * their new byte slices.
+ *
+ * Caller is responsible for ensuring each ByteInfo's firstBit / lastBit
+ * values are valid indices into `stream`.  The returned Program has
+ * progNumber = 0 (placeholder — the UI stamps the real value).
+ */
+function rebuildProgram(bytes: ByteInfo[], stream: BitStream): Program {
+  const prog: Program = {
+    stream,
+    bytes,
+    lines: [],
+    name: '',
+    progNumber: 0,
+    header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false },
+  };
+  readProgramLines(prog);
+  flagNonMonotonicLines(prog);
+  flagTokenisationMismatches(prog);
+  flagElementErrors(prog);
+  flagPointerAndTerminatorIssues(prog);
+  return prog;
+}
+
+/**
+ * Produce a fresh ByteInfo that preserves the decode-level facts of the
+ * source byte (value, bit pointers, signal-quality flags) but resets all
+ * user-level state (edit flags, originalIndex).  Called during split / join
+ * when we're rebuilding Programs and the caller wants a clean slate.
+ *
+ * `bitOffset` is subtracted from firstBit/lastBit — used when the byte is
+ * moving into a BitStream whose bit-indexing has shifted (e.g. the second
+ * half of a split, whose new stream starts at the original's bit position
+ * `bitOffset`).
+ */
+function resetByteInfo(b: ByteInfo, newOriginalIndex: number, bitOffset = 0): ByteInfo {
+  return {
+    v:             b.v,
+    firstBit:      b.firstBit - bitOffset,
+    lastBit:       b.lastBit  - bitOffset,
+    unclear:       b.unclear,
+    chkErr:        b.chkErr,
+    originalIndex: newOriginalIndex,
+  };
+}
+
+/**
+ * Split a Program into two at byte index `byteIdx`.
+ *
+ * The first returned Program holds bytes [0, byteIdx); the second holds
+ * bytes [byteIdx, length).  The underlying BitStream is also split at the
+ * corresponding bit position (stream.bytes[byteIdx].firstBit), so the 1:1
+ * invariant between a Program and its BitStream is preserved.
+ *
+ * Both halves are reparsed from their raw bytes: header, name, lines, and
+ * all flag fields are rebuilt from scratch.  Per-byte edit state is
+ * cleared and `originalIndex` is renumbered 0-based in each half — any
+ * prior edits (explicit or automatic) and line-level metadata (line
+ * deltas, ignoreErrors) are discarded.  Per-byte decode-quality flags
+ * (`unclear`, `chkErr`) and bit pointers are preserved.  Per the design
+ * decision: split is a power action that rebuilds Program structure, so
+ * user-level state resets by policy.  The UI is expected to confirm with
+ * the user before calling this.
+ *
+ * Throws if byteIdx <= 0 or byteIdx >= bytes.length — the caller must
+ * ensure the split point produces two non-empty halves.
+ */
+export function splitProgram(prog: Program, byteIdx: number): [Program, Program] {
+  const n = prog.bytes.length;
+  if (byteIdx <= 0 || byteIdx >= n) {
+    throw new Error(`splitProgram: byteIdx ${byteIdx} out of range (1, ${n - 1})`);
+  }
+  const bitPos = prog.bytes[byteIdx].firstBit;
+  const [firstStream, secondStream] = splitBitStream(prog.stream, bitPos);
+
+  const firstBytes  = prog.bytes.slice(0, byteIdx).map((b, i) => resetByteInfo(b, i, 0));
+  const secondBytes = prog.bytes.slice(byteIdx)   .map((b, i) => resetByteInfo(b, i, bitPos));
+
+  return [
+    rebuildProgram(firstBytes,  firstStream),
+    rebuildProgram(secondBytes, secondStream),
+  ];
+}
+
+/**
+ * Concatenate two or more Programs into a single Program, in input order.
+ *
+ * The joined Program's byte array is the concatenation of all inputs'
+ * bytes; the joined BitStream is the concatenation of all inputs'
+ * BitStreams (see `joinBitStreams` for the sample-position behaviour at
+ * seams).  Per-byte bit pointers are shifted so they index correctly into
+ * the joined stream.
+ *
+ * The result is reparsed from scratch: the header comes from whatever
+ * sync + header the first bytes happen to contain (so in practice this
+ * means the first input's header carries through, assuming its bytes
+ * haven't been trimmed).  Per-byte edit state is cleared; `originalIndex`
+ * is renumbered 0-based across the whole concatenation.  Same reset
+ * policy as splitProgram — this is a power action.
+ *
+ * A single-Program input is returned unchanged (no defensive copy,
+ * mirroring joinBitStreams).  Throws on an empty input array.
+ */
+export function joinPrograms(progs: Program[]): Program {
+  if (progs.length === 0) {
+    throw new Error('joinPrograms: need at least one program to join');
+  }
+  if (progs.length === 1) return progs[0];
+
+  const joinedStream = joinBitStreams(progs.map(p => p.stream));
+  const joinedBytes: ByteInfo[] = [];
+  let bitOffset = 0;
+  for (const p of progs) {
+    for (const b of p.bytes) {
+      // Shift bit pointers by the negative of the running offset so that
+      // the byte's firstBit/lastBit become indices into the joined stream.
+      joinedBytes.push(resetByteInfo(b, joinedBytes.length, -bitOffset));
+    }
+    bitOffset += p.stream.bitCount;
+  }
+  return rebuildProgram(joinedBytes, joinedStream);
 }
 
 export function readProgramBytes(stream: BitStream, skipSync = false): Program {
