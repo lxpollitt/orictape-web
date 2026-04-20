@@ -699,6 +699,34 @@ searchInput.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 });
 
+/**
+ * Return the edit-provenance status of element `ei` of `line` — based on the
+ * `edited` flag(s) on the backing byte(s).  Element 0 spans 2 bytes (line
+ * number); others are single bytes.  Mixed element-0 returns 'explicit' if
+ * either byte is explicit, else 'automatic' if either is automatic, else null.
+ */
+function elementEditStatus(
+  prog: Program, line: LineInfo, ei: number,
+): 'explicit' | 'automatic' | null {
+  const pick = (b: ByteInfo | undefined): 'explicit' | 'automatic' | null =>
+    b?.edited === 'explicit' ? 'explicit' : b?.edited === 'automatic' ? 'automatic' : null;
+  if (ei === 0) {
+    const a = pick(prog.bytes[line.firstByte + 2]);
+    const b = pick(prog.bytes[line.firstByte + 3]);
+    return a === 'explicit' || b === 'explicit' ? 'explicit'
+         : a === 'automatic' || b === 'automatic' ? 'automatic'
+         : null;
+  }
+  return pick(prog.bytes[line.firstByte + 3 + ei]);
+}
+
+/** CSS class for an element's edit status (empty if not edited). */
+function elementEditClass(status: 'explicit' | 'automatic' | null): string {
+  return status === 'explicit' ? 'elem-edit-explicit'
+       : status === 'automatic' ? 'elem-edit-auto'
+       : '';
+}
+
 function renderBasic(prog: Program): void {
   if (!prog.lines.length) {
     basicPanel.innerHTML =
@@ -755,8 +783,10 @@ function renderBasic(prog: Program): void {
     const elemsHtml = line.elements.map((el, ei) => {
       const elemSev = line.elementErrors?.[ei];
       const errCls = elemSev === 'error' ? 'elem-err' : elemSev === 'warning' ? 'elem-warn' : '';
+      const editCls = elementEditClass(elementEditStatus(prog, line, ei));
       const selCls = (i === selLine && ei === selElem) ? ' sel' : '';
-      return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
+      const extraCls = [errCls, editCls].filter(Boolean).join(' ');
+      return `<span class="elem${extraCls ? ' ' + extraCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
     }).join('');
 
     return `<div class="${lineClass}" data-li="${i}">${elemsHtml}</div>`;
@@ -1173,8 +1203,10 @@ function renderBasicLineHtml(
   const elems = line.elements.map((el, ei) => {
     const elemSev = line.elementErrors?.[ei];
     const errCls = elemSev === 'error' ? 'elem-err' : elemSev === 'warning' ? 'elem-warn' : '';
+    const editCls = elementEditClass(elementEditStatus(prog, line, ei));
     const selCls = ei === selElem ? ' sel' : '';
-    return `<span class="elem${errCls ? ' ' + errCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
+    const extraCls = [errCls, editCls].filter(Boolean).join(' ');
+    return `<span class="elem${extraCls ? ' ' + extraCls : ''}${selCls}" data-ei="${ei}">${escHtml(el)}</span>`;
   }).join('');
   return `<div class="${cls}">${elems}</div>`;
 }
@@ -2126,8 +2158,20 @@ function isErrByte(b: ByteInfo): boolean {
   return b.chkErr || b.unclear;
 }
 
+function isExplicitEditByte(b: ByteInfo): boolean {
+  return b.edited === 'explicit';
+}
+
 function lineHasError(prog: Program, li: number): boolean {
   return lineHealth(prog, li) !== 'clean';
+}
+
+function lineHasExplicitEdit(prog: Program, li: number): boolean {
+  const line = prog.lines[li];
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    if (prog.bytes[i]?.edited === 'explicit') return true;
+  }
+  return false;
 }
 
 /** Number of bytes per visual row in the current hex grid, measured from DOM.
@@ -2162,20 +2206,22 @@ function navigateHex(key: string, shift: boolean, prog: Program, select: (i: num
     return;
   }
 
-  // Alt+Left/Right — scan linearly for next error/warning byte.
+  // Alt+Left/Right — scan linearly for next error/warning/edited byte.
   if (key === 'ArrowLeft' || key === 'ArrowRight') {
     const step = key === 'ArrowLeft' ? -1 : 1;
     for (let i = cur + step; i >= 0 && i < n; i += step) {
-      if (isErrByte(prog.bytes[i])) { select(i); return; }
+      const b = prog.bytes[i];
+      if (isErrByte(b) || isExplicitEditByte(b)) { select(i); return; }
     }
-    // No error found — go to the start or end of the file as end-of-search feedback.
+    // No match found — go to the start or end of the file as end-of-search feedback.
     select(step < 0 ? 0 : n - 1);
     return;
   }
 
-  // Alt+Up/Down — jump to the first error byte of the next/prev row that
-  // contains an error.  Column position is intentionally not preserved in this
-  // first iteration but the row-walking structure makes it easy to add later.
+  // Alt+Up/Down — jump to the first error/edited byte of the next/prev row
+  // that contains one.  Column position is intentionally not preserved in
+  // this first iteration but the row-walking structure makes it easy to add
+  // later.
   const bpr  = hexBytesPerRow();
   const step = key === 'ArrowUp' ? -1 : 1;
   let row = Math.floor(cur / bpr) + step;
@@ -2183,11 +2229,12 @@ function navigateHex(key: string, shift: boolean, prog: Program, select: (i: num
     const rowStart = row * bpr;
     const rowEnd   = Math.min(rowStart + bpr - 1, n - 1);
     for (let b = rowStart; b <= rowEnd; b++) {
-      if (isErrByte(prog.bytes[b])) { select(b); return; }
+      const by = prog.bytes[b];
+      if (isErrByte(by) || isExplicitEditByte(by)) { select(b); return; }
     }
     row += step;
   }
-  // No error row found — go to the start or end of the file as end-of-search feedback.
+  // No matching row found — go to the start or end of the file as end-of-search feedback.
   select(step < 0 ? 0 : n - 1);
 }
 
@@ -2283,22 +2330,22 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
     return;
   }
 
-  // Shift+Up/Down — jump to the next/prev BASIC line that contains any error,
-  // landing on the first error element in that line (consistent regardless of
-  // direction, so the result is always predictable).
+  // Shift+Up/Down — jump to the next/prev BASIC line that contains any
+  // error or edit, landing on the first error/edit element in that line.
   if (key === 'ArrowUp' || key === 'ArrowDown') {
     const step  = key === 'ArrowUp' ? -1 : 1;
     const start = li < 0 ? (step < 0 ? lines.length : -1) : li;
     for (let i = start + step; i >= 0 && i < lines.length; i += step) {
-      if (!lineHasError(prog, i)) continue;
+      if (!lineHasError(prog, i) && !lineHasExplicitEdit(prog, i)) continue;
       const line = lines[i];
-      // Prefer the first element that has a visibly-highlighted error byte (the
-      // corruption site).  Only fall back to element 0 when the error is purely
-      // at the line level (lenErr / checksum mismatch with no bad element bytes),
-      // since in that case there is no more specific location to point at.
+      // Prefer the first element that has a visibly-highlighted error or edit
+      // (the corruption / change site).  Only fall back to element 0 when the
+      // issue is purely line-level (lenErr / checksum mismatch with no bad or
+      // edited element bytes), since in that case there is no more specific
+      // location to point at.
       let landed = false;
       for (let ei = 0; ei < line.elements.length; ei++) {
-        if (line.elementErrors?.[ei]) {
+        if (line.elementErrors?.[ei] || elementEditStatus(prog, line, ei) === 'explicit') {
           selectByte(byteForElem(line, ei));
           landed = true;
           break;
@@ -2307,14 +2354,14 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
       if (!landed) selectByte(byteForElem(line, 0));
       return;
     }
-    // No error line found — go to the first/last element as end-of-search feedback.
+    // No matching line found — go to the first/last element as end-of-search feedback.
     const edge = step < 0 ? lines[0] : lines[lines.length - 1];
     selectByte(byteForElem(edge, step < 0 ? 0 : edge.elements.length - 1));
     return;
   }
 
-  // Alt+Left/Right — scan visible elements for the next/prev error, crossing
-  // line boundaries when needed.
+  // Alt+Left/Right — scan visible elements for the next/prev error or edit,
+  // crossing line boundaries when needed.
   if (li < 0 || selByte === null) return;
   const step = key === 'ArrowLeft' ? -1 : 1;
 
@@ -2325,7 +2372,10 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
     ? (step < 0 ? curLine.elements.length - 1 : 0)
     : curEi + step;
   for (let ei = curStart; ei >= 0 && ei < curLine.elements.length; ei += step) {
-    if (curLine.elementErrors?.[ei]) { selectByte(byteForElem(curLine, ei)); return; }
+    if (curLine.elementErrors?.[ei] || elementEditStatus(prog, curLine, ei) === 'explicit') {
+      selectByte(byteForElem(curLine, ei));
+      return;
+    }
   }
 
   // Remaining lines.
@@ -2333,10 +2383,13 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
     const l     = lines[lj];
     const start = step < 0 ? l.elements.length - 1 : 0;
     for (let ei = start; ei >= 0 && ei < l.elements.length; ei += step) {
-      if (l.elementErrors?.[ei]) { selectByte(byteForElem(l, ei)); return; }
+      if (l.elementErrors?.[ei] || elementEditStatus(prog, l, ei) === 'explicit') {
+        selectByte(byteForElem(l, ei));
+        return;
+      }
     }
   }
-  // No error element found — go to the first/last element as end-of-search feedback.
+  // No matching element found — go to the first/last element as end-of-search feedback.
   const edge = step < 0 ? lines[0] : lines[lines.length - 1];
   selectByte(byteForElem(edge, step < 0 ? 0 : edge.elements.length - 1));
 }

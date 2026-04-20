@@ -495,6 +495,11 @@ header h1 {
 .basic-line .elem            { display: inline-block; line-height: 1.5; }
 .basic-line .elem.elem-err   { color: var(--red);    text-decoration: underline; text-underline-offset: 15%; }
 .basic-line .elem.elem-warn  { color: var(--yellow); text-decoration: underline; text-underline-offset: 15%; }
+/* Edit provenance — matches hex-view colours (.hb-edited / .hb-auto-edited).
+ * Declared after elem-err/elem-warn so an edited byte that also carries an
+ * error (unusual) shows the edit colour, consistent with the hex view. */
+.basic-line .elem.elem-edit-explicit { color: #6cb6ff; text-decoration: underline; text-underline-offset: 15%; }
+.basic-line .elem.elem-edit-auto     { color: #618bb0; text-decoration: underline; text-underline-offset: 15%; }
 .basic-line .elem.sel        { background: #2a5a2a; box-shadow: inset 0 0 0 1px var(--green); }
 
 /* User has marked this line's errors to be ignored — mute the error styling. */
