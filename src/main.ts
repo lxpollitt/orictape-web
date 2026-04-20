@@ -2174,15 +2174,18 @@ function lineHasExplicitEdit(prog: Program, li: number): boolean {
   return false;
 }
 
-/** Number of bytes per visual row in the current hex grid, measured from DOM.
- *  Uses hexPanel (#hex-view) rather than hexPanelOuter (#hex-panel) so that
- *  the 6px left+right padding on #hex-panel is naturally excluded. */
+/** Number of bytes per visual row in the current hex grid, measured by
+ *  Y-position rather than width arithmetic.  Counting cells whose top
+ *  matches the first cell's top avoids off-by-one errors from padding /
+ *  subpixel rounding that width-based calculation is prone to. */
 function hexBytesPerRow(): number {
-  const firstHb = hexPanel.querySelector<HTMLElement>('.hb');
-  if (!firstHb) return 16;
-  const cellW = firstHb.getBoundingClientRect().width;
-  if (cellW <= 0) return 16;
-  return Math.max(1, Math.floor(hexPanel.clientWidth / cellW));
+  const cells = hexPanel.querySelectorAll<HTMLElement>('.hb');
+  if (!cells.length) return 16;
+  const firstRowY = cells[0].getBoundingClientRect().top;
+  for (let i = 1; i < cells.length; i++) {
+    if (cells[i].getBoundingClientRect().top > firstRowY + 0.5) return i;
+  }
+  return cells.length;
 }
 
 /**
