@@ -425,8 +425,10 @@ header h1 {
 .merge-col + .merge-col   { border-left: 1px solid var(--border); }
 .merge-col-result         { background: rgba(255,255,255,0.015); }
 
-/* When wrap mode is active, all BASIC lines wrap at ~38 chars (Oric-1 LIST width). */
-.basic-wrap .basic-line         { white-space: pre-wrap; max-width: 39ch; word-break: break-all; }
+/* When wrap mode is active, all BASIC lines wrap at ~38 chars (Oric-1 LIST width).
+ * break-spaces (vs pre-wrap) keeps leading whitespace visible on wrapped lines
+ * instead of letting it "hang" at the wrap point. */
+.basic-wrap .basic-line         { white-space: break-spaces; max-width: 39ch; word-break: break-all; }
 /* When wrap is off, preserve whitespace (like pre-wrap) but don't wrap lines. */
 #app:not(.basic-wrap) .basic-line { white-space: pre; }
 
@@ -519,7 +521,7 @@ header h1 {
   resize: none;
   overflow: hidden;
 }
-.basic-wrap .basic-edit-input { max-width: 39ch; word-break: break-all; }
+.basic-wrap .basic-edit-input { max-width: 39ch; word-break: break-all; white-space: break-spaces; }
 
 /* ── Status bar ─────────────────────────────────────────────────────────────── */
 #statusbar {
