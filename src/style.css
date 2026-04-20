@@ -510,6 +510,7 @@ header h1 {
 .basic-line.ignore-errors .elem.elem-warn       { color: inherit; }
 
 .basic-edit-input {
+  --basic-edit-bg: #528ac1;
   display: block;
   width: 100%;
   box-sizing: border-box;
@@ -518,7 +519,7 @@ header h1 {
   font: inherit;
   font-size: inherit;
   line-height: 1.5;
-  background: #1e3a1e;
+  background: var(--basic-edit-bg);
   color: var(--bright);
   border: none;
   border-radius: 0;

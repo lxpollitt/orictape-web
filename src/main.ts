@@ -898,9 +898,9 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   };
   ta.addEventListener('input', autoSize);
 
-  ta.addEventListener('blur', () => {
-    if (editingLine !== null) exitEditMode(true);
-  });
+  // ta.addEventListener('blur', () => {
+  //   if (editingLine !== null) exitEditMode(true);
+  // });
 
   ta.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'Enter' && e.shiftKey) {
