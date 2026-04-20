@@ -454,39 +454,161 @@ export function restoreLineToOriginalBytes(prog: Program, lineIdx: number): void
 export type LcsMatch = { newIdx: number; oldIdx: number };
 
 /**
- * Compute the Longest Common Subsequence between two byte arrays.
- * Returns matches in forward order (lowest indices first).
- * Pure function — no knowledge of Program, ByteInfo, or lines.
+ * Compute the Longest Common Subsequence between two value arrays.
+ *
+ * Returns matches in forward order (lowest indices first).  Pure function —
+ * no knowledge of Program, ByteInfo, or lines.
+ *
+ * When multiple alignments achieve the maximum LCS length (which is common
+ * whenever the inputs share repeated characters), the secondary objective is
+ * to **minimise the number of contiguous match runs**.  This keeps insertions
+ * and deletions as contiguous blocks rather than scattering them across the
+ * ambiguous region — matching the naive user expectation that a small edit
+ * to a BASIC line should show up as one change, not several.
+ *
+ * Concrete examples motivating the two-tier objective:
+ *
+ *   1. pies: old = "5 REM *By A.Pollitt.               *"
+ *            new = "5 REM *By A.Pollitt who likes pies!               *"
+ *      With a plain LCS + fixed tie-break, the 15 trailing spaces in old can
+ *      be matched against any 15 of the 19 spaces in new.  A match-earliest
+ *      tie-break matches the leading + internal spaces, leaving four bits of
+ *      the inserted phrase scattered around six separate "insertion" runs
+ *      (including three stray trailing spaces).  A match-latest tie-break
+ *      matches the trailing 15 spaces as one run — one contiguous insertion.
+ *      Minimising run count picks the latter.
+ *
+ *   2. 100 → 1000: three alignments achieve LCS=3 (insert at new[1], new[2],
+ *      or new[3]).  Run count is 1 for the new[3] placement (old matches
+ *      new[0..2] as one run; trailing 0 is insertion) and 2 for the others.
+ *      Minimising run count picks the trailing placement — matches the user
+ *      expectation that "I typed a 0 at the end".
+ *
+ *   3. 100 PRINT X → 1000 PRINT X: three alignments all have 2 runs, so the
+ *      primary and secondary objectives tie.  Tertiary tie-break in the
+ *      backtrack (prefer skip-new over skip-old on equal run-count) matches
+ *      the historical "match-earliest" behaviour and places the insertion at
+ *      new[3] — the boundary between "100" and " PRINT X".
+ *
+ * Algorithm: two DP passes over an (n+1) × (m+1) grid, where n = |old| and
+ * m = |new|.
+ *
+ *   Pass 1 (lcs): standard LCS length.
+ *   Pass 2 (f0, f1): among alignments achieving lcs[i][j], track the minimum
+ *     number of match runs, split by whether the last action was a match
+ *     (f1) or a non-match / origin (f0).  Splitting the state lets us
+ *     distinguish "just extending an existing run" (no cost) from "starting
+ *     a new run" (+1 cost) when a match happens.
+ *
+ * O(n·m) time and space, same asymptotic as the vanilla LCS this replaces.
+ * For line-level inputs (n, m < ~100) this is negligible.
  */
 export function computeLcs(newValues: number[], oldValues: number[]): LcsMatch[] {
   const n = oldValues.length;
   const m = newValues.length;
-  const dp: Uint16Array[] = new Array(n + 1);
-  for (let i = 0; i <= n; i++) dp[i] = new Uint16Array(m + 1);
+
+  // Pass 1: standard LCS length.
+  const lcs: Uint16Array[] = new Array(n + 1);
+  for (let i = 0; i <= n; i++) lcs[i] = new Uint16Array(m + 1);
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
-      dp[i][j] = oldValues[i - 1] === newValues[j - 1]
-        ? dp[i - 1][j - 1] + 1
-        : Math.max(dp[i - 1][j], dp[i][j - 1]);
+      lcs[i][j] = oldValues[i - 1] === newValues[j - 1]
+        ? lcs[i - 1][j - 1] + 1
+        : Math.max(lcs[i - 1][j], lcs[i][j - 1]);
     }
   }
 
-  // Backtrack to collect matches in reverse, then reverse.
-  // When a match exists but skipping it yields the same LCS length, skip it
-  // to prefer earlier match positions in the new values.
-  const matches: LcsMatch[] = [];
-  let oi = n, ni = m;
-  while (oi > 0 && ni > 0) {
-    if (oldValues[oi - 1] === newValues[ni - 1] && dp[oi][ni - 1] < dp[oi][ni]) {
-      // Match is required — can't achieve the same LCS without it.
-      matches.push({ newIdx: ni - 1, oldIdx: oi - 1 });
-      oi--; ni--;
-    } else if (dp[oi][ni - 1] >= dp[oi - 1][ni]) {
-      ni--;
-    } else {
-      oi--;
+  // Pass 2: among alignments achieving lcs[i][j], find minimum match runs.
+  //   f0[i][j] = min runs when last action was non-match (or at origin)
+  //   f1[i][j] = min runs when last action was match (just matched
+  //              old[i-1] with new[j-1])
+  // INF marks unreachable states — e.g. f1[0][0] (no match has happened).
+  const INF = 0x3fffffff;
+  const f0: Int32Array[] = new Array(n + 1);
+  const f1: Int32Array[] = new Array(n + 1);
+  for (let i = 0; i <= n; i++) {
+    f0[i] = new Int32Array(m + 1).fill(INF);
+    f1[i] = new Int32Array(m + 1).fill(INF);
+  }
+  f0[0][0] = 0;
+
+  for (let i = 0; i <= n; i++) {
+    for (let j = 0; j <= m; j++) {
+      if (i === 0 && j === 0) continue;
+      // State 0: arrived by skip-old or skip-new (valid only if skipping
+      // doesn't reduce LCS length at this cell).
+      if (i > 0 && lcs[i - 1][j] === lcs[i][j]) {
+        const r = Math.min(f0[i - 1][j], f1[i - 1][j]);
+        if (r < f0[i][j]) f0[i][j] = r;
+      }
+      if (j > 0 && lcs[i][j - 1] === lcs[i][j]) {
+        const r = Math.min(f0[i][j - 1], f1[i][j - 1]);
+        if (r < f0[i][j]) f0[i][j] = r;
+      }
+      // State 1: arrived by match (valid only if chars equal and taking
+      // the match is on an optimal path).
+      if (i > 0 && j > 0
+          && oldValues[i - 1] === newValues[j - 1]
+          && lcs[i - 1][j - 1] + 1 === lcs[i][j]) {
+        const fromSkip  = f0[i - 1][j - 1] + 1;  // starts a new run
+        const fromMatch = f1[i - 1][j - 1];      // continues run
+        const r = Math.min(fromSkip, fromMatch);
+        if (r < f1[i][j]) f1[i][j] = r;
+      }
     }
   }
+
+  // Backtrack.  On ties, prefer skip-new over skip-old and prefer continuing
+  // an existing run over starting a new one.  These tertiary tie-breaks
+  // preserve the historical match-earliest behaviour for cases the
+  // run-minimising rule doesn't distinguish (e.g. the 100 PRINT X case).
+  const matches: LcsMatch[] = [];
+  let oi = n, ni = m;
+  let state: 0 | 1 = (f1[n][m] < f0[n][m]) ? 1 : 0;
+
+  while (oi > 0 || ni > 0) {
+    if (state === 1) {
+      matches.push({ newIdx: ni - 1, oldIdx: oi - 1 });
+      const fromSkip  = f0[oi - 1][ni - 1] + 1;
+      const fromMatch = f1[oi - 1][ni - 1];
+      // Strict '<' on fromMatch: on equal run-count the predecessor is
+      // treated as "non-match", which ends the run going backward.  In the
+      // forward view this places the start of the run as late as possible,
+      // which combined with the skip-new preference in the state-0 branch
+      // realises the historical match-earliest tie-break for cells the
+      // primary and secondary objectives don't distinguish.
+      state = (fromMatch < fromSkip) ? 1 : 0;
+      oi--; ni--;
+    } else {
+      const canSkipOld = oi > 0 && lcs[oi - 1][ni] === lcs[oi][ni];
+      const canSkipNew = ni > 0 && lcs[oi][ni - 1] === lcs[oi][ni];
+      let doSkipNew: boolean;
+      if (canSkipOld && canSkipNew) {
+        const runsViaOld = Math.min(f0[oi - 1][ni],     f1[oi - 1][ni]);
+        const runsViaNew = Math.min(f0[oi][ni - 1],     f1[oi][ni - 1]);
+        doSkipNew = (runsViaNew <= runsViaOld);
+      } else {
+        doSkipNew = canSkipNew;
+      }
+      if (doSkipNew) {
+        const r0 = f0[oi][ni - 1];
+        const r1 = f1[oi][ni - 1];
+        state = (r1 <= r0) ? 1 : 0;
+        ni--;
+      } else if (canSkipOld) {
+        const r0 = f0[oi - 1][ni];
+        const r1 = f1[oi - 1][ni];
+        state = (r1 <= r0) ? 1 : 0;
+        oi--;
+      } else {
+        // Boundary cleanup — no valid skip transition, just walk toward
+        // the origin.  Any remaining old / new are unmatched by definition.
+        if (oi > 0) oi--;
+        else ni--;
+      }
+    }
+  }
+
   matches.reverse();
   return matches;
 }
