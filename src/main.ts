@@ -1724,10 +1724,23 @@ hexPanel.addEventListener('click', (e) => {
   const byteIdx = +el.dataset.i!;
   if (viewMode === 'tape') {
     if (byteIdx === selByte) {
-      // Already selected — toggle between 100% and 400% byte-level zoom.
-      waveform.zoomTo(waveform.getByteZoomFactor() >= 4 ? 1 : 4);
+      // Already selected — cycle byte zoom between 100% and 400% using
+      // the shared snap rules (toggle at exact 100/400%, cap at the
+      // extremes, nearest-endpoint for in-between).  Anchored on the
+      // selected byte since the user is clicking in the hex panel, not
+      // on the waveform — "click-point-stable" doesn't apply here.
+      waveform.cycleByteZoomOnSelection();
     } else {
-      selectByte(byteIdx);
+      // Near/far waveform behaviour: "near" = clicked byte is within the
+      // same hex row as the previous selection (|delta| ≤ bpr).  For
+      // near clicks, prefer moving the selection to moving the waveform
+      // — keep the viewport stationary if the new byte is already
+      // visible, and only rescue to the nearest edge when it isn't.
+      // Far clicks are treated as semantic jumps and recentre on the
+      // new byte.
+      const bpr  = hexBytesPerRow();
+      const near = selByte !== null && Math.abs(byteIdx - selByte) <= bpr;
+      selectByte(byteIdx, near ? 'stayIfVisible' : 'recentre');
     }
   } else {
     // Merge mode: the byte index refers to whichever column's Program is
@@ -1742,8 +1755,11 @@ hexPanel.addEventListener('dblclick', (e) => {
   const byteIdx = +el.dataset.i!;
   if (viewMode === 'tape') {
     if (byteIdx !== selByte) selectByte(byteIdx);
-    // Double-click always zooms to 400%.
-    waveform.zoomTo(4);
+    // Double-click in the hex panel always zooms the waveform out to
+    // overview fit, regardless of current byte-level zoom.  Matches the
+    // "dblclick is the escape-to-overview gesture" convention we've
+    // built up elsewhere.
+    waveform.fitToProgram();
   } else {
     selectMergeByteAt((selMergeCol ?? 1) as 0 | 1 | 2, byteIdx);
   }
@@ -1806,7 +1822,10 @@ basicPanel.addEventListener('click', (e) => {
   }
 });
 
-function selectByte(i: number): void {
+function selectByte(
+  i: number,
+  waveMode: 'recentre' | 'followAdjacent' | 'stayIfVisible' = 'recentre',
+): void {
   selByte = i;
 
   hexPanel.querySelector('.hb-sel')?.classList.remove('hb-sel');
@@ -1841,7 +1860,7 @@ function selectByte(i: number): void {
   if (byte?.edited) {
     waveform.selectByte(null);
   } else {
-    waveform.selectByte(i);
+    waveform.selectByte(i, waveMode);
   }
   updateStatusBar();
 }
@@ -2292,9 +2311,11 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
 
         if (!refEl) {
           // No selection yet — jump to very first/last element.
+          // 'followAdjacent' is safe here: waveform.selectByte falls back
+          // to recentre when there's no previous selection.
           const target = up ? allElems[allElems.length - 1] : allElems[0];
           const lEl = target.closest<HTMLElement>('[data-li]')!;
-          selectByte(byteForElem(prog.lines[+lEl.dataset.li!], +target.dataset.ei!));
+          selectByte(byteForElem(prog.lines[+lEl.dataset.li!], +target.dataset.ei!), 'followAdjacent');
           break;
         }
 
@@ -2322,20 +2343,31 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
         if (!bestEl) break;
 
         const lEl = bestEl.closest<HTMLElement>('[data-li]')!;
-        selectByte(byteForElem(prog.lines[+lEl.dataset.li!], +bestEl.dataset.ei!));
+        // U/D uses followAdjacent for visual consistency with L/R —
+        // waveform scrolls under a stationary selection.  Big line jumps
+        // are handled by the off-screen rescue in waveform.selectByte.
+        selectByte(byteForElem(prog.lines[+lEl.dataset.li!], +bestEl.dataset.ei!), 'followAdjacent');
         break;
       }
       case 'ArrowLeft': {
+        // L/R element-level nav moves to an adjacent byte range — ask the
+        // waveform to scroll under a stationary selection instead of
+        // re-centering.  Cross-line steps may cover several bytes
+        // (terminator + pointer + line-number overhead), but the effect
+        // is still a "step forward in the byte stream" — followAdjacent
+        // feels consistent.  No change when the nav is rejected (start
+        // of program), so the initial selectByte when li < 0 uses the
+        // default recentre.
         if (li < 0) { selectByte(byteForElem(lines[0], 0)); break; }
         const line = lines[li];
         let ei = elemForByte(line, selByte!);
         if (ei < 0) ei = 0; // snap to start of line if on a non-visible byte
         if (ei > 0) {
-          selectByte(byteForElem(line, ei - 1));
+          selectByte(byteForElem(line, ei - 1), 'followAdjacent');
         } else if (li > 0) {
           // Cross line boundary — land on the last visible element of the prev line.
           const prev = lines[li - 1];
-          selectByte(byteForElem(prev, prev.elements.length - 1));
+          selectByte(byteForElem(prev, prev.elements.length - 1), 'followAdjacent');
         }
         break;
       }
@@ -2345,10 +2377,10 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
         let ei = elemForByte(line, selByte!);
         if (ei < 0) ei = line.elements.length - 1; // snap to end if on a non-visible byte
         if (ei < line.elements.length - 1) {
-          selectByte(byteForElem(line, ei + 1));
+          selectByte(byteForElem(line, ei + 1), 'followAdjacent');
         } else if (li < lines.length - 1) {
           // Cross line boundary — land on the first visible element of the next line.
-          selectByte(byteForElem(lines[li + 1], 0));
+          selectByte(byteForElem(lines[li + 1], 0), 'followAdjacent');
         }
         break;
       }
@@ -2688,7 +2720,14 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (!prog) return;
   if (focusedPanel === 'hex') {
     e.preventDefault();
-    navigateHex(e.key, e.altKey, prog, selectByte);
+    // Plain (non-Alt) cursor nav keeps the selection visually put and
+    // scrolls the waveform underneath — applies to both L/R (byte steps)
+    // and U/D (row steps).  The off-screen rescue in waveform.selectByte
+    // handles the big-jump case where the new byte ends up off-screen.
+    // Alt-combos (error/edit search) use recentre because they're
+    // semantic jumps, not neighbourhood moves.
+    const waveMode = !e.altKey ? 'followAdjacent' : 'recentre';
+    navigateHex(e.key, e.altKey, prog, (i) => selectByte(i, waveMode));
   } else if (focusedPanel === 'basic') {
     e.preventDefault();
     navigateBasic(e.key, e.altKey, prog);

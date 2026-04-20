@@ -1,4 +1,4 @@
-import type { Program } from './decoder';
+import type { ByteInfo, BitStream, Program } from './decoder';
 
 const GREEN  = '#3d8c3d';
 const YELLOW = '#c9a428';
@@ -278,11 +278,59 @@ export class WaveformView {
    *  made before the current double-click grace window — i.e. the byte
    *  was already selected when this click sequence started, not freshly
    *  selected by the first click of a double-click.  Shared by dblclick
-   *  paths that want to treat race-condition selections as "not pre-
-   *  existing". */
+   *  and "single-click on selected byte cycles zoom" paths that want to
+   *  treat race-condition selections as "not pre-existing". */
   private isPreExistingSelection(idx: number): boolean {
     if (idx !== this.selByte) return false;
     return performance.now() - this.lastWaveClickSelectChange >= DBL_CLICK_SELECTION_GRACE_MS;
+  }
+
+  /** Compute the snap-target byte zoom percentage (100 or 400) for a
+   *  cycle-byte-zoom action from the current spp.  Shared by the
+   *  click-anchored and selection-anchored entry points so both obey
+   *  the same rules:
+   *   • Exactly at 100% → 400% (toggle).
+   *   • Exactly at 400% → 100% (toggle).
+   *   • > 400% → 400% (cap).
+   *   • < 100% → 100% (cap, includes overview-mode zooms).
+   *   • Between 100% and 400% → whichever endpoint is closer (bias to
+   *     100% on the exact midpoint, 250%). */
+  private pickByte100Or400Target(): 100 | 400 {
+    const z = Math.round(BYTE_BASE_SPP / this.spp * 100);
+    if      (z === 100) return 400;
+    else if (z === 400) return 100;
+    else if (z >  400)  return 400;
+    else if (z <  100)  return 100;
+    else                return z <= 250 ? 100 : 400;
+  }
+
+  /** Cycle zoom between byte 100% and byte 400% on single-click of the
+   *  already-selected byte in the waveform itself.  Anchors on the click
+   *  point — after the zoom change, the clicked sample stays under the
+   *  same canvas pixel.  This:
+   *   (a) feels natural ("the spot under my finger doesn't move"),
+   *   (b) guarantees the selected byte stays visible since the click
+   *       landed on it, so the anchor pixel is always within the byte's
+   *       rendered range — no overlap / recentre logic needed. */
+  private cycleByteZoom100To400(clickPixelX: number): void {
+    const target = this.pickByte100Or400Target();
+    const clickSample = this.viewStart + clickPixelX * this.spp;
+    this.spp = this.clampSpp(BYTE_BASE_SPP * 100 / target);
+    this.viewStart = clickSample - clickPixelX * this.spp;
+    this.clampView();
+    this.updateZoomDisplay();
+    this.draw();
+  }
+
+  /** Same byte 100%/400% cycle rules as cycleByteZoom100To400, but anchored
+   *  on the currently-selected byte instead of a click pixel.  Used by the
+   *  hex panel's click-on-selected-byte shortcut — the user's pointer is
+   *  not on the waveform, so centring on the selected byte is the natural
+   *  anchor.  setSppAnchored handles the anchor logic (selected byte if
+   *  any, else canvas centre). */
+  cycleByteZoomOnSelection(): void {
+    const target = this.pickByte100Or400Target();
+    this.setSppAnchored(BYTE_BASE_SPP * 100 / target);
   }
 
   /** Clamp an spp value to the global zoom range [MIN_SPP, maxSpp()]. */
@@ -377,6 +425,28 @@ export class WaveformView {
    *  range any more". */
   getByteZoomFactor(): number { return BYTE_BASE_SPP / this.spp; }
 
+  /** If the given byte has zero overlap with the visible viewport, shift
+   *  the view so the byte sits just inside the nearest edge with a small
+   *  margin.  Partially-visible bytes are left alone — the caller's
+   *  "byte doesn't move" preference wins when any pixel of the byte is
+   *  still on screen.  No-op when the byte is fully or partially visible.
+   *  Shared by `followAdjacent` and `stayIfVisible` modes of selectByte. */
+  private rescueIfByteOffScreen(b: ByteInfo, stream: BitStream): void {
+    const byteFirstSample = stream.bitFirstSample[b.firstBit];
+    const byteLastSample  = stream.bitLastSample[b.lastBit];
+    const visStart = this.viewStart;
+    const visEnd   = this.viewStart + this.canvas.width * this.spp;
+    const marginPx = 12;
+    const marginSamples = marginPx * this.spp;
+    if (byteLastSample < visStart) {
+      this.viewStart = byteFirstSample - marginSamples;
+      this.clampView();
+    } else if (byteFirstSample > visEnd) {
+      this.viewStart = byteLastSample - this.canvas.width * this.spp + marginSamples;
+      this.clampView();
+    }
+  }
+
   /** Change spp, anchoring the view on the selected byte (if any) or the
    *  current view centre (otherwise).  Clamps to the valid zoom range. */
   private setSppAnchored(newSpp: number): void {
@@ -396,26 +466,75 @@ export class WaveformView {
     this.draw();
   }
 
-  selectByte(byteIndex: number | null): void {
+  selectByte(
+    byteIndex: number | null,
+    mode: 'recentre' | 'followAdjacent' | 'stayIfVisible' = 'recentre',
+  ): void {
+    const prevSelByte = this.selByte;
     this.selByte = byteIndex;
     this.clickedStream = null;
-    const recentre = !this.suppressRecentre;
+    const adjustView = !this.suppressRecentre;
     this.suppressRecentre = false;
-    if (recentre && byteIndex !== null && this.prog) {
-      const stream = this.prog.stream;
-      const b      = this.prog.bytes[byteIndex];
-      if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
-        const s0  = stream.bitFirstSample[b.firstBit];
-        const s1  = stream.bitLastSample[b.lastBit];
-        const mid = (s0 + s1) / 2;
-        // If we're in overview mode, snap to 100% byte zoom so the byte is
-        // visible.  If already in byte mode, preserve the user's current
-        // byte-level zoom — just pan the view to centre on the selection.
-        if (!this.isByteMode()) this.spp = this.clampSpp(BYTE_BASE_SPP);
-        this.viewStart = mid - (this.canvas.width / 2) * this.spp;
-        this.clampView();
-      }
+    if (!adjustView || byteIndex === null || !this.prog) {
+      this.updateZoomDisplay();
+      this.draw();
+      return;
     }
+
+    const stream = this.prog.stream;
+    const b      = this.prog.bytes[byteIndex];
+    if (!b || b.firstBit >= stream.bitCount || b.lastBit >= stream.bitCount) {
+      this.updateZoomDisplay();
+      this.draw();
+      return;
+    }
+    const newMid = (stream.bitFirstSample[b.firstBit] + stream.bitLastSample[b.lastBit]) / 2;
+
+    // 'stayIfVisible' mode: don't shift the view if the new byte has any
+    // overlap with the current viewport — preserves waveform context when
+    // the caller signals a "local" selection change (e.g. a hex-panel
+    // click within the same row as the previous selection).  If the byte
+    // is fully off-screen, rescue to the nearest edge with margin.
+    if (mode === 'stayIfVisible') {
+      this.rescueIfByteOffScreen(b, stream);
+      this.updateZoomDisplay();
+      this.draw();
+      return;
+    }
+
+    // 'followAdjacent' mode: the caller is navigating selection to a byte
+    // neighbouring the previous one and wants the waveform to visually
+    // scroll underneath a stationary selection, rather than re-centering.
+    // Shift viewStart by the sample delta between old and new byte
+    // midpoints so the new byte renders at the exact pixel the old one
+    // was at.  Falls back to recentre when we have no previous selection
+    // or the old byte can't be referenced.
+    //
+    // If the new byte would end up fully off-screen (old selection was
+    // already off-screen via a drag, or clampView stopped the follow at
+    // a file boundary), pull it back onto the nearest edge with a small
+    // margin — "byte doesn't move" only applies while the byte remains
+    // at least partially visible.
+    if (mode === 'followAdjacent' && prevSelByte !== null && prevSelByte !== byteIndex) {
+      const oldB = this.prog.bytes[prevSelByte];
+      if (oldB && oldB.firstBit < stream.bitCount && oldB.lastBit < stream.bitCount) {
+        const oldMid = (stream.bitFirstSample[oldB.firstBit] + stream.bitLastSample[oldB.lastBit]) / 2;
+        this.viewStart += (newMid - oldMid);
+        this.clampView();
+        this.rescueIfByteOffScreen(b, stream);
+        this.updateZoomDisplay();
+        this.draw();
+        return;
+      }
+      // Fall through to recentre if the old byte is unresolvable.
+    }
+
+    // Default 'recentre' (and followAdjacent fallback): centre on the new
+    // byte.  If we're in overview mode, snap to 100% byte zoom so the
+    // byte is visible; in byte mode, preserve the user's current zoom.
+    if (!this.isByteMode()) this.spp = this.clampSpp(BYTE_BASE_SPP);
+    this.viewStart = newMid - (this.canvas.width / 2) * this.spp;
+    this.clampView();
     this.updateZoomDisplay();
     this.draw();
   }
@@ -465,14 +584,16 @@ export class WaveformView {
     ctx.lineTo(w, midY);
     ctx.stroke();
 
-    // Selected-byte highlight band (spans full canvas height including label strip)
+    // Selected-byte highlight band (spans full canvas height including label strip).
+    // Floor to 1px so the selection stays visible at overview zooms where the
+    // byte's natural width falls below a pixel.
     if (this.selByte !== null) {
       const b = prog.bytes[this.selByte];
       if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
         const x0 = (stream.bitFirstSample[b.firstBit] - vs) / spp;
         const x1 = (stream.bitLastSample[b.lastBit]   - vs) / spp;
         ctx.fillStyle = '#1e3a1e';
-        ctx.fillRect(x0, 0, x1 - x0, h);
+        ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
       }
     }
 
@@ -794,20 +915,31 @@ export class WaveformView {
         const sample = this.viewStart + x * this.spp;
         const idx    = this.sampleToByte(sample);
         if (idx !== null && this.onByteClick) {
-          // Click inside the current program — select the byte, never change
-          // the view.  suppressRecentre = true prevents selectByte from
-          // zooming / panning; the user can reach bit detail by explicit
-          // zoom (scroll wheel) or double-click to fit-to-overview.
-          this.clickedStream    = null;
-          this.suppressRecentre = true;
-          const prevSelByte = this.selByte;
-          this.onByteClick(idx);
-          // If this click changed the selection, record the time — a
-          // subsequent dblclick event falling inside the grace window
-          // should treat the selection as "freshly made by this click
-          // sequence", not as a pre-existing selection to escalate on.
-          if (this.selByte !== prevSelByte) {
-            this.lastWaveClickSelectChange = performance.now();
+          this.clickedStream = null;
+          if (this.isPreExistingSelection(idx)) {
+            // Clicked on the already-selected byte — cycle byte zoom
+            // between 100% and 400%, anchoring on the click point so the
+            // spot under the cursor stays put.  No selection change, no
+            // onByteClick call, no timestamp bump.  (Race-fresh
+            // selections fall through to the normal select path below.)
+            this.cycleByteZoom100To400(x);
+          } else {
+            // Click inside the current program — select the byte, never
+            // change the view.  suppressRecentre = true prevents
+            // selectByte from zooming / panning; the user can reach bit
+            // detail by scroll-wheel zoom, or click-on-selection to
+            // cycle byte 100/400%, or double-click for richer zoom
+            // escalation.
+            this.suppressRecentre = true;
+            const prevSelByte = this.selByte;
+            this.onByteClick(idx);
+            // If this click changed the selection, record the time — a
+            // subsequent dblclick event falling inside the grace window
+            // should treat the selection as "freshly made by this click
+            // sequence", not as a pre-existing selection to escalate on.
+            if (this.selByte !== prevSelByte) {
+              this.lastWaveClickSelectChange = performance.now();
+            }
           }
         } else {
           // Click outside current program.
@@ -877,15 +1009,17 @@ export class WaveformView {
         } else {
           // ── Byte mode ──
           if (onSelectedByte) {
-            // Reset-style escalation: first bring the view to 100% +
-            // centred; if already there, escape out to overview fit.
-            const bytePct  = Math.round(BYTE_BASE_SPP / this.spp * 100);
-            const atTarget = bytePct === 100 && this.isSelectedByteCentred();
-            if (atTarget) {
-              this.fitToProgram();
-            } else {
-              this.setSppAnchored(BYTE_BASE_SPP);
-            }
+            // Zoom out to overview-mode zoom, anchored on the click point
+            // so the clicked byte stays put under the cursor.  No centring
+            // — if the user wants the byte more central they can just
+            // drag, which is less work than reaching a centred byte with
+            // the mouse.
+            const clickSample = this.viewStart + x * this.spp;
+            this.spp          = this.clampSpp(this.overview100Spp());
+            this.viewStart    = clickSample - x * this.spp;
+            this.clampView();
+            this.updateZoomDisplay();
+            this.draw();
           } else if (this.onByteClick) {
             // Different byte (or race-fresh selection): select + zoom to
             // 100% centred.  onByteClick changes selection and, in byte
