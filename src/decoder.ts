@@ -227,6 +227,18 @@ export function programHealth(prog: Program): LineSeverity {
 }
 
 /**
+ * True if the program contains at least one byte marked as an explicit
+ * (user-typed) edit.  Automatic edits (e.g. pointer fixups) don't count
+ * because they get re-derived on reparse and aren't user-entered state.
+ *
+ * Used by destructive UI actions (e.g. split / join) to decide whether
+ * to surface a "your edits will be lost" warning to the user.
+ */
+export function programHasExplicitEdits(prog: Program): boolean {
+  return prog.bytes.some(b => b.edited === 'explicit');
+}
+
+/**
  * Summarise error/warning counts across all lines in a program.
  * Returns a compact array of { label, count, severity } suitable for display.
  */

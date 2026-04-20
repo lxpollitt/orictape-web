@@ -3,8 +3,8 @@ import { parseWavFile } from './wavfile';
 import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
-import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary, lineFirstAddr } from './decoder';
-import { readProgramLines, readProgramBytes, flagNonMonotonicLines } from './decoder';
+import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary, programHasExplicitEdits, lineFirstAddr } from './decoder';
+import { readProgramLines, readProgramBytes, flagNonMonotonicLines, splitProgram, joinPrograms } from './decoder';
 import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit, restoreLineToOriginalBytes, fixPointersAndTerminators } from './editor';
 import {
   alignPrograms, bestSource, isLineClean,
@@ -2495,6 +2495,111 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     return;
   }
 
+  // HEX panel: Shift+Enter — split the current program into two at the
+  // selected byte.  The selected byte becomes the first byte of the new
+  // second program (matches the BASIC-panel split-line model).  Both
+  // halves get fresh progNumbers to cleanly disambiguate them from any
+  // older references (e.g. in merge-source labels).  After the split,
+  // focus moves to the new second program with the cursor at byte 0.
+  if (e.key === 'Enter' && e.shiftKey
+      && viewMode === 'tape' && focusedPanel === 'hex' && selByte !== null) {
+    const prog = programs[activeProgIdx];
+    if (prog && selByte > 0 && selByte < prog.bytes.length) {
+      e.preventDefault();
+      const pi    = activeProgIdx;
+      const name  = prog.name || `Prog ${prog.progNumber}`;
+      const warn  = programHasExplicitEdits(prog) ? confirmDangerBanner() : '';
+      confirmAction(
+        warn +
+        `Split program <span class="prog-num">${prog.progNumber}</span>${escHtml(name)} ` +
+        `into two parts at the selected byte?<br><br>` +
+        `Any edits to this program will be lost.`,
+      ).then((ok) => {
+        if (!ok) return;
+        const [first, second] = splitProgram(prog, selByte!);
+        first.progNumber  = nextProgNumber++;
+        second.progNumber = nextProgNumber++;
+        tapes[activeTapeIdx].programs.splice(pi, 1, first, second);
+        activeProgIdx = pi + 1;
+        selByte       = 0;
+        renderAll();
+      });
+    }
+    return;
+  }
+
+  // HEX panel: Backspace at byte 0 — join this program with the previous
+  // one in the same tape.  The joined program gets a fresh progNumber.
+  // Cursor lands on the byte that was previously the first byte of the
+  // current (absorbed) program — i.e. offset by the previous program's
+  // length in the joined byte stream.
+  if (e.key === 'Backspace' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
+      && viewMode === 'tape' && focusedPanel === 'hex' && selByte === 0
+      && activeProgIdx > 0) {
+    const prog = programs[activeProgIdx];
+    const prev = programs[activeProgIdx - 1];
+    if (prog && prev) {
+      e.preventDefault();
+      const pi       = activeProgIdx;
+      const prevLen  = prev.bytes.length;
+      const prevName = prev.name || `Prog ${prev.progNumber}`;
+      const currName = prog.name || `Prog ${prog.progNumber}`;
+      const warn     = (programHasExplicitEdits(prev) || programHasExplicitEdits(prog))
+                         ? confirmDangerBanner() : '';
+      confirmAction(
+        warn +
+        `Join program <span class="prog-num">${prev.progNumber}</span>${escHtml(prevName)} ` +
+        `with program <span class="prog-num">${prog.progNumber}</span>${escHtml(currName)}?` +
+        `<br><br>Any edits to either program will be lost.`,
+      ).then((ok) => {
+        if (!ok) return;
+        const joined = joinPrograms([prev, prog]);
+        joined.progNumber = nextProgNumber++;
+        tapes[activeTapeIdx].programs.splice(pi - 1, 2, joined);
+        activeProgIdx = pi - 1;
+        selByte       = prevLen;
+        renderAll();
+      });
+    }
+    return;
+  }
+
+  // HEX panel: Delete at the last byte — join this program with the next
+  // one in the same tape.  Same progNumber / confirm model as Backspace
+  // above.  Cursor position is unchanged (same byte offset still valid
+  // in the joined program).
+  if (e.key === 'Delete' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
+      && viewMode === 'tape' && focusedPanel === 'hex' && selByte !== null) {
+    const prog = programs[activeProgIdx];
+    const next = programs[activeProgIdx + 1];
+    if (prog && next && selByte === prog.bytes.length - 1) {
+      e.preventDefault();
+      const pi          = activeProgIdx;
+      const savedSelByte = selByte;
+      const currName    = prog.name || `Prog ${prog.progNumber}`;
+      const nextName    = next.name || `Prog ${next.progNumber}`;
+      const warn        = (programHasExplicitEdits(prog) || programHasExplicitEdits(next))
+                            ? confirmDangerBanner() : '';
+      confirmAction(
+        warn +
+        `Join program <span class="prog-num">${prog.progNumber}</span>${escHtml(currName)} ` +
+        `with program <span class="prog-num">${next.progNumber}</span>${escHtml(nextName)}?` +
+        `<br><br>Any edits to either program will be lost.`,
+      ).then((ok) => {
+        if (!ok) return;
+        const joined = joinPrograms([prog, next]);
+        joined.progNumber = nextProgNumber++;
+        tapes[activeTapeIdx].programs.splice(pi, 2, joined);
+        selByte = savedSelByte;
+        renderAll();
+      });
+      return;
+    }
+    // Fall through: Delete not at end-of-program is not a hex-panel
+    // action — let it reach the trailing NAV_KEYS gate which no-ops
+    // for non-nav keys.
+  }
+
   // Delete (non-edit mode): delete forward from the selected element.
   if (e.key === 'Delete' && !e.metaKey && !e.ctrlKey && !e.altKey
       && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
@@ -2806,4 +2911,63 @@ function escHtml(s: string): string {
 
 function shortName(filename: string): string {
   return filename.replace(/\.[^.]+$/, '').slice(0, 24);
+}
+
+/**
+ * HTML for a prominent "DANGER" banner suitable for prepending to a
+ * confirm-dialog message body.  Used by split / join handlers to warn
+ * when the operation will discard user-typed (explicit) edits.
+ */
+function confirmDangerBanner(): string {
+  return '<div class="confirm-modal-warn"><span class="warn-icon">⚠</span> DANGER: Edits will be lost!</div>';
+}
+
+/**
+ * Show a confirm dialog with a message body (HTML) and OK/Cancel buttons.
+ * Returns a Promise that resolves to true on OK, false on Cancel or Escape.
+ *
+ * Reuses the existing .tap-modal-overlay / .tap-modal-box CSS pattern with
+ * a .confirm-modal-box size override (smaller than the save-TAP / merge
+ * modals).  Enter accepts, Escape cancels.  The OK button is focused on
+ * open so keyboard users can accept immediately.
+ *
+ * The `messageHtml` string is inserted as HTML — callers are responsible
+ * for escaping any user-supplied text (e.g. program names via escHtml).
+ * In return callers can embed styled badges like the .prog-num class used
+ * elsewhere in the UI.
+ */
+function confirmAction(messageHtml: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'tap-modal-overlay';
+    overlay.innerHTML =
+      '<div class="tap-modal-box confirm-modal-box">' +
+        `<div class="tap-modal-body confirm-modal-body">${messageHtml}</div>` +
+        '<div class="tap-modal-footer">' +
+          '<button class="confirm-cancel">Cancel</button>' +
+          '<button class="confirm-ok">OK</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    const close = (result: boolean): void => {
+      overlay.remove();
+      resolve(result);
+    };
+
+    overlay.querySelector<HTMLButtonElement>('.confirm-cancel')!
+      .addEventListener('click', () => close(false));
+    overlay.querySelector<HTMLButtonElement>('.confirm-ok')!
+      .addEventListener('click', () => close(true));
+
+    // Keydown captured at the overlay so it doesn't bubble to the global
+    // keydown handler (which would otherwise fire the same Escape / Enter
+    // semantics we defined here for other contexts).
+    overlay.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); close(true); }
+    });
+
+    overlay.querySelector<HTMLButtonElement>('.confirm-ok')!.focus();
+  });
 }

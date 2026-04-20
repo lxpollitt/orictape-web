@@ -743,6 +743,45 @@ header h1 {
   flex-shrink: 0;
 }
 
+/* Confirm dialog — smaller than the save-TAP / merge modals. */
+.tap-modal-box.confirm-modal-box {
+  width: min(480px, 90vw);
+  height: auto;
+}
+.tap-modal-body.confirm-modal-body {
+  display: block;
+  padding: 16px 20px;
+  line-height: 1.5;
+}
+.confirm-modal-body .prog-num {
+  vertical-align: 1px;
+  margin-right: 2px;
+  opacity: 0.75;
+}
+/* Prominent warning prepended to the confirm message when the action
+   will discard user edits.  Matches the badge-err palette used in the
+   program tabs so the severity cue is consistent. */
+.confirm-modal-warn {
+  background: #2a1414;
+  color: var(--red);
+  padding: 10px 14px;
+  margin-bottom: 20px;
+  border-radius: 4px;
+  font-size: 20px;
+  font-weight: 600;
+}
+.confirm-modal-warn .warn-icon {
+  /* Warning-triangle glyph renders smaller than text at the same
+     point size in most fonts — bump it up independently. */
+  font-size: 36px;
+  vertical-align: -2px;
+}
+/* Right-align both buttons: margin-left:auto on the first pushes it
+   (and everything after it in the flex row) to the right. */
+.tap-modal-footer > .confirm-cancel {
+  margin-left: auto;
+}
+
 #tap-meta-label {
   display: flex;
   align-items: center;
