@@ -109,7 +109,24 @@ let totalPrograms = 0;
 let totalTaps = 0;
 const writtenTapFiles: string[] = [];
 
+// Transient progress line — shown only in a TTY so piped / captured output
+// stays clean.  Grey so it doesn't distract from the summary printed at the
+// end.  A small rendering glitch can appear briefly on the very first line
+// of output in some terminals (seems to originate from process-launcher
+// startup, not our escape sequences) — not worth contorting the code to
+// work around.
+const isTTY = process.stdout.isTTY ?? false;
+function showProgress(msg: string): void {
+  if (!isTTY) return;
+  process.stdout.write(`\r\x1b[2K\x1b[90m${msg}\x1b[0m`);
+}
+function clearProgress(): void {
+  if (!isTTY) return;
+  process.stdout.write('\r\x1b[2K');
+}
+
 for (const filename of wavFiles) {
+  showProgress(`[${totalFiles + 1}/${wavFiles.length}] ${filename}`);
   totalFiles++;
   const filePath = join(inputDir, filename);
   const base     = basename(filename, '.wav');
@@ -174,6 +191,7 @@ for (const filename of wavFiles) {
 
 writeFileSync(join(outputDir, 'summary.txt'), summaryLines.join('\n') + '\n');
 
+clearProgress();
 console.log(`Processed ${totalFiles} WAV files → ${totalPrograms} programs, ${totalTaps} TAP files`);
 console.log(`Output: ${outputDir}/summary.txt`);
 
