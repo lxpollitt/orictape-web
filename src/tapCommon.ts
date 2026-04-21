@@ -11,6 +11,7 @@ export const TAP_META_MAGIC = 'ORICTAPE_META';
  */
 export interface TapMetadata {
   format?: 'fast' | 'slow';
+  source?: string;
   chkErr?: number[];
   unclear?: number[];
   edited?: { explicit?: number[]; automatic?: number[] };

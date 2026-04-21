@@ -195,6 +195,23 @@ function showProgramOverview(): void {
   waveform.fitToProgram();
 }
 
+/** Human-readable provenance string snapshotted onto Program.originalSource
+ *  at load time (and when a split creates a new program piece).  For a
+ *  WAV-decoded program this matches the status-bar / snapshot.ts filename
+ *  format "${base}_${name}_${startSec}s"; for a TAP-loaded program we
+ *  fall back to the TAP filename.  Persisted in TAP metadata as `source`
+ *  so it round-trips through save / reload. */
+function computeOriginalSource(prog: Program, tape: TapeData): string {
+  if (tape.fromTap) return tape.filename;
+  const refByteIdx = prog.lines.length > 0 ? prog.lines[0].firstByte : 0;
+  const refBit     = prog.bytes[refByteIdx]?.firstBit ?? 0;
+  const refSample  = prog.stream.bitFirstSample[refBit] ?? 0;
+  const startSec   = Math.floor(refSample / tape.sampleRate);
+  const base       = tape.filename.replace(/\.wav$/i, '');
+  const name       = prog.name || '(unnamed)';
+  return `${base}_${name}_${startSec}s`;
+}
+
 // ── Worker ────────────────────────────────────────────────────────────────────
 const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
 worker.onerror = (e) => showError(e.message);
@@ -260,6 +277,15 @@ fileInput.addEventListener('change', async () => {
 
       assignProgNumbers(result.programs);
       tapes.push({ filename: file.name, samples, sampleRate, programs: result.programs, fromTap: false });
+    }
+    // Set originalSource on any program where it wasn't already filled in
+    // by TAP metadata.  For WAV decodes this is always recomputed; for
+    // TAP decodes it's only set as a fallback when the metadata was absent.
+    const newTape = tapes[tapes.length - 1];
+    for (const prog of newTape.programs) {
+      if (!prog.originalSource) {
+        prog.originalSource = computeOriginalSource(prog, newTape);
+      }
     }
   }
 
@@ -2572,8 +2598,14 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
       ).then((ok) => {
         if (!ok) return;
         const [first, second] = splitProgram(prog, selByte!);
-        first.progNumber  = nextProgNumber++;
-        second.progNumber = nextProgNumber++;
+        first.progNumber     = nextProgNumber++;
+        second.progNumber    = nextProgNumber++;
+        // Provenance: first half keeps the source it already had; second
+        // half gets a fresh source derived from its own first-byte sample
+        // position and parsed name — what our decoder would have produced
+        // if it had split the bitstream here itself.
+        first.originalSource  = prog.originalSource;
+        second.originalSource = computeOriginalSource(second, tapes[activeTapeIdx]);
         tapes[activeTapeIdx].programs.splice(pi, 1, first, second);
         activeProgIdx = pi + 1;
         selByte       = 0;
@@ -2609,7 +2641,8 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
       ).then((ok) => {
         if (!ok) return;
         const joined = joinPrograms([prev, prog]);
-        joined.progNumber = nextProgNumber++;
+        joined.progNumber     = nextProgNumber++;
+        joined.originalSource = prev.originalSource;
         tapes[activeTapeIdx].programs.splice(pi - 1, 2, joined);
         activeProgIdx = pi - 1;
         selByte       = prevLen;
@@ -2643,7 +2676,8 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
       ).then((ok) => {
         if (!ok) return;
         const joined = joinPrograms([prog, next]);
-        joined.progNumber = nextProgNumber++;
+        joined.progNumber     = nextProgNumber++;
+        joined.originalSource = prog.originalSource;
         tapes[activeTapeIdx].programs.splice(pi, 2, joined);
         selByte = savedSelByte;
         renderAll();

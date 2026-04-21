@@ -207,6 +207,9 @@ export function parseTapFile(buffer: ArrayBuffer): Program[] {
       bytes,
       lines:  [],
       name:   '',
+      // originalSource comes from metadata if present; main.ts sets a
+      // TAP-filename fallback for programs where it's still empty.
+      originalSource: meta?.source ?? '',
       // progNumber is a placeholder here; main.ts stamps the real value after load.
       progNumber: 0,
       header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false },

@@ -592,6 +592,18 @@ export interface Program {
   bytes: ByteInfo[];
   lines: LineInfo[];
   name: string;
+  /** Human-readable identifier of where this program originally came from,
+   *  snapshotted at load time.  For a WAV-decoded program, matches the
+   *  status-bar format `${base}_${name}_${startSec}s`.  For a TAP-loaded
+   *  program, comes from the TAP's ORICTAPE_META metadata if present, or
+   *  falls back to the TAP filename.  For a merge result,
+   *  `"Merge of ${a.originalSource} + ${b.originalSource}"`.  Preserved
+   *  across split/join (split's first half keeps its value, second half
+   *  is recomputed by the caller; join inherits the first input's).
+   *  Persisted in TAP metadata as `source`.  Empty string means "not
+   *  yet set by the caller" — decoder-level construction sites leave
+   *  this empty; main.ts / merger.ts / split-join callers fill it in. */
+  originalSource: string;
   /** Stable user-facing identifier assigned once at load time.  Monotonic:
    *  never reused after a program is closed.  Used for display in tab titles,
    *  merge source labels, TAP builder UI, etc.  Set by main.ts after the
@@ -1187,6 +1199,7 @@ function rebuildProgram(bytes: ByteInfo[], stream: BitStream): Program {
     bytes,
     lines: [],
     name: '',
+    originalSource: '',
     progNumber: 0,
     header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false },
   };
@@ -1299,7 +1312,7 @@ export function joinPrograms(progs: Program[]): Program {
 
 export function readProgramBytes(stream: BitStream, skipSync = false): Program {
   // progNumber is a placeholder here; main.ts stamps the real value after load.
-  const prog: Program = { stream, bytes: [], lines: [], name: '', progNumber: 0, header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false } };
+  const prog: Program = { stream, bytes: [], lines: [], name: '', originalSource: '', progNumber: 0, header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false } };
   let currentBit = 0;
   let byteUnclear = false;
 

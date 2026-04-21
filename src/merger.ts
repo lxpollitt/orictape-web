@@ -489,12 +489,22 @@ function buildMergedOutput(
   // endAddr are fixed up below.
   const headerSource = sources.find(p => p !== undefined);
 
+  // Build the merge provenance string: "Merge of A + B [+ C ...]" using each
+  // source's own originalSource.  Undefined source slots are skipped.
+  const sourceLabels = sources
+    .filter((p): p is Program => p !== undefined)
+    .map(p => p.originalSource || p.name || '(unnamed)');
+  const mergedSource = sourceLabels.length > 0
+    ? `Merge of ${sourceLabels.join(' + ')}`
+    : '';
+
   const out: Program = {
-    stream:     emptyBitStream(),
-    bytes:      [],
-    lines:      [],
-    name:       headerSource?.name ?? '',
-    progNumber: 0,
+    stream:         emptyBitStream(),
+    bytes:          [],
+    lines:          [],
+    name:           headerSource?.name ?? '',
+    originalSource: mergedSource,
+    progNumber:     0,
     header: {
       byteIndex: 0,
       fileType:  headerSource?.header.fileType ?? 0,

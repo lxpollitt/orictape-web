@@ -258,6 +258,7 @@ export function encodeTapMetadata(prog: Program): number[] {
   const json = JSON.stringify({
     v: 1,
     format: prog.stream.format,
+    source: prog.originalSource || undefined,
     chkErr,
     unclear,
     edited: { explicit: editedExplicit, automatic: editedAutomatic },
