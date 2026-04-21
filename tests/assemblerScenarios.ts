@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 /**
- * Ad-hoc scenario tests for the Phase 2 6502 assembler.
+ * Ad-hoc scenario tests for the Phase 3 6502 assembler.
  *
  * Covers:
  *   - One instruction per mnemonic family (smoke test the opcode table).
@@ -10,8 +10,9 @@
  *   - Numeric literal forms: hex, decimal, binary (%…), ASCII ('c).
  *   - Error paths: unknown mnemonic, bad operand syntax, mode unsupported,
  *     values out of byte / 16-bit range, malformed literals.
- *   - Round-trip vs `disassemble` for every legal non-REL opcode: bytes →
- *     disassemble → assemble → same bytes.  REL is skipped (needs labels).
+ *   - Round-trip vs `disassemble` for every legal non-REL opcode.
+ *   - Multi-statement annotations (`:` separator), `;` end-of-annotation
+ *     comments, ORG directive and endAddr PC tracking.
  *
  * Not part of CI — just a quick sanity check during development.
  */
@@ -39,6 +40,7 @@ function compareBytes(got: number[], want: number[], label = ''): string | null 
 }
 
 const hex2 = (n: number) => n.toString(16).toUpperCase().padStart(2, '0');
+const hex4 = (n: number) => n.toString(16).toUpperCase().padStart(4, '0');
 
 /** Assemble helper: returns the bytes if there are no errors, else throws
  *  with the first error message.  Makes positive-path tests read cleanly. */
@@ -49,13 +51,20 @@ function asm(source: string): number[] {
 }
 
 /** Assemble a source that is expected to fail; return the first error
- *  message, or null if it unexpectedly succeeded. */
+ *  message, or null if it unexpectedly succeeded.  Assumes single-statement:
+ *  the failing statement emits no bytes, so bytes.length must be 0. */
 function asmErr(source: string): string | null {
   const { bytes, errors } = assemble(source, 0x0000);
   if (errors.length === 0) return null;
-  // When there's an error, bytes should be empty.
   if (bytes.length !== 0) return `expected empty bytes on error, got [${bytes.map(hex2).join(' ')}]`;
   return errors[0].message;
+}
+
+/** Like `asmErr`, but doesn't require bytes to be empty — for multi-statement
+ *  sources where the failing statement is interleaved with successful ones. */
+function asmErrMulti(source: string): string | null {
+  const { errors } = assemble(source, 0x0000);
+  return errors.length === 0 ? null : errors[0].message;
 }
 
 // ── Per-mnemonic smoke tests ────────────────────────────────────────────────
@@ -312,6 +321,182 @@ test("empty ASCII literal (LDA #')", () => {
   if (!/invalid ASCII literal/i.test(err)) return `wrong message: ${err}`;
   return null;
 });
+
+// ── Phase 3: multi-statement (`:` separator) ─────────────────────────────────
+
+test('two statements: STX 1 : STY 2',
+  () => compareBytes(asm('STX 1:STY 2'), [0x86, 0x01, 0x84, 0x02]));
+test('two statements with spaces around `:`',
+  () => compareBytes(asm('STX 1 : STY 2'), [0x86, 0x01, 0x84, 0x02]));
+test('three statements',
+  () => compareBytes(asm('LDA #$BB : STA $04 : RTS'), [0xA9, 0xBB, 0x85, 0x04, 0x60]));
+test('trailing `:` (empty final statement)',
+  () => compareBytes(asm('RTS:'), [0x60]));
+test('leading `:` (empty first statement)',
+  () => compareBytes(asm(':RTS'), [0x60]));
+test('repeated `:` (empty middle statements)',
+  () => compareBytes(asm('RTS::RTS'), [0x60, 0x60]));
+test('whitespace-only statement between `:` ignored',
+  () => compareBytes(asm('RTS :   : RTS'), [0x60, 0x60]));
+
+// ── Phase 3: `;` end-of-annotation comments ──────────────────────────────────
+
+test('trailing comment stripped',
+  () => compareBytes(asm('LDA #$BB ; load BB'), [0xA9, 0xBB]));
+test('comment on its own line → no bytes',
+  () => compareBytes(asm('; just a comment'), []));
+test('comment eats subsequent `:` (no second statement)',
+  () => compareBytes(asm('LDA #$01 ; STA $04'), [0xA9, 0x01]));
+test('comment after multi-statement',
+  () => compareBytes(asm('STX 1 : STY 2 ; save regs'), [0x86, 0x01, 0x84, 0x02]));
+test('empty source',
+  () => compareBytes(asm(''), []));
+test('whitespace-only source',
+  () => compareBytes(asm('   \t  '), []));
+
+// ── Phase 3: ORG directive ───────────────────────────────────────────────────
+
+test('ORG alone emits no bytes, updates endAddr', () => {
+  const r = assemble('ORG $9800', 0x0000);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.bytes.length !== 0) return `expected no bytes, got [${r.bytes.map(hex2).join(' ')}]`;
+  if (r.endAddr !== 0x9800) return `endAddr $${hex4(r.endAddr)} (want $9800)`;
+  return null;
+});
+
+test('ORG then instruction', () => {
+  const r = assemble('ORG $9800 : LDA #$BB', 0x0000);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  const err = compareBytes(r.bytes, [0xA9, 0xBB]);
+  if (err) return err;
+  if (r.endAddr !== 0x9802) return `endAddr $${hex4(r.endAddr)} (want $9802)`;
+  return null;
+});
+
+test('instruction then ORG (endAddr reflects post-ORG)', () => {
+  const r = assemble('LDA #$BB : ORG $9900', 0x1000);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  const err = compareBytes(r.bytes, [0xA9, 0xBB]);
+  if (err) return err;
+  if (r.endAddr !== 0x9900) return `endAddr $${hex4(r.endAddr)} (want $9900)`;
+  return null;
+});
+
+test('multiple ORGs interleaved with instructions', () => {
+  const r = assemble('LDA #$01 : ORG $9900 : LDA #$02 : ORG $AA00 : RTS', 0x1000);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  const err = compareBytes(r.bytes, [0xA9, 0x01, 0xA9, 0x02, 0x60]);
+  if (err) return err;
+  if (r.endAddr !== 0xAA01) return `endAddr $${hex4(r.endAddr)} (want $AA01)`;
+  return null;
+});
+
+test('ORG decimal literal',
+  () => {
+    const r = assemble('ORG 39936', 0x0000);
+    if (r.endAddr !== 0x9C00) return `endAddr $${hex4(r.endAddr)} (want $9C00)`;
+    return null;
+  });
+
+test('ORG binary literal',
+  () => {
+    const r = assemble('ORG %1001100000000000', 0x0000);
+    if (r.endAddr !== 0x9800) return `endAddr $${hex4(r.endAddr)} (want $9800)`;
+    return null;
+  });
+
+test('ORG case-insensitive',
+  () => {
+    const r = assemble('org $9800', 0x0000);
+    if (r.endAddr !== 0x9800) return `endAddr $${hex4(r.endAddr)} (want $9800)`;
+    return null;
+  });
+
+test('ORG missing address', () => {
+  const err = asmErrMulti('ORG');
+  if (err === null) return 'expected error, got success';
+  if (!/ORG requires an address/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+test('ORG out of 16-bit range', () => {
+  const err = asmErrMulti('ORG $10000');
+  if (err === null) return 'expected error, got success';
+  if (!/ORG address out of 16-bit range/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+test('bad ORG literal', () => {
+  const err = asmErrMulti('ORG $XY');
+  if (err === null) return 'expected error, got success';
+  if (!/invalid hex literal/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+// ── Phase 3: endAddr tracking ────────────────────────────────────────────────
+
+test('endAddr = startAddr + bytes.length (no ORG)', () => {
+  const r = assemble('LDA #$BB : STA $1234', 0x1000);
+  if (r.endAddr !== 0x1005) return `endAddr $${hex4(r.endAddr)} (want $1005 = start + 5 bytes)`;
+  return null;
+});
+
+test('endAddr = startAddr when empty source', () => {
+  const r = assemble('', 0x1000);
+  if (r.endAddr !== 0x1000) return `endAddr $${hex4(r.endAddr)} (want $1000)`;
+  return null;
+});
+
+test('endAddr wraps at 16 bits', () => {
+  // Start near the top of memory; LDA #$BB emits 2 bytes, wrapping past $FFFF.
+  const r = assemble('LDA #$BB', 0xFFFF);
+  if (r.endAddr !== 0x0001) return `endAddr $${hex4(r.endAddr)} (want $0001 — wrapped)`;
+  return null;
+});
+
+// ── Phase 3: error collection across statements ──────────────────────────────
+
+test('second statement errors, first still emitted', () => {
+  const r = assemble('LDA #$BB : STA #1', 0x0000);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  const err = compareBytes(r.bytes, [0xA9, 0xBB]);
+  if (err) return err;
+  return null;
+});
+
+test('first statement errors, second still emitted', () => {
+  const r = assemble('LDA #500 : STA $04', 0x0000);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  const err = compareBytes(r.bytes, [0x85, 0x04]);
+  if (err) return err;
+  return null;
+});
+
+test('multiple errors collected in one pass', () => {
+  const r = assemble('LDA #500 : STA #1 : BOGUS', 0x0000);
+  if (r.errors.length !== 3) return `expected 3 errors, got ${r.errors.length}: ${r.errors.map(e => e.message).join(' / ')}`;
+  if (r.bytes.length !== 0) return `expected no bytes, got [${r.bytes.map(hex2).join(' ')}]`;
+  return null;
+});
+
+test('ORG error doesn\'t block subsequent instructions', () => {
+  const r = assemble('ORG $10000 : LDA #$BB', 0x0000);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  const err = compareBytes(r.bytes, [0xA9, 0xBB]);
+  if (err) return err;
+  return null;
+});
+
+// ── Phase 3: literal-aware splitting / commenting ────────────────────────────
+
+test("`:` inside ASCII literal doesn't split statement",
+  () => compareBytes(asm("LDA #':"), [0xA9, 0x3A]));   // ':' = 0x3A
+
+test("`;` inside ASCII literal doesn't start comment",
+  () => compareBytes(asm("LDA #';"), [0xA9, 0x3B]));   // ';' = 0x3B
+
+test("ASCII literal then normal `:` after",
+  () => compareBytes(asm("LDA #':  : RTS"), [0xA9, 0x3A, 0x60]));
 
 // ── Round-trip: disassemble → assemble → same bytes ──────────────────────────
 //

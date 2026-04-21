@@ -1,33 +1,36 @@
 /**
- * Naive 6502 assembler — Phase 2.
+ * Naive 6502 assembler — Phase 3.
  *
- * Converts a single 6502 instruction source line into the bytes it
- * assembles to.  Inverse of `disassembler6502.ts`; shares the same
- * mnemonic set and operand syntax (hex `$`, decimal bare, `#` for
- * immediate, `,X` / `,Y` for indexed, `()` for indirect) so that a
+ * Converts a 6502 annotation (one or more `:`-separated statements) into
+ * the bytes it assembles to.  Inverse of `disassembler6502.ts`; shares
+ * the same mnemonic set and operand syntax (hex `$`, decimal bare, `#`
+ * for immediate, `,X` / `,Y` for indexed, `()` for indirect) so that a
  * disassemble→assemble round-trip reproduces the original byte sequence.
  *
- * Scope for Phase 2:
- *   - Mnemonics: full official 6502 instruction set (matches the
- *     disassembler's opcode table 1:1).
+ * Scope for Phase 3:
+ *   - Mnemonics: full official 6502 instruction set.
  *   - Addressing modes: IMP IMM ZP ZPX ZPY ABS ABX ABY IND IZX IZY ACC.
  *     (REL requires labels — deferred to Phase 4.)
- *   - Numeric literals: `$HH`/`$HHHH` (hex, digit count informs ZP vs
- *     ABS), decimal, `%` binary, `'c` ASCII (single character).
- *   - One statement per call — no `:` separator, no ORG, no labels.
+ *   - Numeric literals: `$HH`/`$HHHH` hex, decimal, `%` binary, `'c` ASCII.
+ *   - `:` separates statements within one annotation.
+ *   - `;` starts an end-of-annotation comment (rest of the string ignored).
+ *   - `ORG $xxxx` directive: sets assembly PC; may appear multiple times.
+ *     Emits no bytes — the PC jump only matters to label-relative code
+ *     (Phase 4) but must be tracked now so `endAddr` is correct.
  *
  * ZP-vs-ABS resolution:
  *   - 2-digit hex operand (`$HH`) or decimal / binary / ASCII fitting in
  *     a byte → prefer ZP; fall back to ABS if the mnemonic has no ZP
  *     form.
- *   - 3+ digit hex operand (`$HHH`, `$HHHH`) → force ABS (matches the
- *     spec's "leading zero forces ABS" convention — writing extra digits
- *     is the explicit way to say "I want the 2-byte address form").
+ *   - 3+ digit hex operand (`$HHH`, `$HHHH`) → force ABS (spec's
+ *     "leading zero forces ABS" convention).
  *   - Decimal ≥ 256 → ABS.
  *
- * The `startAddr` parameter is carried through for API-shape parity with
- * the phases to come (label resolution, branch offsets, ORG tracking)
- * but has no effect on the byte output for Phase 2's operand set.
+ * `startAddr` sets the initial assembly PC.  The caller threads PC
+ * across annotation lines: pass in `startAddr`, read `endAddr` from the
+ * result, and use it as the next line's `startAddr`.  Within a single
+ * call, ORG directives may jump the PC around; `endAddr` reflects the
+ * PC after the final emitted byte (or final ORG, whichever is later).
  */
 
 // ── Addressing modes ────────────────────────────────────────────────────────
@@ -308,24 +311,40 @@ function parseOperand(text: string): ParsedOperand | { error: string } {
   };
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────
+// ── Annotation pre-processing ──────────────────────────────────────────────
 
-export interface AsmError {
-  message: string;
+/** Strip an end-of-annotation `;` comment.  Skips over `'c` ASCII literals
+ *  so `LDA #';` (were it ever to appear) doesn't mis-terminate. */
+function stripComment(s: string): string {
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'") { i++; continue; }  // single-char literal — skip next
+    if (c === ';') return s.slice(0, i);
+  }
+  return s;
 }
 
-/**
- * Assemble a single 6502 instruction.  Returns the emitted bytes (opcode
- * followed by 0/1/2 operand bytes) and any errors encountered.  On error
- * the `bytes` array is empty.
- *
- * `startAddr` is accepted for API parity with future phases (label
- * resolution, branch offsets) but has no effect on the Phase 1 output.
- */
-export function assemble(
-  source:     string,
-  _startAddr: number,
-): { bytes: number[]; errors: AsmError[] } {
+/** Split an annotation into statements on `:`, skipping over `'c` literals
+ *  so the `:` char in `LDA #':` stays attached to the preceding statement. */
+function splitStatements(s: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'") { i++; continue; }
+    if (c === ':') { out.push(s.slice(start, i)); start = i + 1; }
+  }
+  out.push(s.slice(start));
+  return out;
+}
+
+// ── Statement assembly ─────────────────────────────────────────────────────
+
+/** Assemble a single statement (one mnemonic + operand).  Returns the
+ *  emitted bytes and any error.  On error `bytes` is empty — the caller
+ *  keeps going so we can collect all errors in a multi-statement
+ *  annotation. */
+function assembleStatement(source: string): { bytes: number[]; errors: AsmError[] } {
   const trimmed = source.trim();
   if (trimmed.length === 0) return { bytes: [], errors: [] };
 
@@ -364,4 +383,76 @@ export function assemble(
     out.push(parsed.value & 0xFF, (parsed.value >> 8) & 0xFF);
   }
   return { bytes: out, errors: [] };
+}
+
+/** Parse an `ORG <literal>` directive.  Returns the address on success,
+ *  or an error if the literal is missing/malformed or out of 16-bit range. */
+function parseOrg(operand: string): { value: number } | { error: string } {
+  const lit = parseLiteral(operand);
+  if ('error' in lit) return { error: lit.error };
+  if (lit.value < 0 || lit.value > 0xFFFF) {
+    return { error: `ORG address out of 16-bit range: ${lit.value}` };
+  }
+  return { value: lit.value };
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
+export interface AsmError {
+  message: string;
+}
+
+/**
+ * Assemble a 6502 annotation.  The source may contain:
+ *   - Zero or more statements separated by `:`.
+ *   - A trailing `;` end-of-annotation comment.
+ *   - `ORG $xxxx` directives (interspersed with instructions as needed).
+ *
+ * Returns the emitted bytes (in input order), all errors encountered
+ * across every statement, and `endAddr` — the PC after assembly completes,
+ * which the caller should thread into the next line's `startAddr` so
+ * multi-line programs assemble contiguously.
+ */
+export function assemble(
+  source:    string,
+  startAddr: number,
+): { bytes: number[]; errors: AsmError[]; endAddr: number } {
+  const stripped  = stripComment(source);
+  const statements = splitStatements(stripped);
+
+  const bytes:  number[]   = [];
+  const errors: AsmError[] = [];
+  let pc = startAddr & 0xFFFF;
+
+  for (const raw of statements) {
+    const stmt = raw.trim();
+    if (stmt.length === 0) continue;
+
+    // ORG directive — match case-insensitively, any whitespace after.
+    const orgM = stmt.match(/^[Oo][Rr][Gg](?:\s+(.*))?$/);
+    if (orgM) {
+      const operand = (orgM[1] ?? '').trim();
+      if (operand.length === 0) {
+        errors.push({ message: 'ORG requires an address' });
+        continue;
+      }
+      const r = parseOrg(operand);
+      if ('error' in r) { errors.push({ message: r.error }); continue; }
+      pc = r.value;
+      continue;
+    }
+
+    // Regular instruction.
+    const result = assembleStatement(stmt);
+    if (result.errors.length > 0) {
+      // Skip the statement — no bytes emitted, PC not advanced — and
+      // keep parsing so the user sees every problem in one pass.
+      errors.push(...result.errors);
+      continue;
+    }
+    for (const b of result.bytes) bytes.push(b);
+    pc = (pc + result.bytes.length) & 0xFFFF;
+  }
+
+  return { bytes, errors, endAddr: pc };
 }
