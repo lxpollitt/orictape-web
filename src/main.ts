@@ -13,6 +13,7 @@ import {
 } from './merger';
 import { encodeTapFile, downloadTap, type TapEntry } from './tapEncoder';
 import { parseTapFile } from './tapDecoder';
+import { disassemble } from './disassembler6502';
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const fileInput  = document.getElementById('file-input')       as HTMLInputElement;
@@ -103,6 +104,11 @@ let wrapMode      = true;
 let editingLine:    number | null          = null;  // line index being edited, or null
 let editInput:      HTMLTextAreaElement | null = null;  // the inline edit textarea element
 let editIsNewLine   = false;                         // true if editing a newly inserted line
+/** True when the BASIC panel should show the 6502 disassembly for a
+ *  machine-code program instead of the default summary + buttons.  Only
+ *  meaningful when the active program has fileType !== 0; ignored
+ *  otherwise.  Reset by activateTape when the active program changes. */
+let showDisassembly = false;
 /** Which panel most recently received focus — drives keyboard navigation. */
 let focusedPanel: 'hex' | 'basic' | null  = null;
 
@@ -184,6 +190,11 @@ function activateTape(ti: number, pi: number): void {
   activeProgIdx = pi;
   programs    = tapes[ti]?.programs ?? [];
   leftSamples = tapes[ti]?.samples  ?? null;
+  // Reset the disassembly toggle on every program switch — per-program
+  // state would survive tab-hopping, which felt more surprising than the
+  // current "starts fresh" behaviour.  (Reconsider if it becomes
+  // friction in real use.)
+  showDisassembly = false;
 }
 
 /** Reset the waveform to overview 100% fit for the currently active
@@ -585,6 +596,38 @@ function progHeaderHtml(
   return `${escHtml(filenameLabel)}<span class="prog-num">${pn}</span>${escHtml(name)}`;
 }
 
+/** Return the byte range [firstContent, lastContent) covering the program
+ *  "body" — the part outside the program's sync/header/name before and
+ *  any trailing metadata/padding after.  For BASIC, the body is the span
+ *  of parsed lines; for machine code (no parsed lines, fileType !== 0),
+ *  the body starts after sync + 9-byte header + null-terminated name and
+ *  has length endAddr − startAddr.  For programs with neither lines nor
+ *  a machine-code header the body is empty.  Shared by renderHex (which
+ *  uses it to style non-body bytes as hb-pre) and renderBasic (which
+ *  uses it to extract machine-code bytes for disassembly). */
+function getBodyRange(prog: Program): { firstContent: number; lastContent: number } {
+  if (prog.lines.length > 0) {
+    return {
+      firstContent: prog.lines[0].firstByte,
+      lastContent:  prog.lines[prog.lines.length - 1].lastByte + 1,
+    };
+  }
+  if (prog.header.fileType !== 0) {
+    const firstContent = Math.min(
+      prog.header.byteIndex + 9 + prog.name.length + 1,
+      prog.bytes.length,
+    );
+    return {
+      firstContent,
+      lastContent: Math.min(
+        firstContent + (prog.header.endAddr - prog.header.startAddr),
+        prog.bytes.length,
+      ),
+    };
+  }
+  return { firstContent: prog.bytes.length, lastContent: 0 };
+}
+
 /** Build the hex header HTML for a tape-mode program (current active tape). */
 function tapeHexHeaderHtml(prog: Program): string {
   const tape = tapes[activeTapeIdx];
@@ -614,31 +657,7 @@ function renderHex(
   labelHtml?: string,
 ): void {
   hexTitleEl.innerHTML = labelHtml ?? tapeHexHeaderHtml(prog);
-  // Range [firstContent, lastContent) covers the program "body" — bytes
-  // outside it get the hb-pre dimmed styling (sync / header / name
-  // before; trailing metadata / padding after).  For BASIC programs the
-  // body is the span of parsed lines; for machine code there are no
-  // lines, so we derive the body from the header: content starts after
-  // sync + 9-byte header + null-terminated name, and its length comes
-  // from endAddr - startAddr.
-  let firstContent: number;
-  let lastContent:  number;
-  if (prog.lines.length > 0) {
-    firstContent = prog.lines[0].firstByte;
-    lastContent  = prog.lines[prog.lines.length - 1].lastByte + 1;
-  } else if (prog.header.fileType !== 0) {
-    firstContent = Math.min(
-      prog.header.byteIndex + 9 + prog.name.length + 1,
-      prog.bytes.length,
-    );
-    lastContent = Math.min(
-      firstContent + (prog.header.endAddr - prog.header.startAddr),
-      prog.bytes.length,
-    );
-  } else {
-    firstContent = prog.bytes.length;
-    lastContent  = 0;
-  }
+  const { firstContent, lastContent } = getBodyRange(prog);
 
   // Determine which line (if any) should be highlighted.  selectedByte takes
   // precedence: its containing line gets highlighted.  Otherwise fall back to
@@ -822,11 +841,31 @@ function renderBasic(prog: Program): void {
     // Two sub-cases share this "no BASIC content rendered" path:
     //   fileType === 0 with zero lines → corrupt BASIC / nothing decoded.
     //   fileType !== 0                  → machine code program (by design).
-    // Both get the force-decode buttons.  Force-decode-as-BASIC on a
-    // machine code program is deliberately kept — useful for the
-    // occasional corrupt / overlapping-recording case where the decoded
-    // header is misleading and the bytes contain BASIC content.
+    // Machine code gets a "Show as assembler" button on top of the usual
+    // force-decode ones.  Force-decode-as-BASIC is deliberately kept for
+    // machine code — useful for the occasional corrupt / overlapping-
+    // recording case where the decoded header is misleading and the
+    // bytes contain BASIC content.
     const isMachineCode = prog.header.fileType !== 0;
+
+    if (isMachineCode && showDisassembly) {
+      // Disassembly view: linear 6502 decode of the body bytes.  Back
+      // button returns to the summary.  Force-decode options aren't
+      // reachable from this view — user can switch back to summary to
+      // access them.
+      const { firstContent, lastContent } = getBodyRange(prog);
+      const body = prog.bytes.slice(firstContent, lastContent).map(b => b.v);
+      const lines = disassemble(body, prog.header.startAddr);
+      basicPanel.innerHTML =
+        '<p class="hint"><button id="back-to-summary-btn" class="zoom-btn">← Back to summary</button></p>' +
+        `<pre class="disassembly">${escHtml(lines.join('\n'))}</pre>`;
+      document.getElementById('back-to-summary-btn')?.addEventListener('click', () => {
+        showDisassembly = false;
+        renderBasic(prog);
+      });
+      return;
+    }
+
     const headline = isMachineCode
       ? `Machine code program · starts at $${prog.header.startAddr.toString(16).toUpperCase().padStart(4, '0')} · `
         + `${prog.header.endAddr - prog.header.startAddr} bytes`
@@ -834,11 +873,18 @@ function renderBasic(prog: Program): void {
     basicPanel.innerHTML =
       `<p class="hint">${headline}</p>` +
       '<p class="hint">' +
+        (isMachineCode
+          ? '<button id="show-disasm-btn" class="zoom-btn">Show as assembler</button> '
+          : '') +
         '<button id="force-decode-btn" class="zoom-btn">Force decode as BASIC</button> ' +
         (prog.bytes.length > 0 && prog.bytes[0].firstBit > 0
           ? ' <button id="force-decode-bytes-btn" class="zoom-btn">Force read from start of bitstream</button>'
           : '') +
       '</p>';
+    document.getElementById('show-disasm-btn')?.addEventListener('click', () => {
+      showDisassembly = true;
+      renderBasic(prog);
+    });
     document.getElementById('force-decode-btn')?.addEventListener('click', () => {
       prog.lines = [];
       prog.name = '';

@@ -272,6 +272,20 @@ header h1 {
   min-height: 0;
 }
 
+/* 6502 disassembly view rendered in the BASIC panel for machine-code
+   programs when the user clicks "Show as assembler".  Monospace +
+   preserve whitespace so the fixed-column layout produced by
+   disassembler6502 stays readable. */
+.disassembly {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 0;
+  padding: 8px 12px;
+  white-space: pre;
+  overflow: auto;
+}
+
 /* Tape mode: basic-view is the scrollable content container. */
 #basic-panel {
   display: flex;
