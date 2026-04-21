@@ -1,36 +1,51 @@
 /**
- * Naive 6502 assembler — Phase 3.
+ * Naive 6502 assembler — Phase 4.
  *
- * Converts a 6502 annotation (one or more `:`-separated statements) into
- * the bytes it assembles to.  Inverse of `disassembler6502.ts`; shares
- * the same mnemonic set and operand syntax (hex `$`, decimal bare, `#`
- * for immediate, `,X` / `,Y` for indexed, `()` for indirect) so that a
- * disassemble→assemble round-trip reproduces the original byte sequence.
+ * Converts 6502 annotations (each a `:`-separated sequence of statements)
+ * into the bytes they assemble to.  Inverse of `disassembler6502.ts`; shares
+ * the same mnemonic set and operand syntax so that disassemble→assemble
+ * round-trips reproduce the original bytes.
  *
- * Scope for Phase 3:
- *   - Mnemonics: full official 6502 instruction set.
- *   - Addressing modes: IMP IMM ZP ZPX ZPY ABS ABX ABY IND IZX IZY ACC.
- *     (REL requires labels — deferred to Phase 4.)
+ * Scope:
+ *   - Full official 6502 instruction set, every addressing mode including
+ *     REL (branches).
  *   - Numeric literals: `$HH`/`$HHHH` hex, decimal, `%` binary, `'c` ASCII.
  *   - `:` separates statements within one annotation.
- *   - `;` starts an end-of-annotation comment (rest of the string ignored).
- *   - `ORG $xxxx` directive: sets assembly PC; may appear multiple times.
- *     Emits no bytes — the PC jump only matters to label-relative code
- *     (Phase 4) but must be tracked now so `endAddr` is correct.
+ *   - `;` starts an end-of-annotation comment.
+ *   - `ORG $xxxx` directive: sets PC; may appear multiple times.
+ *   - `.LABEL` statement: declares a code label at the current PC.
+ *   - `.LABEL = <literal>` statement: declares a numeric equate.
+ *   - Bare identifier in operand position: reference to label or equate.
  *
- * ZP-vs-ABS resolution:
- *   - 2-digit hex operand (`$HH`) or decimal / binary / ASCII fitting in
- *     a byte → prefer ZP; fall back to ABS if the mnemonic has no ZP
- *     form.
- *   - 3+ digit hex operand (`$HHH`, `$HHHH`) → force ABS (spec's
- *     "leading zero forces ABS" convention).
- *   - Decimal ≥ 256 → ABS.
+ * Identifiers match `[A-Za-z][A-Za-z0-9_]*`.  Label/equate namespace is
+ * shared and redeclaration is an error.
  *
- * `startAddr` sets the initial assembly PC.  The caller threads PC
- * across annotation lines: pass in `startAddr`, read `endAddr` from the
- * result, and use it as the next line's `startAddr`.  Within a single
- * call, ORG directives may jump the PC around; `endAddr` reflects the
- * PC after the final emitted byte (or final ORG, whichever is later).
+ * Two-pass resolution:
+ *   - Pass 1 walks every statement in input order across all annotations,
+ *     declaring labels at the current PC and collecting equates.  For each
+ *     instruction it parses the operand, picks a concrete addressing mode,
+ *     and advances PC by the chosen encoding's size.  Forward-referenced
+ *     symbols are unknown here → mode falls back to ABS (or REL for
+ *     branches), which is always 2–3 bytes and is committed.  This means
+ *     forward references to *equates* always emit the ABS form even if the
+ *     value would fit in ZP — declare equates before use if you want ZP.
+ *   - Pass 2 walks the processed statements, resolves all remaining symbol
+ *     references, and emits bytes using the mode selected in pass 1.  REL
+ *     offsets are computed here (`target - (pc + 2)`) with a signed-byte
+ *     range check.
+ *
+ * The public API has two entry points:
+ *   - `assemble(source, startAddr)` — one annotation, thin wrapper around
+ *     `assembleProgram`.  Preserved for tests and ad-hoc callers.
+ *   - `assembleProgram(annotations[], startAddr)` — multi-annotation, with
+ *     symbols shared across all of them.  Returns per-line bytes plus the
+ *     resolved symbol table (exposed for Phase 5's back-patch directives).
+ *
+ * ZP-vs-ABS resolution (for resolved literals/equates):
+ *   - 2-digit hex, or decimal/binary/ASCII fitting in a byte → prefer ZP,
+ *     fall back to ABS if the mnemonic has no ZP form.
+ *   - 3+ digit hex → force ABS.
+ *   - Value ≥ 256 → ABS.
  */
 
 // ── Addressing modes ────────────────────────────────────────────────────────
@@ -179,97 +194,133 @@ for (let op = 0; op < 256; op++) {
   modeMap.set(entry.mode, op);
 }
 
-// ── Operand parsing ────────────────────────────────────────────────────────
+// ── Expressions (literals and symbol references) ───────────────────────────
 
-/** A parsed operand: the addressing-mode candidates (ordered by caller
- *  preference, e.g. ZP before ABS) and the numeric value.  The assembler
- *  picks the first candidate the mnemonic actually supports. */
-interface ParsedOperand {
-  candidates: Mode[];
-  value: number;
-}
+/** An expression is either a literal value or a reference to a named
+ *  symbol (label or equate).  `forceWide` carries the "3+ hex digits"
+ *  signal for literals; for symbols, size is determined at resolution
+ *  time from the resolved symbol's `forceWide`. */
+type Expr =
+  | { kind: 'lit'; value: number; forceWide: boolean }
+  | { kind: 'sym'; name: string };
+
+/** A resolved value — either what a literal Expr already carries, or the
+ *  result of looking up a symbol in the symbol table. */
+interface Resolved { value: number; forceWide: boolean }
+
+/** The symbol table: shared across all annotations in one program. */
+type Symbols = Map<string, Resolved>;
+
+const IDENT_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /** Parse a numeric literal — `$HH[HH]` hex, `%…` binary, `'c` ASCII, or
- *  decimal — returning the numeric value and whether the literal format
- *  forces a 2-byte (absolute) operand.
- *
- *  `forceWide` is set when the user writes 3+ hex digits (`$0BB`,
- *  `$00BB`), signalling explicit intent for the ABS form even if the
- *  value happens to fit in a byte.  Decimal, binary, and ASCII literals
- *  never force the wide form — they're chosen on value alone. */
-function parseLiteral(text: string): { value: number; forceWide: boolean } | { error: string } {
+ *  decimal — OR a bare identifier naming a label/equate.  Literals carry
+ *  `forceWide` to distinguish `$04` (ZP-preferred) from `$0004` (ABS).
+ *  Identifiers are resolved later against the symbol table. */
+function parseExpr(text: string): Expr | { error: string } {
   const t = text.trim();
-  if (t.length === 0) return { error: 'missing numeric operand' };
+  if (t.length === 0) return { error: 'missing operand' };
   if (t.startsWith('$')) {
     const hex = t.slice(1);
     if (!/^[0-9A-Fa-f]+$/.test(hex)) return { error: `invalid hex literal: ${t}` };
-    const value = parseInt(hex, 16);
-    const forceWide = hex.length >= 3;
-    return { value, forceWide };
+    return { kind: 'lit', value: parseInt(hex, 16), forceWide: hex.length >= 3 };
   }
   if (t.startsWith('%')) {
     const bin = t.slice(1);
     if (!/^[01]+$/.test(bin)) return { error: `invalid binary literal: ${t}` };
-    return { value: parseInt(bin, 2), forceWide: false };
+    return { kind: 'lit', value: parseInt(bin, 2), forceWide: false };
   }
   if (t.startsWith("'")) {
-    // ASCII char literal — exactly one character after the apostrophe.
     const rest = t.slice(1);
     if (rest.length !== 1) return { error: `invalid ASCII literal: ${t}` };
-    return { value: rest.charCodeAt(0), forceWide: false };
+    return { kind: 'lit', value: rest.charCodeAt(0), forceWide: false };
   }
   if (/^-?\d+$/.test(t)) {
-    const value = parseInt(t, 10);
-    return { value, forceWide: false };
+    return { kind: 'lit', value: parseInt(t, 10), forceWide: false };
   }
-  return { error: `unrecognised numeric literal: ${t}` };
+  if (IDENT_RE.test(t)) {
+    return { kind: 'sym', name: t };
+  }
+  return { error: `unrecognised operand: ${t}` };
+}
+
+/** Parse an Expr and require it to be a literal.  Used for ORG and equate
+ *  declarations — per spec, those take a literal, not a symbol. */
+function parseLiteralOnly(text: string): Resolved | { error: string } {
+  const e = parseExpr(text);
+  if ('error' in e) return e;
+  if (e.kind !== 'lit') return { error: `expected a literal, got identifier: ${e.name}` };
+  return { value: e.value, forceWide: e.forceWide };
+}
+
+/** Look up an expression's value in the symbol table.  Returns the
+ *  resolved value, `null` if the symbol is unresolved, or an error for
+ *  structural issues (should not happen for well-formed Exprs). */
+function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
+  if (expr.kind === 'lit') return { value: expr.value, forceWide: expr.forceWide };
+  const sym = symbols.get(expr.name);
+  return sym ?? null;
+}
+
+// ── Operand forms ──────────────────────────────────────────────────────────
+
+/** Syntactic form of an operand, before mode selection.  The mnemonic's
+ *  supported modes combined with the operand value pick the concrete
+ *  addressing mode from each form's candidate set. */
+type OperandForm =
+  | 'IMP_OR_ACC'  // empty operand — either implied or accumulator
+  | 'ACC'         // explicit `A`
+  | 'IMM'         // `#<expr>`
+  | 'DIR'         // `<expr>`        — ZP/ABS/REL
+  | 'DIRX'        // `<expr>,X`      — ZPX/ABX
+  | 'DIRY'        // `<expr>,Y`      — ZPY/ABY
+  | 'IZX'         // `(<expr>,X)`
+  | 'IZY'         // `(<expr>),Y`
+  | 'IND';        // `(<expr>)`
+
+/** A parsed operand — syntactic form plus (for non-implied forms) the
+ *  expression carrying the value.  Symbol refs in the expression are
+ *  resolved at assembly time. */
+interface ParsedOperand {
+  form: OperandForm;
+  expr: Expr | null;
 }
 
 /** Parse the operand portion of an instruction (the text after the
- *  mnemonic).  Returns the addressing-mode candidates ordered by
- *  preference and the numeric value. */
+ *  mnemonic). */
 function parseOperand(text: string): ParsedOperand | { error: string } {
   const t = text.trim();
 
-  // Implied / accumulator — no operand text, or just `A`.
-  if (t.length === 0)        return { candidates: ['IMP', 'ACC'], value: 0 };
-  if (t.toUpperCase() === 'A') return { candidates: ['ACC'],       value: 0 };
+  if (t.length === 0)          return { form: 'IMP_OR_ACC', expr: null };
+  if (t.toUpperCase() === 'A') return { form: 'ACC',        expr: null };
 
-  // Immediate: `#<value>`.
   if (t.startsWith('#')) {
-    const lit = parseLiteral(t.slice(1));
-    if ('error' in lit) return { error: lit.error };
-    if (lit.value < 0 || lit.value > 0xFF) {
-      return { error: `immediate value out of byte range: ${lit.value}` };
-    }
-    return { candidates: ['IMM'], value: lit.value };
+    const e = parseExpr(t.slice(1));
+    if ('error' in e) return { error: e.error };
+    return { form: 'IMM', expr: e };
   }
 
-  // Indexed indirect or plain indirect: `(<value>,X)` or `(<value>),Y` or `(<value>)`.
   if (t.startsWith('(')) {
-    // `(<value>,X)` — closing paren at the end, `,X` just before.
+    // `(<value>,X)` — indexed indirect.
     let m = t.match(/^\(\s*([^),]+?)\s*,\s*[Xx]\s*\)$/);
     if (m) {
-      const lit = parseLiteral(m[1]);
-      if ('error' in lit) return { error: lit.error };
-      if (lit.value < 0 || lit.value > 0xFF) return { error: `IZX pointer out of ZP range: ${lit.value}` };
-      return { candidates: ['IZX'], value: lit.value };
+      const e = parseExpr(m[1]);
+      if ('error' in e) return { error: e.error };
+      return { form: 'IZX', expr: e };
     }
-    // `(<value>),Y` — closing paren before the `,Y`.
+    // `(<value>),Y` — indirect indexed.
     m = t.match(/^\(\s*([^)]+?)\s*\)\s*,\s*[Yy]$/);
     if (m) {
-      const lit = parseLiteral(m[1]);
-      if ('error' in lit) return { error: lit.error };
-      if (lit.value < 0 || lit.value > 0xFF) return { error: `IZY pointer out of ZP range: ${lit.value}` };
-      return { candidates: ['IZY'], value: lit.value };
+      const e = parseExpr(m[1]);
+      if ('error' in e) return { error: e.error };
+      return { form: 'IZY', expr: e };
     }
-    // `(<value>)` — pure indirect (JMP only in 6502).
+    // `(<value>)` — pure indirect (JMP only).
     m = t.match(/^\(\s*([^)]+?)\s*\)$/);
     if (m) {
-      const lit = parseLiteral(m[1]);
-      if ('error' in lit) return { error: lit.error };
-      if (lit.value < 0 || lit.value > 0xFFFF) return { error: `IND address out of 16-bit range: ${lit.value}` };
-      return { candidates: ['IND'], value: lit.value };
+      const e = parseExpr(m[1]);
+      if ('error' in e) return { error: e.error };
+      return { form: 'IND', expr: e };
     }
     return { error: `unrecognised indirect operand syntax: ${t}` };
   }
@@ -277,38 +328,64 @@ function parseOperand(text: string): ParsedOperand | { error: string } {
   // Indexed: `<value>,X` or `<value>,Y`.
   const mX = t.match(/^(.+?)\s*,\s*[Xx]$/);
   if (mX) {
-    const lit = parseLiteral(mX[1]);
-    if ('error' in lit) return { error: lit.error };
-    if (lit.value < 0 || lit.value > 0xFFFF) return { error: `address out of 16-bit range: ${lit.value}` };
-    // Prefer ZPX if the value fits in a byte AND the user didn't force
-    // the wide form.  Otherwise ABX.
-    return {
-      candidates: (!lit.forceWide && lit.value <= 0xFF) ? ['ZPX', 'ABX'] : ['ABX'],
-      value: lit.value,
-    };
+    const e = parseExpr(mX[1]);
+    if ('error' in e) return { error: e.error };
+    return { form: 'DIRX', expr: e };
   }
   const mY = t.match(/^(.+?)\s*,\s*[Yy]$/);
   if (mY) {
-    const lit = parseLiteral(mY[1]);
-    if ('error' in lit) return { error: lit.error };
-    if (lit.value < 0 || lit.value > 0xFFFF) return { error: `address out of 16-bit range: ${lit.value}` };
-    // ZPY is much rarer (only LDX/STX support it) than ABY, but the
-    // preference order still puts it first — the mnemonic lookup picks
-    // whichever is actually supported.
-    return {
-      candidates: (!lit.forceWide && lit.value <= 0xFF) ? ['ZPY', 'ABY'] : ['ABY'],
-      value: lit.value,
-    };
+    const e = parseExpr(mY[1]);
+    if ('error' in e) return { error: e.error };
+    return { form: 'DIRY', expr: e };
   }
 
-  // Plain numeric operand — ZP or ABS.
-  const lit = parseLiteral(t);
-  if ('error' in lit) return { error: lit.error };
-  if (lit.value < 0 || lit.value > 0xFFFF) return { error: `address out of 16-bit range: ${lit.value}` };
-  return {
-    candidates: (!lit.forceWide && lit.value <= 0xFF) ? ['ZP', 'ABS'] : ['ABS'],
-    value: lit.value,
-  };
+  // Plain direct operand.
+  const e = parseExpr(t);
+  if ('error' in e) return { error: e.error };
+  return { form: 'DIR', expr: e };
+}
+
+// ── Mode selection ─────────────────────────────────────────────────────────
+
+/** Addressing-mode candidates for a given operand form and resolved value
+ *  (or null if unresolved).  The caller's mnemonic lookup picks the first
+ *  candidate the mnemonic actually supports. */
+function candidateModes(form: OperandForm, resolved: Resolved | null): Mode[] {
+  const zpEligible =
+    resolved !== null &&
+    !resolved.forceWide &&
+    resolved.value >= 0 &&
+    resolved.value <= 0xFF;
+
+  switch (form) {
+    case 'IMP_OR_ACC': return ['IMP', 'ACC'];
+    case 'ACC':        return ['ACC'];
+    case 'IMM':        return ['IMM'];
+    case 'IZX':        return ['IZX'];
+    case 'IZY':        return ['IZY'];
+    case 'IND':        return ['IND'];
+    case 'DIR':        return zpEligible ? ['ZP', 'ABS', 'REL'] : ['ABS', 'REL'];
+    case 'DIRX':       return zpEligible ? ['ZPX', 'ABX']       : ['ABX'];
+    case 'DIRY':       return zpEligible ? ['ZPY', 'ABY']       : ['ABY'];
+  }
+}
+
+/** Given a mnemonic and operand form + optional resolved value, pick the
+ *  opcode + addressing mode.  Returns null if the mnemonic doesn't
+ *  support any candidate mode for this form. */
+function selectMode(
+  mnemonic: string,
+  form:     OperandForm,
+  resolved: Resolved | null,
+): { mode: Mode; opcode: number } | null {
+  const modeMap = OPCODES.get(mnemonic);
+  if (!modeMap) return null;
+  const candidates = candidateModes(form, resolved);
+  for (const mode of candidates) {
+    const op = modeMap.get(mode);
+    if (op !== undefined) return { mode, opcode: op };
+  }
+  return null;
 }
 
 // ── Annotation pre-processing ──────────────────────────────────────────────
@@ -318,14 +395,13 @@ function parseOperand(text: string): ParsedOperand | { error: string } {
 function stripComment(s: string): string {
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
-    if (c === "'") { i++; continue; }  // single-char literal — skip next
+    if (c === "'") { i++; continue; }
     if (c === ';') return s.slice(0, i);
   }
   return s;
 }
 
-/** Split an annotation into statements on `:`, skipping over `'c` literals
- *  so the `:` char in `LDA #':` stays attached to the preceding statement. */
+/** Split an annotation into statements on `:`, skipping over `'c` literals. */
 function splitStatements(s: string): string[] {
   const out: string[] = [];
   let start = 0;
@@ -338,62 +414,244 @@ function splitStatements(s: string): string[] {
   return out;
 }
 
-// ── Statement assembly ─────────────────────────────────────────────────────
+// ── Statement parsing ──────────────────────────────────────────────────────
 
-/** Assemble a single statement (one mnemonic + operand).  Returns the
- *  emitted bytes and any error.  On error `bytes` is empty — the caller
- *  keeps going so we can collect all errors in a multi-statement
- *  annotation. */
-function assembleStatement(source: string): { bytes: number[]; errors: AsmError[] } {
-  const trimmed = source.trim();
-  if (trimmed.length === 0) return { bytes: [], errors: [] };
+type Statement =
+  | { kind: 'empty' }
+  | { kind: 'label';  name: string }
+  | { kind: 'equate'; name: string; value: Resolved }
+  | { kind: 'org';    address: number }
+  | { kind: 'instr';  mnemonic: string; op: ParsedOperand }
+  | { kind: 'error';  message: string };
 
-  // Split mnemonic (3 letters) from operand.  Allow any internal
-  // whitespace between; the operand parser handles its own whitespace.
-  const m = trimmed.match(/^([A-Za-z]{3})(?:\s+(.*))?$/);
-  if (!m) return { bytes: [], errors: [{ message: `invalid instruction syntax: ${trimmed}` }] };
-  const mnemonic = m[1].toUpperCase();
-  const operand  = (m[2] ?? '').trim();
+/** Parse a single trimmed statement into its Statement form.  Doesn't
+ *  touch the symbol table — that's the job of the passes below. */
+function parseStatement(raw: string): Statement {
+  const t = raw.trim();
+  if (t.length === 0) return { kind: 'empty' };
 
-  const modeMap = OPCODES.get(mnemonic);
-  if (!modeMap) return { bytes: [], errors: [{ message: `unknown mnemonic: ${mnemonic}` }] };
-
-  const parsed = parseOperand(operand);
-  if ('error' in parsed) return { bytes: [], errors: [{ message: parsed.error }] };
-
-  // Walk candidates in order, use the first one the mnemonic supports.
-  let opcode: number | undefined;
-  let chosenMode: Mode | undefined;
-  for (const mode of parsed.candidates) {
-    const byte = modeMap.get(mode);
-    if (byte !== undefined) { opcode = byte; chosenMode = mode; break; }
-  }
-  if (opcode === undefined || chosenMode === undefined) {
-    return {
-      bytes: [],
-      errors: [{ message: `${mnemonic} does not support ${parsed.candidates.join('/')} mode` }],
-    };
+  // `.LABEL` or `.LABEL = <literal>` — declaration.
+  if (t.startsWith('.')) {
+    // Equate form first: `.IDENT = <literal>`.
+    const eqM = t.match(/^\.([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+    if (eqM) {
+      const name = eqM[1];
+      const lit = parseLiteralOnly(eqM[2]);
+      if ('error' in lit) return { kind: 'error', message: `equate ${name}: ${lit.error}` };
+      return { kind: 'equate', name, value: lit };
+    }
+    // Bare label: `.IDENT`.
+    const lblM = t.match(/^\.([A-Za-z][A-Za-z0-9_]*)\s*$/);
+    if (lblM) return { kind: 'label', name: lblM[1] };
+    return { kind: 'error', message: `invalid declaration: ${t}` };
   }
 
-  const n = operandBytes(chosenMode);
-  const out = [opcode];
-  if (n === 1) {
-    out.push(parsed.value & 0xFF);
-  } else if (n === 2) {
-    out.push(parsed.value & 0xFF, (parsed.value >> 8) & 0xFF);
+  // `ORG <literal>` — case-insensitive.
+  const orgM = t.match(/^[Oo][Rr][Gg](?:\s+(.*))?$/);
+  if (orgM) {
+    const operand = (orgM[1] ?? '').trim();
+    if (operand.length === 0) return { kind: 'error', message: 'ORG requires an address' };
+    const lit = parseLiteralOnly(operand);
+    if ('error' in lit) return { kind: 'error', message: lit.error };
+    if (lit.value < 0 || lit.value > 0xFFFF) {
+      return { kind: 'error', message: `ORG address out of 16-bit range: ${lit.value}` };
+    }
+    return { kind: 'org', address: lit.value };
   }
-  return { bytes: out, errors: [] };
+
+  // Instruction: `MNEM [operand]`.
+  const instrM = t.match(/^([A-Za-z]{3})(?:\s+(.*))?$/);
+  if (!instrM) return { kind: 'error', message: `invalid instruction syntax: ${t}` };
+  const mnemonic = instrM[1].toUpperCase();
+  const operandRaw = (instrM[2] ?? '').trim();
+  if (!OPCODES.has(mnemonic)) return { kind: 'error', message: `unknown mnemonic: ${mnemonic}` };
+  const op = parseOperand(operandRaw);
+  if ('error' in op) return { kind: 'error', message: op.error };
+  return { kind: 'instr', mnemonic, op };
 }
 
-/** Parse an `ORG <literal>` directive.  Returns the address on success,
- *  or an error if the literal is missing/malformed or out of 16-bit range. */
-function parseOrg(operand: string): { value: number } | { error: string } {
-  const lit = parseLiteral(operand);
-  if ('error' in lit) return { error: lit.error };
-  if (lit.value < 0 || lit.value > 0xFFFF) {
-    return { error: `ORG address out of 16-bit range: ${lit.value}` };
+// ── Two-pass assembly ──────────────────────────────────────────────────────
+
+/** A per-instruction record produced by pass 1 and consumed by pass 2. */
+interface Prepared {
+  mnemonic: string;
+  op:       ParsedOperand;
+  pc:       number;   // address of this instruction
+  mode:     Mode;     // mode chosen at pass 1 — committed
+  opcode:   number;
+  size:     number;
+  lineIdx:  number;   // which annotation this came from
+}
+
+/** Per-line working state returned by pass 1 and pass 2. */
+interface LineState { bytes: number[]; errors: AsmError[] }
+
+/** Emit the operand bytes for a concrete (mode, value) pair.  For REL
+ *  also does the signed-offset computation and range check. */
+function emitOperand(
+  mode:  Mode,
+  value: number,
+  pc:    number,
+): { bytes: number[] } | { error: string } {
+  const n = operandBytes(mode);
+  if (mode === 'REL') {
+    // REL is 1 operand byte, signed offset from the byte after this instruction.
+    const offset = value - ((pc + 2) & 0xFFFF);
+    if (offset < -128 || offset > 127) {
+      return { error: `branch out of range: offset ${offset} to $${value.toString(16).toUpperCase().padStart(4, '0')}` };
+    }
+    return { bytes: [offset & 0xFF] };
   }
-  return { value: lit.value };
+  if (n === 0) return { bytes: [] };
+  if (n === 1) {
+    if (value < 0 || value > 0xFF) return { error: `operand out of byte range: ${value}` };
+    return { bytes: [value & 0xFF] };
+  }
+  return { bytes: [value & 0xFF, (value >> 8) & 0xFF] };
+}
+
+/**
+ * Pass 1: walk every statement in input order across all annotations.
+ * Declares labels at the current PC, records equates, processes ORG.
+ * For each instruction, picks a mode (using whatever symbol knowledge is
+ * available so far), commits its size, and advances PC.  The returned
+ * `prepared` list feeds pass 2.
+ */
+function pass1(
+  annotations: string[],
+  startAddr:   number,
+): {
+  prepared:   Prepared[];
+  symbols:    Symbols;
+  lineStates: LineState[];
+  endAddr:    number;
+} {
+  const symbols: Symbols = new Map();
+  const lineStates: LineState[] = annotations.map(() => ({ bytes: [], errors: [] }));
+  const prepared: Prepared[] = [];
+  let pc = startAddr & 0xFFFF;
+
+  const declare = (lineIdx: number, name: string, value: Resolved): string | null => {
+    if (symbols.has(name)) return `symbol already declared: ${name}`;
+    symbols.set(name, value);
+    void lineIdx;
+    return null;
+  };
+
+  for (let lineIdx = 0; lineIdx < annotations.length; lineIdx++) {
+    const stripped = stripComment(annotations[lineIdx]);
+    const rawStatements = splitStatements(stripped);
+    const stateErrs = lineStates[lineIdx].errors;
+
+    for (const raw of rawStatements) {
+      const stmt = parseStatement(raw);
+      switch (stmt.kind) {
+        case 'empty': break;
+
+        case 'error':
+          stateErrs.push({ message: stmt.message });
+          break;
+
+        case 'label': {
+          const err = declare(lineIdx, stmt.name, { value: pc, forceWide: true });
+          if (err) stateErrs.push({ message: err });
+          break;
+        }
+
+        case 'equate': {
+          const err = declare(lineIdx, stmt.name, stmt.value);
+          if (err) stateErrs.push({ message: err });
+          break;
+        }
+
+        case 'org':
+          pc = stmt.address & 0xFFFF;
+          break;
+
+        case 'instr': {
+          // Try to resolve the operand now so size picks ZP when possible.
+          const resolved = stmt.op.expr === null ? null : resolveExpr(stmt.op.expr, symbols);
+          const sel = selectMode(stmt.mnemonic, stmt.op.form, resolved);
+          if (!sel) {
+            const candidates = candidateModes(stmt.op.form, resolved);
+            stateErrs.push({ message: `${stmt.mnemonic} does not support ${candidates.join('/')} mode` });
+            break;
+          }
+          const size = 1 + operandBytes(sel.mode);
+          prepared.push({
+            mnemonic: stmt.mnemonic,
+            op:       stmt.op,
+            pc,
+            mode:     sel.mode,
+            opcode:   sel.opcode,
+            size,
+            lineIdx,
+          });
+          pc = (pc + size) & 0xFFFF;
+          break;
+        }
+      }
+    }
+  }
+
+  return { prepared, symbols, lineStates, endAddr: pc };
+}
+
+/**
+ * Pass 2: walk the prepared instructions, resolving any remaining symbol
+ * references and emitting bytes.  Each instruction's bytes are appended
+ * to its source annotation's LineState.  For REL the signed offset is
+ * computed here; undefined symbols and out-of-range branches become
+ * errors attached to the originating line.
+ */
+function pass2(prepared: Prepared[], symbols: Symbols, lineStates: LineState[]): void {
+  for (const p of prepared) {
+    const lineState = lineStates[p.lineIdx];
+
+    // IMP/ACC have no expression; emit just the opcode.
+    if (p.op.expr === null) {
+      lineState.bytes.push(p.opcode);
+      continue;
+    }
+
+    const resolved = resolveExpr(p.op.expr, symbols);
+    if (resolved === null) {
+      const name = (p.op.expr.kind === 'sym') ? p.op.expr.name : '?';
+      lineState.errors.push({ message: `undefined symbol: ${name}` });
+      continue;
+    }
+
+    // Range checks for forms that imply a byte-sized operand pointer.
+    if (p.op.form === 'IMM' && (resolved.value < 0 || resolved.value > 0xFF)) {
+      lineState.errors.push({ message: `immediate value out of byte range: ${resolved.value}` });
+      continue;
+    }
+    if (p.op.form === 'IZX' && (resolved.value < 0 || resolved.value > 0xFF)) {
+      lineState.errors.push({ message: `IZX pointer out of ZP range: ${resolved.value}` });
+      continue;
+    }
+    if (p.op.form === 'IZY' && (resolved.value < 0 || resolved.value > 0xFF)) {
+      lineState.errors.push({ message: `IZY pointer out of ZP range: ${resolved.value}` });
+      continue;
+    }
+    if (p.op.form === 'IND' && (resolved.value < 0 || resolved.value > 0xFFFF)) {
+      lineState.errors.push({ message: `IND address out of 16-bit range: ${resolved.value}` });
+      continue;
+    }
+    if ((p.op.form === 'DIR' || p.op.form === 'DIRX' || p.op.form === 'DIRY') &&
+        (resolved.value < 0 || resolved.value > 0xFFFF)) {
+      lineState.errors.push({ message: `address out of 16-bit range: ${resolved.value}` });
+      continue;
+    }
+
+    const emit = emitOperand(p.mode, resolved.value, p.pc);
+    if ('error' in emit) { lineState.errors.push({ message: emit.error }); continue; }
+    lineState.bytes.push(p.opcode, ...emit.bytes);
+    // Sanity: what we emit must match the size we committed in pass 1.
+    if (1 + emit.bytes.length !== p.size) {
+      lineState.errors.push({ message: `internal: size mismatch at $${p.pc.toString(16)}` });
+    }
+  }
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -402,57 +660,42 @@ export interface AsmError {
   message: string;
 }
 
+export interface AssembledProgram {
+  /** Per-annotation result.  `perLine[i]` corresponds to `annotations[i]`. */
+  perLine: LineState[];
+  /** Final PC after all annotations have been assembled. */
+  endAddr: number;
+  /** Resolved symbol table — exposed so Phase 5's back-patch directives
+   *  can look labels up. */
+  symbols: Symbols;
+}
+
 /**
- * Assemble a 6502 annotation.  The source may contain:
- *   - Zero or more statements separated by `:`.
- *   - A trailing `;` end-of-annotation comment.
- *   - `ORG $xxxx` directives (interspersed with instructions as needed).
- *
- * Returns the emitted bytes (in input order), all errors encountered
- * across every statement, and `endAddr` — the PC after assembly completes,
- * which the caller should thread into the next line's `startAddr` so
- * multi-line programs assemble contiguously.
+ * Assemble a multi-annotation program with shared symbol table.  Each
+ * annotation is processed with the syntax described at the top of the
+ * file; symbols declared in earlier annotations are visible in later
+ * ones, and forward references (to later-declared labels) resolve as
+ * long as the symbol appears anywhere in the program.
+ */
+export function assembleProgram(
+  annotations: string[],
+  startAddr:   number,
+): AssembledProgram {
+  const { prepared, symbols, lineStates, endAddr } = pass1(annotations, startAddr);
+  pass2(prepared, symbols, lineStates);
+  return { perLine: lineStates, endAddr, symbols };
+}
+
+/**
+ * Assemble a single 6502 annotation — thin wrapper on `assembleProgram`
+ * for callers that work line-at-a-time.  Labels/equates declared in
+ * `source` are visible to its own statements (forward branches work)
+ * but obviously not to anyone else.
  */
 export function assemble(
   source:    string,
   startAddr: number,
 ): { bytes: number[]; errors: AsmError[]; endAddr: number } {
-  const stripped  = stripComment(source);
-  const statements = splitStatements(stripped);
-
-  const bytes:  number[]   = [];
-  const errors: AsmError[] = [];
-  let pc = startAddr & 0xFFFF;
-
-  for (const raw of statements) {
-    const stmt = raw.trim();
-    if (stmt.length === 0) continue;
-
-    // ORG directive — match case-insensitively, any whitespace after.
-    const orgM = stmt.match(/^[Oo][Rr][Gg](?:\s+(.*))?$/);
-    if (orgM) {
-      const operand = (orgM[1] ?? '').trim();
-      if (operand.length === 0) {
-        errors.push({ message: 'ORG requires an address' });
-        continue;
-      }
-      const r = parseOrg(operand);
-      if ('error' in r) { errors.push({ message: r.error }); continue; }
-      pc = r.value;
-      continue;
-    }
-
-    // Regular instruction.
-    const result = assembleStatement(stmt);
-    if (result.errors.length > 0) {
-      // Skip the statement — no bytes emitted, PC not advanced — and
-      // keep parsing so the user sees every problem in one pass.
-      errors.push(...result.errors);
-      continue;
-    }
-    for (const b of result.bytes) bytes.push(b);
-    pc = (pc + result.bytes.length) & 0xFFFF;
-  }
-
-  return { bytes, errors, endAddr: pc };
+  const { perLine, endAddr } = assembleProgram([source], startAddr);
+  return { bytes: perLine[0].bytes, errors: perLine[0].errors, endAddr };
 }

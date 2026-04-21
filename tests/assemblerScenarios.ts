@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 /**
- * Ad-hoc scenario tests for the Phase 3 6502 assembler.
+ * Ad-hoc scenario tests for the Phase 4 6502 assembler.
  *
  * Covers:
  *   - One instruction per mnemonic family (smoke test the opcode table).
@@ -13,11 +13,15 @@
  *   - Round-trip vs `disassemble` for every legal non-REL opcode.
  *   - Multi-statement annotations (`:` separator), `;` end-of-annotation
  *     comments, ORG directive and endAddr PC tracking.
+ *   - Labels and equates (single-annotation and cross-annotation via
+ *     `assembleProgram`), forward and backward branches with REL offset
+ *     computation, forward-reference "assume ABS" sizing rule, undefined
+ *     symbol and redeclaration errors.
  *
  * Not part of CI — just a quick sanity check during development.
  */
 
-import { assemble } from '../src/assembler6502';
+import { assemble, assembleProgram } from '../src/assembler6502';
 import { disassemble } from '../src/disassembler6502';
 
 // ── Runner glue ──────────────────────────────────────────────────────────────
@@ -182,10 +186,12 @@ test('bad hex literal (LDA #$XY)', () => {
   return null;
 });
 
-test('unrecognised literal (LDA #abc)', () => {
+// `#abc` parses as `immediate <symbol abc>`; with no `.abc` declared
+// anywhere, the undefined-symbol error fires in pass 2.
+test('undefined symbol as immediate (LDA #abc)', () => {
   const err = asmErr('LDA #abc');
   if (err === null) return 'expected error, got success';
-  if (!/unrecognised numeric literal/i.test(err)) return `wrong message: ${err}`;
+  if (!/undefined symbol/i.test(err)) return `wrong message: ${err}`;
   return null;
 });
 
@@ -498,13 +504,236 @@ test("`;` inside ASCII literal doesn't start comment",
 test("ASCII literal then normal `:` after",
   () => compareBytes(asm("LDA #':  : RTS"), [0xA9, 0x3A, 0x60]));
 
+// ── Phase 4: equates (same annotation) ───────────────────────────────────────
+
+test('equate resolves to ZP form when value fits',
+  () => compareBytes(asm('.LIVES = $04 : DEC LIVES'), [0xC6, 0x04]));
+
+test('equate resolves to ABS when value ≥ 256',
+  () => compareBytes(asm('.SCRN = $BB80 : LDA SCRN'), [0xAD, 0x80, 0xBB]));
+
+test('equate forceWide ($0004) forces ABS even though value fits ZP',
+  () => compareBytes(asm('.FOO = $0004 : LDA FOO'), [0xAD, 0x04, 0x00]));
+
+test('equate in immediate (LDA #COLOR)',
+  () => compareBytes(asm('.COLOR = 10 : LDA #COLOR'), [0xA9, 0x0A]));
+
+test('equate in indirect indexed (LDA (PTR),Y)',
+  () => compareBytes(asm('.PTR = $04 : LDA (PTR),Y'), [0xB1, 0x04]));
+
+test('equate with underscore in name',
+  () => compareBytes(asm('.A_B = 5 : LDA #A_B'), [0xA9, 0x05]));
+
+test('equate in indexed X (LDA ARR,X)',
+  () => compareBytes(asm('.ARR = $BB80 : LDA ARR,X'), [0xBD, 0x80, 0xBB]));
+
+// Forward reference to an equate: pass 1 doesn't know the value, commits ABS.
+// Pass 2 resolves LIVES=$04 but the committed mode is ABS, so we get 3 bytes.
+test('forward ref to ZP-valued equate still emits ABS',
+  () => compareBytes(asm('DEC LIVES : .LIVES = $04'), [0xCE, 0x04, 0x00]));
+
+// ── Phase 4: labels and branches ─────────────────────────────────────────────
+
+test('backward branch (.LOOP : NOP : BNE LOOP)',
+  () => compareBytes(asm('.LOOP : NOP : BNE LOOP'), [0xEA, 0xD0, 0xFD]));
+
+test('forward branch (BEQ SKIP : NOP : .SKIP : RTS)',
+  () => compareBytes(asm('BEQ SKIP : NOP : .SKIP : RTS'), [0xF0, 0x01, 0xEA, 0x60]));
+
+test('label via ORG (ORG $9800 : .START : RTS : BNE START)', () => {
+  const r = assemble('ORG $9800 : .START : RTS : BNE START', 0x0000);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  return compareBytes(r.bytes, [0x60, 0xD0, 0xFD]);
+});
+
+test('branch-self: BPL back to self', () => {
+  // BPL at offset 0, target = same instruction → offset = 0 - 2 = -2 = 0xFE.
+  const r = assemble('.HERE : BPL HERE', 0x0000);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  return compareBytes(r.bytes, [0x10, 0xFE]);
+});
+
+test('branch at maximum positive offset (+127)', () => {
+  // BEQ to a label 127+2 bytes ahead.  We construct 127 bytes of fill using
+  // an ORG trick: place the label at exactly PC+2+127.
+  const r = assemble('BEQ FAR : ORG $0081 : .FAR : RTS', 0x0000);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // BEQ at $0000, pc+2=$0002, FAR=$0081, offset = 127 = 0x7F.
+  return compareBytes(r.bytes.slice(0, 2), [0xF0, 0x7F]);
+});
+
+test('branch at maximum negative offset (-128)', () => {
+  // Place label, then 126 filler bytes (NOP), then BNE LOOP which is 2 more
+  // bytes — branch target is 128 bytes before pc+2.
+  const filler = Array.from({ length: 126 }, () => 'NOP').join(':');
+  const r = assemble(`.LOOP : ${filler} : BNE LOOP`, 0x0000);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // BNE opcode+offset is the last 2 bytes: 0xD0, 0x80 (-128).
+  return compareBytes(r.bytes.slice(-2), [0xD0, 0x80]);
+});
+
+test('branch out of range errors', () => {
+  const err = asmErrMulti('.FAR = $1000 : BNE FAR');
+  if (err === null) return 'expected error, got success';
+  if (!/branch out of range/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+// ── Phase 4: error paths (symbols) ───────────────────────────────────────────
+
+test('undefined symbol (LDA UNDEFINED)', () => {
+  const err = asmErrMulti('LDA UNDEFINED');
+  if (err === null) return 'expected error, got success';
+  if (!/undefined symbol.*UNDEFINED/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+test('redeclaration of equate', () => {
+  const err = asmErrMulti('.FOO = 1 : .FOO = 2');
+  if (err === null) return 'expected error, got success';
+  if (!/already declared.*FOO/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+test('redeclaration of label', () => {
+  const err = asmErrMulti('.LOOP : NOP : .LOOP : RTS');
+  if (err === null) return 'expected error, got success';
+  if (!/already declared.*LOOP/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+test('redeclaration across equate/label kinds', () => {
+  const err = asmErrMulti('.FOO = 1 : .FOO');
+  if (err === null) return 'expected error, got success';
+  if (!/already declared.*FOO/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+test('identifier must start with a letter (.9FOO)', () => {
+  const err = asmErrMulti('.9FOO = 1');
+  if (err === null) return 'expected error, got success';
+  if (!/invalid declaration/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+test('equate value must be a literal (.FOO = BAR)', () => {
+  const err = asmErrMulti('.FOO = BAR');
+  if (err === null) return 'expected error, got success';
+  if (!/expected a literal/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+test('ORG requires a literal (ORG FOO)', () => {
+  const err = asmErrMulti('ORG FOO');
+  if (err === null) return 'expected error, got success';
+  if (!/expected a literal/i.test(err)) return `wrong message: ${err}`;
+  return null;
+});
+
+// ── Phase 4: assembleProgram (cross-annotation) ──────────────────────────────
+
+test('equate on line 0, used on line 1', () => {
+  const r = assembleProgram(['.LIVES = $04', 'DEC LIVES'], 0x0000);
+  if (r.perLine[0].errors.length !== 0) return `line 0 error: ${r.perLine[0].errors[0].message}`;
+  if (r.perLine[1].errors.length !== 0) return `line 1 error: ${r.perLine[1].errors[0].message}`;
+  if (r.perLine[0].bytes.length !== 0) return `line 0 bytes should be empty`;
+  return compareBytes(r.perLine[1].bytes, [0xC6, 0x04]);
+});
+
+test('label across lines (.LOOP, NOP, BNE LOOP)', () => {
+  const r = assembleProgram(['.LOOP', 'NOP', 'BNE LOOP'], 0x0000);
+  for (let i = 0; i < r.perLine.length; i++) {
+    if (r.perLine[i].errors.length !== 0) return `line ${i}: ${r.perLine[i].errors[0].message}`;
+  }
+  if (r.perLine[0].bytes.length !== 0) return 'line 0 should be empty (label only)';
+  let err = compareBytes(r.perLine[1].bytes, [0xEA], 'line 1'); if (err) return err;
+  err = compareBytes(r.perLine[2].bytes, [0xD0, 0xFD], 'line 2'); if (err) return err;
+  return null;
+});
+
+test('forward label across lines', () => {
+  // Line 0: BEQ SKIP (forward ref to SKIP)
+  // Line 1: NOP
+  // Line 2: .SKIP
+  // Line 3: RTS
+  const r = assembleProgram(['BEQ SKIP', 'NOP', '.SKIP', 'RTS'], 0x0000);
+  for (let i = 0; i < r.perLine.length; i++) {
+    if (r.perLine[i].errors.length !== 0) return `line ${i}: ${r.perLine[i].errors[0].message}`;
+  }
+  let err = compareBytes(r.perLine[0].bytes, [0xF0, 0x01], 'line 0'); if (err) return err;
+  err = compareBytes(r.perLine[1].bytes, [0xEA],       'line 1'); if (err) return err;
+  if (r.perLine[2].bytes.length !== 0) return 'line 2 (label) should be empty';
+  err = compareBytes(r.perLine[3].bytes, [0x60],       'line 3'); if (err) return err;
+  return null;
+});
+
+test('error is attached to the originating line', () => {
+  // Line 0 is fine; line 1 references an undefined symbol.
+  const r = assembleProgram(['.FOO = 1', 'LDA BAR'], 0x0000);
+  if (r.perLine[0].errors.length !== 0) return `line 0 unexpected error`;
+  if (r.perLine[1].errors.length !== 1) return `line 1 expected 1 error, got ${r.perLine[1].errors.length}`;
+  if (!/undefined symbol.*BAR/i.test(r.perLine[1].errors[0].message)) {
+    return `wrong message: ${r.perLine[1].errors[0].message}`;
+  }
+  return null;
+});
+
+test('symbol table exposed on the program result', () => {
+  const r = assembleProgram(['.LIVES = $04', '.SCRN = $BB80', '.LOOP', 'NOP'], 0x9800);
+  if (r.symbols.get('LIVES')?.value !== 0x04) return 'LIVES not in symbol table';
+  if (r.symbols.get('SCRN')?.value  !== 0xBB80) return 'SCRN not in symbol table';
+  if (r.symbols.get('LOOP')?.value  !== 0x9800) return 'LOOP not at $9800';
+  return null;
+});
+
+// ── Phase 4: worked mini-program (spec-style) ────────────────────────────────
+//
+// Models the structure of the spec's example: two equates on a REM line,
+// ORG on another REM line, then code lines.  We verify the expected bytes
+// for each code line.  (Exact branch offset computed from layout.)
+test('worked mini-program (structured like spec example)', () => {
+  const lines = [
+    '.LIVES = $04 : .SCRN = $BB80',
+    'ORG $9800',
+    'STX 1 : STY 2',             // $9800: 4 bytes
+    '.LOOPA : LDY #0',           // $9804: 2 bytes  (LOOPA = $9804)
+    'LDA (1),Y',                 // $9806: 2 bytes
+    'STA 3',                     // $9808: 2 bytes
+    'DEC LIVES',                 // $980A: 2 bytes (DEC ZP, LIVES = $04)
+    'BNE LOOPA',                 // $980C: 2 bytes → offset = $9804 - $980E = -10 = 0xF6
+    'RTS',                       // $980E: 1 byte
+  ];
+  const r = assembleProgram(lines, 0x0000);  // startAddr ignored once ORG fires
+  for (let i = 0; i < r.perLine.length; i++) {
+    if (r.perLine[i].errors.length !== 0) return `line ${i}: ${r.perLine[i].errors[0].message}`;
+  }
+  const expected: number[][] = [
+    [],                              // line 0: equates
+    [],                              // line 1: ORG
+    [0x86, 0x01, 0x84, 0x02],        // STX 1 : STY 2
+    [0xA0, 0x00],                    // LDY #0
+    [0xB1, 0x01],                    // LDA (1),Y
+    [0x85, 0x03],                    // STA 3
+    [0xC6, 0x04],                    // DEC LIVES (ZP)
+    [0xD0, 0xF6],                    // BNE LOOPA (offset -10)
+    [0x60],                          // RTS
+  ];
+  for (let i = 0; i < lines.length; i++) {
+    const err = compareBytes(r.perLine[i].bytes, expected[i], `line ${i}`);
+    if (err) return err;
+  }
+  if (r.endAddr !== 0x980F) return `endAddr $${hex4(r.endAddr)} (want $980F)`;
+  return null;
+});
+
 // ── Round-trip: disassemble → assemble → same bytes ──────────────────────────
 //
-// The disassembler and assembler must be inverses.  For every legal non-REL
-// opcode, we fabricate plausible operand bytes, disassemble, strip the
+// The disassembler and assembler must be inverses.  For every legal opcode,
+// we fabricate plausible operand bytes, disassemble, strip the
 // "$ADDR: HH HH HH  " prefix, and re-assemble the mnemonic+operand back to
-// the same byte sequence.  REL (branches) is skipped because operand
-// formatting yields a target address whose re-assembly needs labels.
+// the same byte sequence.  Includes REL (branches) — the disassembler
+// renders them as absolute targets and the assembler recomputes the offset
+// using the startAddr we pass in.
 
 /** Parse one line of the disassembler's output and return just the
  *  mnemonic+operand portion (the bit after the two-space separator). */
@@ -514,23 +743,9 @@ function extractAsmPart(line: string): string {
   return line.slice(i + 2).trim();
 }
 
-/** REL-mode opcodes (branch instructions).  Skipped by the round-trip
- *  test — Phase 2 can't assemble branches, only Phase 4 with labels. */
-const REL_OPCODES = new Set<number>([
-  0x10, // BPL
-  0x30, // BMI
-  0x50, // BVC
-  0x70, // BVS
-  0x90, // BCC
-  0xB0, // BCS
-  0xD0, // BNE
-  0xF0, // BEQ
-]);
-
-test('round-trip: disassemble → assemble for every legal non-REL opcode', () => {
+test('round-trip: disassemble → assemble for every legal opcode', () => {
   let covered = 0;
   for (let op = 0; op < 256; op++) {
-    if (REL_OPCODES.has(op)) continue;
     // Use distinct, non-zero operand bytes so ZP/ABS distinction is exercised.
     const bytes = [op, 0xBB, 0x12];
     const lines = disassemble(bytes, 0x1000);
@@ -546,8 +761,8 @@ test('round-trip: disassemble → assemble for every legal non-REL opcode', () =
     if (err) return err;
     covered++;
   }
-  // Sanity: 151 official opcodes - 8 REL = 143 expected.
-  if (covered !== 143) return `expected 143 opcodes covered, got ${covered}`;
+  // Sanity: 151 official 6502 opcodes.
+  if (covered !== 151) return `expected 151 opcodes covered, got ${covered}`;
   return null;
 });
 
@@ -572,6 +787,21 @@ test('round-trip spot: JMP IND (6C FC FF) → "JMP ($FFFC)" → 6C FC FF',
   () => compareBytes(asm(extractAsmPart(disassemble([0x6C, 0xFC, 0xFF], 0)[0])), [0x6C, 0xFC, 0xFF]));
 test('round-trip spot: JSR ABS (20 34 12) → "JSR $1234" → 20 34 12',
   () => compareBytes(asm(extractAsmPart(disassemble([0x20, 0x34, 0x12], 0)[0])), [0x20, 0x34, 0x12]));
+
+test('round-trip spot: BNE REL (D0 02) at $1000 → "BNE $1004" → D0 02', () => {
+  // Disassembler renders BNE as absolute target $1004.  Re-assembling with
+  // startAddr $1000 must recompute offset = 2.
+  const r = assemble(extractAsmPart(disassemble([0xD0, 0x02], 0x1000)[0]), 0x1000);
+  if (r.errors.length !== 0) return r.errors[0].message;
+  return compareBytes(r.bytes, [0xD0, 0x02]);
+});
+
+test('round-trip spot: BEQ REL negative (F0 FE) at $1000 → "BEQ $1000" → F0 FE', () => {
+  // Branch-to-self: $1000 - ($1000+2) = -2 = 0xFE.
+  const r = assemble(extractAsmPart(disassemble([0xF0, 0xFE], 0x1000)[0]), 0x1000);
+  if (r.errors.length !== 0) return r.errors[0].message;
+  return compareBytes(r.bytes, [0xF0, 0xFE]);
+});
 
 // ── Runner ───────────────────────────────────────────────────────────────────
 
