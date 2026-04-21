@@ -546,9 +546,14 @@ function renderAll(): void {
   }
 
   const prog = programs[activeProgIdx];
-  basicTypeEl.textContent = prog ? 'BASIC program' : '';
-  wrapLabelEl.hidden = !prog;
-  fixLabelEl.hidden = !prog;
+  const isMachineCode = !!prog && prog.header.fileType !== 0;
+  basicTypeEl.textContent = prog
+    ? (isMachineCode ? 'Machine code program' : 'BASIC program')
+    : '';
+  // Wrap toggle and fix-pointers toggle only apply to BASIC programs —
+  // hide them for machine code where they'd be meaningless.
+  wrapLabelEl.hidden = !prog || isMachineCode;
+  fixLabelEl.hidden  = !prog || isMachineCode;
   if (prog) updateFixToggle(prog);
   if (!prog) { clearPanels(); return; }
   renderHex(prog, selByte);
@@ -609,9 +614,31 @@ function renderHex(
   labelHtml?: string,
 ): void {
   hexTitleEl.innerHTML = labelHtml ?? tapeHexHeaderHtml(prog);
-  const firstContent = prog.lines[0]?.firstByte                          ?? prog.bytes.length;
-  const lastLine     = prog.lines[prog.lines.length - 1];
-  const lastContent  = lastLine ? lastLine.lastByte + 1 : 0;
+  // Range [firstContent, lastContent) covers the program "body" — bytes
+  // outside it get the hb-pre dimmed styling (sync / header / name
+  // before; trailing metadata / padding after).  For BASIC programs the
+  // body is the span of parsed lines; for machine code there are no
+  // lines, so we derive the body from the header: content starts after
+  // sync + 9-byte header + null-terminated name, and its length comes
+  // from endAddr - startAddr.
+  let firstContent: number;
+  let lastContent:  number;
+  if (prog.lines.length > 0) {
+    firstContent = prog.lines[0].firstByte;
+    lastContent  = prog.lines[prog.lines.length - 1].lastByte + 1;
+  } else if (prog.header.fileType !== 0) {
+    firstContent = Math.min(
+      prog.header.byteIndex + 9 + prog.name.length + 1,
+      prog.bytes.length,
+    );
+    lastContent = Math.min(
+      firstContent + (prog.header.endAddr - prog.header.startAddr),
+      prog.bytes.length,
+    );
+  } else {
+    firstContent = prog.bytes.length;
+    lastContent  = 0;
+  }
 
   // Determine which line (if any) should be highlighted.  selectedByte takes
   // precedence: its containing line gets highlighted.  Otherwise fall back to
@@ -792,8 +819,20 @@ function renderBasic(prog: Program): void {
   updateFixToggle(prog);
 
   if (!prog.lines.length) {
+    // Two sub-cases share this "no BASIC content rendered" path:
+    //   fileType === 0 with zero lines → corrupt BASIC / nothing decoded.
+    //   fileType !== 0                  → machine code program (by design).
+    // Both get the force-decode buttons.  Force-decode-as-BASIC on a
+    // machine code program is deliberately kept — useful for the
+    // occasional corrupt / overlapping-recording case where the decoded
+    // header is misleading and the bytes contain BASIC content.
+    const isMachineCode = prog.header.fileType !== 0;
+    const headline = isMachineCode
+      ? `Machine code program · starts at $${prog.header.startAddr.toString(16).toUpperCase().padStart(4, '0')} · `
+        + `${prog.header.endAddr - prog.header.startAddr} bytes`
+      : 'No BASIC content decoded.';
     basicPanel.innerHTML =
-      '<p class="hint">No BASIC content decoded.</p>' +
+      `<p class="hint">${headline}</p>` +
       '<p class="hint">' +
         '<button id="force-decode-btn" class="zoom-btn">Force decode as BASIC</button> ' +
         (prog.bytes.length > 0 && prog.bytes[0].firstBit > 0
