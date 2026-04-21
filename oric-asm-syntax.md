@@ -5,9 +5,19 @@ Conventions for assembler annotations and tool directives embedded in Oric BASIC
 ## Container
 
 - All annotations follow Oric BASIC `'`.
-- Assembler code annotations pair with a `DATA` statement on the same line — the bytes in the DATA are what the annotation assembles to.
+- Assembler code annotations pair with a `DATA` statement on the same line — the DATA's values are what the annotation assembles to.
 - Declarations (`ORG`, labels, equates) may live on `REM` lines with no DATA attached.
 - BASIC back-patch directives live on `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` lines.
+
+## Host Line Eligibility
+
+Annotations are only interpreted as assembler input when they appear on a line whose first statement (immediately after the line number) is one of:
+
+- `REM` — single statement per line.  Annotation must consist of valid assembly fragments only (declarations like `ORG`, labels, and equates, separated by `:`).  Human comments are permitted only at the very end of the annotation via `;`.
+- `DATA` — single statement per line.  The annotation's assembled bytes overwrite the DATA's values in full — any pre-existing values on the DATA (in any count or format) are replaced by the assembled output.  Annotation must consist of valid assembly fragments only (instructions, and/or `:`-separated local label declarations); trailing `;` comments are permitted.
+- `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` — may appear as one or more `:`-separated statements on the same line.  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
+
+Annotations on lines of any other kind (e.g. `PRINT`, `LET`, `GOTO`) — and REM/DATA lines that violate the single-statement rule above — are treated as human comments and ignored outright.
 
 ## Numeric Literals
 
@@ -47,6 +57,7 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 ## Directives
 
 - `ORG $xxxx` — set assembly address. May appear multiple times for non-contiguous code.
+- `ORG` is required if any label is referenced in an absolute addressing context (`JMP LABEL`, `JSR LABEL`, `LDA LABEL` in ABS form, etc.) or by a back-patch directive. Programs that use only equates, relative branches, and REL-only label references may omit `ORG`.
 
 ## Branches
 

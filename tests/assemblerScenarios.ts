@@ -686,6 +686,91 @@ test('symbol table exposed on the program result', () => {
   return null;
 });
 
+// ── Phase 4: ORG-missing error for ABS label references ─────────────────────
+//
+// When the caller passes no `startAddr` and the program contains no ORG,
+// labels have no anchor to real memory.  Using such a label as an absolute
+// address (JMP/JSR LABEL, LDA LABEL in ABS form, etc.) is an error.  REL
+// branches, equates, and literals are all still fine.
+
+test('no-ORG program with REL branches only: assembles', () => {
+  const r = assembleProgram(['.LOOP : NOP : BNE LOOP']);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  return compareBytes(r.perLine[0].bytes, [0xEA, 0xD0, 0xFD]);
+});
+
+test('no-ORG program with equates only: assembles', () => {
+  const r = assembleProgram(['.LIVES = $04 : DEC LIVES']);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  return compareBytes(r.perLine[0].bytes, [0xC6, 0x04]);
+});
+
+test('no-ORG program with ABS jump to label: errors', () => {
+  const r = assembleProgram(['.LOOP : JMP LOOP']);
+  if (r.perLine[0].errors.length !== 1) return `expected 1 error, got ${r.perLine[0].errors.length}`;
+  const msg = r.perLine[0].errors[0].message;
+  if (!/no ORG.*declared/i.test(msg)) return `wrong message: ${msg}`;
+  if (!/LOOP/.test(msg)) return `message should mention the label: ${msg}`;
+  return null;
+});
+
+test('no-ORG program with JSR to label: errors', () => {
+  const r = assembleProgram(['.SUB : RTS : JSR SUB']);
+  if (r.perLine[0].errors.length !== 1) return `expected 1 error, got ${r.perLine[0].errors.length}`;
+  if (!/no ORG.*declared/i.test(r.perLine[0].errors[0].message)) {
+    return `wrong message: ${r.perLine[0].errors[0].message}`;
+  }
+  return null;
+});
+
+test('no-ORG program with LDA label in ABS form: errors', () => {
+  const r = assembleProgram(['.DATA_AREA : NOP : LDA DATA_AREA']);
+  if (r.perLine[0].errors.length !== 1) return `expected 1 error, got ${r.perLine[0].errors.length}`;
+  if (!/no ORG.*declared/i.test(r.perLine[0].errors[0].message)) {
+    return `wrong message: ${r.perLine[0].errors[0].message}`;
+  }
+  return null;
+});
+
+test('ORG directive unlocks ABS label references', () => {
+  const r = assembleProgram(['ORG $9800 : .LOOP : JMP LOOP']);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  // JMP LOOP at $9802, target $9800 → 4C 00 98.
+  return compareBytes(r.perLine[0].bytes, [0x4C, 0x00, 0x98]);
+});
+
+test('explicit startAddr acts as implicit ORG', () => {
+  const r = assembleProgram(['.LOOP : JMP LOOP'], 0x9800);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  return compareBytes(r.perLine[0].bytes, [0x4C, 0x00, 0x98]);
+});
+
+test('ORG on one line unlocks labels declared on another (cross-line)', () => {
+  const r = assembleProgram([
+    'ORG $9800',
+    '.LOOP',
+    'NOP',
+    'JMP LOOP',
+  ]);
+  for (let i = 0; i < r.perLine.length; i++) {
+    if (r.perLine[i].errors.length !== 0) return `line ${i}: ${r.perLine[i].errors[0].message}`;
+  }
+  // JMP LOOP at $9801, target $9800 → 4C 00 98 on line 3.
+  return compareBytes(r.perLine[3].bytes, [0x4C, 0x00, 0x98]);
+});
+
+test('label declared before ORG but used in ABS: ORG still rescues', () => {
+  // `.PRE` declares at PC=0 (pre-ORG), ORG then jumps PC to $9800.  Using
+  // PRE in ABS from post-ORG code emits $0000 as the address — strange,
+  // but not an error (orgSeen was true by emission time).  This checks
+  // that the rule is "did ORG ever fire" not "was this label declared
+  // after ORG".
+  const r = assembleProgram(['.PRE : ORG $9800 : LDA PRE']);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  // LDA PRE → ABS because PRE=$0000 with forceWide; opcode AD, operand $0000.
+  return compareBytes(r.perLine[0].bytes, [0xAD, 0x00, 0x00]);
+});
+
 // ── Phase 4: worked mini-program (spec-style) ────────────────────────────────
 //
 // Models the structure of the spec's example: two equates on a REM line,

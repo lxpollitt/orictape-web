@@ -205,11 +205,19 @@ type Expr =
   | { kind: 'sym'; name: string };
 
 /** A resolved value — either what a literal Expr already carries, or the
- *  result of looking up a symbol in the symbol table. */
-interface Resolved { value: number; forceWide: boolean }
+ *  result of looking up a symbol in the symbol table.  `isLabel` is set
+ *  for symbols declared via `.LABEL` (value = PC at declaration); equates
+ *  and inline literals leave it undefined. */
+export interface ResolvedSymbol {
+  value:     number;
+  forceWide: boolean;
+  isLabel?:  boolean;
+}
+// Short in-module alias to keep existing code tidy.
+type Resolved = ResolvedSymbol;
 
 /** The symbol table: shared across all annotations in one program. */
-type Symbols = Map<string, Resolved>;
+export type Symbols = Map<string, ResolvedSymbol>;
 
 const IDENT_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 
@@ -516,20 +524,28 @@ function emitOperand(
  * For each instruction, picks a mode (using whatever symbol knowledge is
  * available so far), commits its size, and advances PC.  The returned
  * `prepared` list feeds pass 2.
+ *
+ * `startAddr` may be undefined, in which case the initial PC is 0 but
+ * `orgSeen` starts false — meaning labels declared before any ORG
+ * directive have values that are only safe to use in relative-addressing
+ * contexts.  Pass 2 flags any attempt to emit such a label as an
+ * absolute address.
  */
 function pass1(
   annotations: string[],
-  startAddr:   number,
+  startAddr:   number | undefined,
 ): {
   prepared:   Prepared[];
   symbols:    Symbols;
   lineStates: LineState[];
   endAddr:    number;
+  orgSeen:    boolean;
 } {
   const symbols: Symbols = new Map();
   const lineStates: LineState[] = annotations.map(() => ({ bytes: [], errors: [] }));
   const prepared: Prepared[] = [];
-  let pc = startAddr & 0xFFFF;
+  let pc = (startAddr ?? 0) & 0xFFFF;
+  let orgSeen = startAddr !== undefined;
 
   const declare = (lineIdx: number, name: string, value: Resolved): string | null => {
     if (symbols.has(name)) return `symbol already declared: ${name}`;
@@ -553,7 +569,7 @@ function pass1(
           break;
 
         case 'label': {
-          const err = declare(lineIdx, stmt.name, { value: pc, forceWide: true });
+          const err = declare(lineIdx, stmt.name, { value: pc, forceWide: true, isLabel: true });
           if (err) stateErrs.push({ message: err });
           break;
         }
@@ -566,6 +582,7 @@ function pass1(
 
         case 'org':
           pc = stmt.address & 0xFFFF;
+          orgSeen = true;
           break;
 
         case 'instr': {
@@ -594,7 +611,7 @@ function pass1(
     }
   }
 
-  return { prepared, symbols, lineStates, endAddr: pc };
+  return { prepared, symbols, lineStates, endAddr: pc, orgSeen };
 }
 
 /**
@@ -603,8 +620,19 @@ function pass1(
  * to its source annotation's LineState.  For REL the signed offset is
  * computed here; undefined symbols and out-of-range branches become
  * errors attached to the originating line.
+ *
+ * `orgSeen` carries over from pass 1.  When it's false (no `startAddr`
+ * was passed and no `ORG` directive fired), any attempt to emit a
+ * label's value as an absolute address is flagged — the label's PC was
+ * never anchored to a real memory location, so emitting it would be
+ * meaningless.  REL-mode branches are exempt (offsets are base-independent).
  */
-function pass2(prepared: Prepared[], symbols: Symbols, lineStates: LineState[]): void {
+function pass2(
+  prepared:   Prepared[],
+  symbols:    Symbols,
+  lineStates: LineState[],
+  orgSeen:    boolean,
+): void {
   for (const p of prepared) {
     const lineState = lineStates[p.lineIdx];
 
@@ -618,6 +646,16 @@ function pass2(prepared: Prepared[], symbols: Symbols, lineStates: LineState[]):
     if (resolved === null) {
       const name = (p.op.expr.kind === 'sym') ? p.op.expr.name : '?';
       lineState.errors.push({ message: `undefined symbol: ${name}` });
+      continue;
+    }
+
+    // A label used as an absolute address requires a known program origin.
+    // REL-mode uses offsets (base-independent) so is exempt.
+    if (resolved.isLabel && p.mode !== 'REL' && !orgSeen) {
+      const name = (p.op.expr.kind === 'sym') ? p.op.expr.name : '?';
+      lineState.errors.push({
+        message: `label ${name} used in absolute addressing but no ORG was declared`,
+      });
       continue;
     }
 
@@ -676,13 +714,19 @@ export interface AssembledProgram {
  * file; symbols declared in earlier annotations are visible in later
  * ones, and forward references (to later-declared labels) resolve as
  * long as the symbol appears anywhere in the program.
+ *
+ * `startAddr` is optional.  If provided, it's the initial PC and labels
+ * resolve to real absolute addresses.  If omitted, the initial PC is 0
+ * *but* label values are only safe for relative-addressing uses until
+ * an `ORG` directive anchors the program; the assembler will flag any
+ * attempt to use a pre-ORG label as an absolute address.
  */
 export function assembleProgram(
   annotations: string[],
-  startAddr:   number,
+  startAddr?:  number,
 ): AssembledProgram {
-  const { prepared, symbols, lineStates, endAddr } = pass1(annotations, startAddr);
-  pass2(prepared, symbols, lineStates);
+  const { prepared, symbols, lineStates, endAddr, orgSeen } = pass1(annotations, startAddr);
+  pass2(prepared, symbols, lineStates, orgSeen);
   return { perLine: lineStates, endAddr, symbols };
 }
 
