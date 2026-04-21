@@ -643,6 +643,16 @@ export const TOKEN_REM  = 0x80 + KEYWORDS.indexOf('REM');   // 0x9D
 export const TOKEN_BANG = 0x80 + KEYWORDS.indexOf('!');     // 0xC0
 export const TOKEN_DATA = 0x80 + KEYWORDS.indexOf('DATA');  // 0x91
 
+// Token bytes for BASIC verbs that are back-patch targets.  Each takes
+// a 16-bit address as its first argument (CALL/DOKE/POKE as a statement;
+// PEEK/DEEK as a function inside an expression).  Used by asmApply to
+// find patch sites after a re-assembly pass.
+export const TOKEN_CALL = 0x80 + KEYWORDS.indexOf('CALL');  // 0xBF
+export const TOKEN_POKE = 0x80 + KEYWORDS.indexOf('POKE');  // 0xB9
+export const TOKEN_DOKE = 0x80 + KEYWORDS.indexOf('DOKE');  // 0x8A
+export const TOKEN_PEEK = 0x80 + KEYWORDS.indexOf('PEEK');  // 0xE6
+export const TOKEN_DEEK = 0x80 + KEYWORDS.indexOf('DEEK');  // 0xE7
+
 // Literal byte values that are invalid in code mode — the Oric tokeniser would
 // have produced keyword tokens for these, so seeing them as literals indicates
 // corruption or non-standard program creation.
@@ -1000,7 +1010,9 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       if (!readCycle()) break;
       if (maxVal - minVal < SYNC_NOISE_FLOOR) break; // noise floor (silence, noise, or slow ramp)
       // TS can't see that readCycle() mutates cycleKind via closure — ignore the narrowing warning.
+      // @ts-expect-error
       if (cycleKind === 'medium') mediumCycleCount++;
+      // @ts-expect-error
       else if (cycleKind === 'long') longCycleCount++;
       pushBitFast();
     }
