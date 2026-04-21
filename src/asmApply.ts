@@ -1,30 +1,45 @@
 /**
  * Glue layer: re-assemble the 6502 annotations embedded in a BASIC
- * program and patch the affected DATA lines.
+ * program and patch the affected BASIC lines.  Covers two related jobs
+ * driven by a single `applyAssembler` call:
  *
- * Scope (Phase 5):
- *   - Host-line eligibility per `oric-asm-syntax.md` — only `REM` and
- *     `DATA` lines contribute annotations to the assembler in this phase.
- *     CALL/POKE/etc. back-patch directives come in Phase 6.  Any other
- *     line kind (PRINT, LET, …) is ignored.
- *   - Detection is by token byte at `firstByte+4` (`TOKEN_REM` /
- *     `TOKEN_DATA`) — robust against ASCII-text collisions.  Per spec,
- *     the keyword must appear immediately after the line number; we
- *     don't scan past leading whitespace.
- *   - All eligible annotations are threaded into one `assembleProgram`
- *     call so labels and equates are shared program-wide.
- *   - DATA lines that produce bytes (with no errors) are rewritten via
- *     `applyLineEdit`; the new bytes are post-flagged `'automatic'` so
- *     the UI can distinguish tool-driven edits from user-typed ones.
- *   - Errors are attributed per line (`lineIdx` + BASIC `lineNum`) for
- *     presentation in an error modal.
+ *   Phase 5 — DATA/REM hosts:
+ *     - Host-line eligibility per `oric-asm-syntax.md` — only `REM` and
+ *       `DATA` lines contribute annotations to the assembler.
+ *     - Detection is by token byte at `firstByte+4` (`TOKEN_REM` /
+ *       `TOKEN_DATA`) — per spec, the keyword must appear immediately
+ *       after the line number; we don't scan past leading whitespace.
+ *     - All eligible annotations are threaded into one `assembleProgram`
+ *       call so labels and equates are shared program-wide.
+ *     - DATA lines that produce bytes (with no errors) are rewritten via
+ *       `applyLineEdit`; new bytes are post-flagged `'automatic'`.
+ *
+ *   Phase 6 — CALL/POKE/DOKE/PEEK/DEEK back-patch hosts:
+ *     - Any line containing one of these token bytes (anywhere outside
+ *       strings and outside the `'` annotation) plus an annotation
+ *       whose first non-whitespace token is `.` or `-:` is a back-patch
+ *       host.
+ *     - Each token occurrence on the line is a patch site; the directive
+ *       list in the annotation pairs 1:1 with sites in source order.
+ *     - `.LABEL` substitutes the resolved symbol value (hex or decimal
+ *       per the original literal's format); `-` is a placeholder.
+ *     - Lines are rewritten via `applyLineEdit`, bytes flagged
+ *       `'automatic'`.
+ *
+ * Errors are attributed per line (`lineIdx` + BASIC `lineNum`) for
+ * presentation in an error modal.
  *
  * Byte-format in the rewritten DATA line is uniform uppercase `#XX` hex
  * for v1 — per-byte format preservation is tracked in `todo.md`.
+ * Back-patch literals follow the per-spec format-preservation rule.
  */
 
 import type { Program } from './decoder';
-import { TOKEN_DATA, TOKEN_REM } from './decoder';
+import {
+  TOKEN_DATA, TOKEN_REM,
+  TOKEN_CALL, TOKEN_POKE, TOKEN_DOKE, TOKEN_PEEK, TOKEN_DEEK,
+  KEYWORDS,
+} from './decoder';
 import { applyLineEdit } from './editor';
 import { assembleProgram, type Symbols } from './assembler6502';
 
@@ -96,7 +111,7 @@ export function applyAssembler(
     }
   }
 
-  // 4. Apply patches.  Line indices are stable across `applyLineEdit`
+  // 4. Apply Phase 5 patches.  Line indices are stable across `applyLineEdit`
   //    calls (byte offsets shift, but lines don't get renumbered), so
   //    iteration order doesn't matter.
   const linesPatched: number[] = [];
@@ -104,6 +119,15 @@ export function applyAssembler(
     applyLineEdit(prog, p.lineIdx, p.newText);
     markLineEditsAutomatic(prog, p.lineIdx);
     linesPatched.push(p.lineIdx);
+  }
+
+  // 5. Phase 6: walk every line and apply back-patch directives to those
+  //    that are back-patch hosts.  The symbol table from Phase 5's
+  //    `assembleProgram` pass provides the label values.
+  for (let i = 0; i < prog.lines.length; i++) {
+    const res = applyBackPatchesToLine(prog, i, symbols);
+    errors.push(...res.errors);
+    if (res.patched) linesPatched.push(i);
   }
 
   return { linesPatched, errors, symbols };
@@ -171,4 +195,249 @@ function markLineEditsAutomatic(prog: Program, lineIdx: number): void {
     const bi = prog.bytes[i];
     if (bi.edited === 'explicit') bi.edited = 'automatic';
   }
+}
+
+// ── Phase 6: back-patch directives ──────────────────────────────────────────
+
+type BackPatchDirective =
+  | { kind: 'label'; name: string }
+  | { kind: 'skip' };
+
+/** True when `b` is one of the back-patch verb token bytes. */
+function isBackPatchToken(b: number): boolean {
+  return b === TOKEN_CALL || b === TOKEN_POKE || b === TOKEN_DOKE
+      || b === TOKEN_PEEK || b === TOKEN_DEEK;
+}
+
+/** Test whether an annotation's prefix marks it as back-patch directives —
+ *  i.e. first non-whitespace token is `.` (label) or `-:` (placeholder
+ *  followed by colon).  Whitespace between `-` and `:` is permitted. */
+function isBackPatchAnnotation(annotation: string): boolean {
+  const t = annotation.trimStart();
+  if (t.startsWith('.')) return true;
+  if (t.startsWith('-')) {
+    const after = t.slice(1).trimStart();
+    if (after.startsWith(':')) return true;
+  }
+  return false;
+}
+
+/** Strip a trailing `;` comment from a back-patch annotation.  Mirrors
+ *  the assembler's `stripComment` — the back-patch directive syntax
+ *  doesn't use `'c` literals, so tracking char-literal context is
+ *  unnecessary here, but we keep the logic aligned for consistency. */
+function stripBackPatchComment(s: string): string {
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === ';') return s.slice(0, i);
+  }
+  return s;
+}
+
+/** Parse a back-patch annotation into a list of directives.  Empty
+ *  slots (between `:`s) are tolerated and skipped; each non-empty slot
+ *  must be either `-` or `.IDENT`.  Returns the directive list, or an
+ *  `{error}` describing the first invalid slot. */
+function parseBackPatchDirectives(
+  annotation: string,
+): { directives: BackPatchDirective[] } | { error: string } {
+  const stripped = stripBackPatchComment(annotation);
+  const parts = stripped.split(':');
+  const directives: BackPatchDirective[] = [];
+  for (const raw of parts) {
+    const t = raw.trim();
+    if (t === '') continue;
+    if (t === '-') { directives.push({ kind: 'skip' }); continue; }
+    const m = t.match(/^\.([A-Za-z][A-Za-z0-9_]*)$/);
+    if (m) { directives.push({ kind: 'label', name: m[1] }); continue; }
+    return { error: `invalid back-patch directive: ${t}` };
+  }
+  return { directives };
+}
+
+/** Count back-patch verb tokens on a line, respecting string-literal
+ *  context and stopping at the first `'` annotation marker. */
+function countBackPatchTokens(prog: Program, lineIdx: number): number {
+  const line = prog.lines[lineIdx];
+  let count = 0;
+  let inString = false;
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
+    const b = prog.bytes[i].v;
+    if (b === 0) break;              // line terminator
+    if (inString) { if (b === 0x22) inString = false; continue; }
+    if (b === 0x22) { inString = true; continue; }
+    if (b === 0x27) break;            // annotation starts — stop scanning
+    if (isBackPatchToken(b)) count++;
+  }
+  return count;
+}
+
+/** Render a single byte as its text form — printable ASCII as itself,
+ *  keyword bytes as their `KEYWORDS[]` entry, anything else as `«0xXX»`
+ *  (which `parseLine` will flag on re-tokenisation, though back-patch
+ *  lines typically don't contain error bytes). */
+function renderByte(b: number): string {
+  if (b >= 0x20 && b <= 0x7E) return String.fromCharCode(b);
+  if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) return KEYWORDS[b - 0x80];
+  return `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
+}
+
+/** Format a resolved symbol value as a back-patch literal, matching the
+ *  original literal's format.  Hex → `#XXXX` uppercase 4 digits; decimal
+ *  → base-10 no leading zeros. */
+function formatBackPatchValue(value: number, originalLiteral: string): string {
+  const isHex = originalLiteral.startsWith('#');
+  if (isHex) return '#' + (value & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  return (value & 0xFFFF).toString(10);
+}
+
+/** Reconstruct the line's BASIC text with back-patch substitutions
+ *  applied at each patch site.  Called after the directive count has
+ *  been verified to match the patch-site count — we don't defend
+ *  against mismatch here.  Returns the new line text and any per-site
+ *  errors (undefined symbol, non-literal argument). */
+function rewriteLineForBackPatch(
+  prog:       Program,
+  lineIdx:    number,
+  directives: BackPatchDirective[],
+  symbols:    Symbols,
+): { newText: string; errors: string[] } {
+  const line    = prog.lines[lineIdx];
+  const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
+  const errors: string[] = [];
+
+  let out          = `${lineNum} `;
+  let inString     = false;
+  let inAnnotation = false;
+  let siteIdx      = 0;
+  let i            = line.firstByte + 4;
+
+  while (i <= line.lastByte) {
+    const b = prog.bytes[i].v;
+    if (b === 0) break;
+
+    // Once the annotation starts, everything else is passthrough — we
+    // don't want to "patch" occurrences of verb tokens that the BASIC
+    // tokeniser may have stamped inside the annotation's text.
+    if (!inAnnotation && !inString && b === 0x27) inAnnotation = true;
+    if (inAnnotation) { out += renderByte(b); i++; continue; }
+
+    // String-literal tracking.
+    if (inString) {
+      out += renderByte(b);
+      if (b === 0x22) inString = false;
+      i++;
+      continue;
+    }
+    if (b === 0x22) { out += '"'; inString = true; i++; continue; }
+
+    // Patch-site verb token.
+    if (isBackPatchToken(b)) {
+      out += KEYWORDS[b - 0x80];
+      i++;
+
+      // Emit any whitespace and an optional opening paren before the literal.
+      while (i <= line.lastByte) {
+        const bj = prog.bytes[i].v;
+        if (bj === 0) break;
+        if (bj === 0x20 || bj === 0x28) { out += String.fromCharCode(bj); i++; continue; }
+        break;
+      }
+
+      // Collect the literal's raw ASCII text, if present.  A literal is
+      // `#` followed by hex chars, or a run of decimal digits.
+      let literal = '';
+      while (i <= line.lastByte) {
+        const bk = prog.bytes[i].v;
+        if (bk === 0) break;
+        const cont =
+          (bk === 0x23 && literal.length === 0)           // leading #
+          || (bk >= 0x30 && bk <= 0x39)                   // 0-9
+          || (bk >= 0x41 && bk <= 0x46)                   // A-F
+          || (bk >= 0x61 && bk <= 0x66);                  // a-f
+        if (!cont) break;
+        literal += String.fromCharCode(bk);
+        i++;
+      }
+
+      // Apply the paired directive.
+      const directive = directives[siteIdx];
+      siteIdx++;
+
+      if (!directive || directive.kind === 'skip') {
+        out += literal;
+        continue;
+      }
+
+      // directive.kind === 'label'.
+      if (literal === '' || literal === '#') {
+        errors.push(
+          `back-patch at '${KEYWORDS[b - 0x80]}' has no numeric literal argument`,
+        );
+        out += literal;
+        continue;
+      }
+      const sym = symbols.get(directive.name);
+      if (!sym) {
+        errors.push(`undefined symbol in back-patch: ${directive.name}`);
+        out += literal;
+        continue;
+      }
+      out += formatBackPatchValue(sym.value, literal);
+      continue;
+    }
+
+    // Default: render and advance.
+    out += renderByte(b);
+    i++;
+  }
+
+  return { newText: out, errors };
+}
+
+/** Orchestrate back-patching for one line: eligibility check, directive
+ *  parsing, count check, rewrite, apply.  Returns whether the line was
+ *  patched and any errors to surface. */
+function applyBackPatchesToLine(
+  prog:    Program,
+  lineIdx: number,
+  symbols: Symbols,
+): { patched: boolean; errors: AsmApplyError[] } {
+  const line    = prog.lines[lineIdx];
+  const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
+
+  // Gate: line must contain at least one back-patch token AND the
+  // annotation must carry a back-patch-shaped prefix (`.` or `-:`).
+  const annotation = extractAnnotation(line.v);
+  if (!isBackPatchAnnotation(annotation)) return { patched: false, errors: [] };
+  const siteCount = countBackPatchTokens(prog, lineIdx);
+  if (siteCount === 0) return { patched: false, errors: [] };
+
+  // Parse the directive list.
+  const parsed = parseBackPatchDirectives(annotation);
+  if ('error' in parsed) {
+    return { patched: false, errors: [{ lineIdx, lineNum, message: parsed.error }] };
+  }
+
+  // Enforce 1:1 pairing with patch sites.
+  if (parsed.directives.length !== siteCount) {
+    return {
+      patched: false,
+      errors: [{
+        lineIdx, lineNum,
+        message:
+          `back-patch directive count ${parsed.directives.length} ` +
+          `doesn't match ${siteCount} patch site${siteCount === 1 ? '' : 's'} on the line`,
+      }],
+    };
+  }
+
+  // Rewrite the line.
+  const { newText, errors: siteErrors } =
+    rewriteLineForBackPatch(prog, lineIdx, parsed.directives, symbols);
+  const wrapped: AsmApplyError[] = siteErrors.map(m => ({ lineIdx, lineNum, message: m }));
+  if (wrapped.length > 0) return { patched: false, errors: wrapped };
+
+  applyLineEdit(prog, lineIdx, newText);
+  markLineEditsAutomatic(prog, lineIdx);
+  return { patched: true, errors: [] };
 }

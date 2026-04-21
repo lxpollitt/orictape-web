@@ -15,7 +15,7 @@ Annotations are only interpreted as assembler input when they appear on a line w
 
 - `REM` — single statement per line.  Annotation must consist of valid assembly fragments only (declarations like `ORG`, labels, and equates, separated by `:`).  Human comments are permitted only at the very end of the annotation via `;`.
 - `DATA` — single statement per line.  The annotation's assembled bytes overwrite the DATA's values in full — any pre-existing values on the DATA (in any count or format) are replaced by the assembled output.  Annotation must consist of valid assembly fragments only (instructions, and/or `:`-separated local label declarations); trailing `;` comments are permitted.
-- `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` — may appear as one or more `:`-separated statements on the same line.  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
+- `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` — any line containing one or more of these tokens (as statements, or as function calls inside expressions).  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
 
 Annotations on lines of any other kind (e.g. `PRINT`, `LET`, `GOTO`) — and REM/DATA lines that violate the single-statement rule above — are treated as human comments and ignored outright.
 
@@ -76,12 +76,13 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 
 ## BASIC Back-Patch Directives
 
-On a BASIC statement line (`CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`), an annotation introduced by `.LABEL` instructs the tool to replace the address literal in that statement with the resolved label address.
+On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, or `DEEK` tokens (as statements or as function calls inside expressions), the annotation carries back-patch directives: `.LABEL` replaces the address literal at a patch site with the resolved label address; `-` is a placeholder meaning "don't patch this site".
 
-- **Positional pairing:** annotation directives pair 1:1 with BASIC statements on the line, using `:` as the separator (mirroring BASIC's own `:`).
-- **Placeholder:** `-` means "don't patch this position."
-- **Size:** inferred from the BASIC verb. `CALL`, `DOKE`, `DEEK`, `POKE`, `PEEK` all take a 16-bit address as their first argument; that's the literal patched.
-- **Format preservation:** if the original literal was hex (e.g. `#9800`), the patched value is written back as hex in the same style.
+- **Patch sites.**  Each occurrence of `CALL`, `POKE`, `DOKE`, `PEEK`, or `DEEK` on the line is a patch site, in BASIC-source order.  The site's literal is the first numeric constant immediately following the verb token (after an opening `(` in the function-call cases), terminated by the first `,`, `)`, `:`, BASIC operator, or end-of-line.
+- **Positional pairing.**  Directives pair 1:1 with patch sites, using `:` as the separator (mirroring BASIC's `:`).  A count mismatch is an error — use `-` to skip positions.
+- **Size.**  Every patch site holds a 16-bit address.
+- **Non-literal sites.**  If a patch site's argument is a variable or expression (not a numeric constant), only `-` is valid; `.LABEL` on such a site is an error.
+- **Format preservation.**  If the original literal was hex (e.g. `#04`, `#9800`), the patched value is written back as hex in `#XXXX` form (uppercase, 4 digits).  If the original literal was decimal, the patched value is written as decimal with no leading zeros.
 
 ## Identifier Rules
 

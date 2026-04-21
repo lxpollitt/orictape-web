@@ -329,6 +329,272 @@ test('instruction on a REM line does not error, bytes discarded', () => {
   return null;
 });
 
+// ── Phase 6: back-patch directives ───────────────────────────────────────────
+
+test('CALL back-patch with hex literal preserves hex format', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.LOOPA",
+    "20 DATA 0 ' RTS",
+    "30 CALL #0000 ' .LOOPA",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!r.linesPatched.includes(2)) return `line 2 should be patched`;
+  // LOOPA declared at PC=$9800 (ORG sets it, and .LOOPA follows).
+  if (!/^30 CALL #9800/.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  return null;
+});
+
+test('POKE back-patch with decimal literal preserves decimal format', () => {
+  const p = mkProgram([
+    "10 REM ' .LIVES = $04",
+    "20 POKE 0,3 ' .LIVES",   // original literal "0" is decimal → emit decimal
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
+  if (!/^20 POKE 4,/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('POKE back-patch leaves value arg untouched', () => {
+  const p = mkProgram([
+    "10 REM ' .LIVES = $04",
+    "20 POKE #0000,3 ' .LIVES",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 POKE #0004,3/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('multiple patch sites paired 1:1 with directives', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.LOOPA",
+    "20 DATA 0 ' RTS",
+    "30 CALL #0000:CALL #F421 ' .LOOPA:-",  // patch first, skip second
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^30 CALL #9800:CALL #F421/.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  return null;
+});
+
+test("'-' placeholder alone (-:.FOO) skips first site", () => {
+  const p = mkProgram([
+    "10 REM ' .FOO = $1234",
+    "20 CALL #9800:CALL #0000 ' -:.FOO",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 CALL #9800:CALL #1234/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('PEEK inside an expression is a patch site', () => {
+  const p = mkProgram([
+    "10 REM ' .ADDR = $BB80",
+    "20 LET X = PEEK(#0000) ' .ADDR",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/PEEK\(#BB80\)/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('DEEK inside an expression is a patch site', () => {
+  const p = mkProgram([
+    "10 REM ' .ADDR = $BB80",
+    "20 LET Y = DEEK(#0000) + 1 ' .ADDR",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/DEEK\(#BB80\)/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('expression after literal is left untouched', () => {
+  // CALL #9800 + OFFSET ' .BASE — patches just the literal, `+ OFFSET` unchanged.
+  const p = mkProgram([
+    "10 REM ' .BASE = $A000",
+    "20 CALL #0000+OFFSET ' .BASE",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 CALL #A000\+OFFSET/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+// ── Phase 6: line-level eligibility gate ─────────────────────────────────────
+
+test('line with CALL but non-backpatch annotation is ignored', () => {
+  // The annotation starts with "PRINT", not `.` or `-:`, so the line is
+  // not a back-patch host.  The CALL's literal should be left intact.
+  const p = mkProgram([
+    "10 CALL #9800 ' PRINT something",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.length !== 0) return `unexpectedly patched: ${JSON.stringify(r.linesPatched)}`;
+  return null;
+});
+
+test('line without any back-patch token is ignored even with back-patch annotation', () => {
+  // PRINT line with a dot-prefixed annotation — no patch-site tokens,
+  // so the line contributes nothing and no errors fire.
+  const p = mkProgram([
+    "10 PRINT \"HI\" ' .FOO",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.length !== 0) return `unexpectedly patched`;
+  return null;
+});
+
+// ── Phase 6: error paths ─────────────────────────────────────────────────────
+
+test('count mismatch produces an error', () => {
+  // Two CALLs, one directive → error.
+  const p = mkProgram([
+    "10 REM ' .FOO = $1234",
+    "20 CALL #0000:CALL #1111 ' .FOO",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  if (!/doesn't match/i.test(r.errors[0].message)) return `wrong message: ${r.errors[0].message}`;
+  return null;
+});
+
+test('undefined back-patch label errors', () => {
+  const p = mkProgram([
+    "10 CALL #0000 ' .UNKNOWN",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  if (!/undefined symbol.*UNKNOWN/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('non-literal argument with .LABEL directive errors', () => {
+  // CALL X — variable arg, no literal to patch.  Directive is `.BASE`.
+  const p = mkProgram([
+    "10 REM ' .BASE = $9800",
+    "20 CALL X ' .BASE",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  if (!/has no numeric literal argument/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('non-literal argument with "-" placeholder is fine', () => {
+  // CALL X — no literal, but directive is `-`.  No error, no change.
+  const p = mkProgram([
+    "10 REM ' .BASE = $9800",
+    "20 CALL X:CALL #0000 ' -:.BASE",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 CALL X:CALL #9800/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('invalid directive syntax errors', () => {
+  const p = mkProgram([
+    "10 CALL #0000 ' .123FOO",  // identifier can't start with digit
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  if (!/invalid back-patch directive/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+// ── Phase 6: automatic-marking and annotation preservation ───────────────────
+
+test('back-patched bytes are marked edited: "automatic"', () => {
+  const p = mkProgram([
+    "10 REM ' .FOO = $9800",
+    "20 CALL #0000 ' .FOO",
+  ]);
+  applyAssembler(p);
+  const line = p.lines[1];
+  let sawAutomatic = false;
+  let sawExplicit  = false;
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    if (p.bytes[i].edited === 'automatic') sawAutomatic = true;
+    if (p.bytes[i].edited === 'explicit')  sawExplicit  = true;
+  }
+  if (sawExplicit)   return `some byte still marked "explicit"`;
+  if (!sawAutomatic) return `expected some "automatic" bytes after back-patch`;
+  return null;
+});
+
+test('annotation is preserved across a back-patch rewrite', () => {
+  const p = mkProgram([
+    "10 REM ' .FOO = $9800",
+    "20 CALL #0000 ' .FOO  ; jump to setup",
+  ]);
+  applyAssembler(p);
+  const v = p.lines[1].v;
+  if (!v.includes("' .FOO")) return `directive text lost: ${v}`;
+  if (!v.includes('; jump to setup')) return `trailing comment lost: ${v}`;
+  return null;
+});
+
+// ── Phase 6: cross-phase interaction ─────────────────────────────────────────
+
+test('Phase 5 and Phase 6 symbols are shared through one call', () => {
+  // LIVES is an equate on a REM line (Phase 5 declaration).
+  // Line 2 is a DATA-line instruction using LIVES (Phase 5 patches it).
+  // Line 3 is a POKE using LIVES as back-patch target (Phase 6 patches it).
+  const p = mkProgram([
+    "10 REM ' .LIVES = $04",
+    "20 DATA 0,0 ' DEC LIVES",           // Phase 5: emits C6 04
+    "30 POKE #0000,3 ' .LIVES",          // Phase 6: patches #0000 → #0004
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!r.linesPatched.includes(1)) return `line 1 (Phase 5) not patched`;
+  if (!r.linesPatched.includes(2)) return `line 2 (Phase 6) not patched`;
+  if (!/^20 DATA #C6,#04/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  if (!/^30 POKE #0004,3/.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  return null;
+});
+
+test('back-patching a label works', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA 0 ' .START:RTS",           // .START declares at $9800
+    "30 CALL #0000 ' .START",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^30 CALL #9800/.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  return null;
+});
+
+// ── Phase 6: idempotence ─────────────────────────────────────────────────────
+
+test('running applyAssembler twice yields identical back-patched line', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.LOOPA",
+    "20 DATA 0 ' RTS",
+    "30 CALL #0000 ' .LOOPA",
+  ]);
+  applyAssembler(p);
+  const first = p.lines[2].v;
+  applyAssembler(p);
+  const second = p.lines[2].v;
+  if (first !== second) return `line 2 changed between runs:\n  first:  ${first}\n  second: ${second}`;
+  return null;
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;
