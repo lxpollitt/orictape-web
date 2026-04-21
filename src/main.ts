@@ -201,6 +201,19 @@ function showProgramOverview(): void {
  *  format "${base}_${name}_${startSec}s"; for a TAP-loaded program we
  *  fall back to the TAP filename.  Persisted in TAP metadata as `source`
  *  so it round-trips through save / reload. */
+/** Reflect whether the program currently has pointer/terminator issues on
+ *  the "Fix pointers & terminators" toggle: checkbox unchecked + enabled
+ *  when there are issues to fix, checked + disabled when everything is
+ *  already clean.  Called by renderAll (which computes the full panel
+ *  state on navigation) and by the edit-completion handler (which needs
+ *  the toggle to re-reflect state after edits that don't trigger a full
+ *  renderAll). */
+function updateFixToggle(prog: Program): void {
+  const hasIssues = !!prog.pointerAndTerminatorIssues;
+  fixToggle.checked  = !hasIssues;
+  fixToggle.disabled = !hasIssues;
+}
+
 function computeOriginalSource(prog: Program, tape: TapeData): string {
   if (tape.fromTap) return tape.filename;
   const refByteIdx = prog.lines.length > 0 ? prog.lines[0].firstByte : 0;
@@ -536,14 +549,7 @@ function renderAll(): void {
   basicTypeEl.textContent = prog ? 'BASIC program' : '';
   wrapLabelEl.hidden = !prog;
   fixLabelEl.hidden = !prog;
-  if (prog) {
-    // Reflect whether the program has any pointer/terminator issues: checkbox
-    // is unchecked + enabled when there are issues to fix, checked + disabled
-    // when everything is already clean ("in fixed state").
-    const hasIssues = !!prog.pointerAndTerminatorIssues;
-    fixToggle.checked  = !hasIssues;
-    fixToggle.disabled = !hasIssues;
-  }
+  if (prog) updateFixToggle(prog);
   if (!prog) { clearPanels(); return; }
   renderHex(prog, selByte);
   renderBasic(prog);
@@ -777,6 +783,14 @@ function elementEditClass(status: 'explicit' | 'automatic' | null): string {
 }
 
 function renderBasic(prog: Program): void {
+  // Keep the fix-pointers-and-terminators toggle in sync with the
+  // program's current pointerAndTerminatorIssues flag.  Running this on
+  // every BASIC render covers all the edit pathways (Shift-Esc restore,
+  // inline line split / join, delete-line, textarea-apply, etc.) without
+  // having to update each direct call site.  Cheap — two DOM property
+  // writes — so no harm running it on non-state-changing renders too.
+  updateFixToggle(prog);
+
   if (!prog.lines.length) {
     basicPanel.innerHTML =
       '<p class="hint">No BASIC content decoded.</p>' +

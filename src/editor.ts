@@ -354,6 +354,7 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
   // (The predecessor line's pointer doesn't need adjusting — the new next line
   // now starts at oldFirst, which is where the deleted line was.)
   adjustLineOffsets(prog, delta, lineIdx);
+  adjustHeaderEndAddr(prog, delta);
 
   // Store the combined original bytes on the inheriting neighbour.
   // Done after adjustLineOffsets so the neighbour's byte indices are correct.
@@ -439,6 +440,7 @@ export function restoreLineToOriginalBytes(prog: Program, lineIdx: number): void
 
   // Adjust subsequent lines.
   adjustLineOffsets(prog, delta, lineIdx + lineInfos.length);
+  adjustHeaderEndAddr(prog, delta);
 
   // Re-run all post-processing flags.
   flagAll(prog);
@@ -749,6 +751,7 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
   // --- Adjust subsequent lines: byte stream pointers then line info ---
 
   adjustLineOffsets(prog, delta, lineIdx + 1);
+  adjustHeaderEndAddr(prog, delta);
 
   // Re-run all post-processing flags.
   flagAll(prog);
@@ -904,6 +907,7 @@ export function splitLineWithEdits(
   // --- Adjust subsequent lines (after the two new lines) ---
 
   adjustLineOffsets(prog, delta, lineIdx + 2);
+  adjustHeaderEndAddr(prog, delta);
 
   // Re-run all post-processing flags.
   flagAll(prog);
@@ -1005,6 +1009,7 @@ export function joinLinesWithEdit(
 
   // Adjust subsequent lines (from secondIdx onwards, since second was removed).
   adjustLineOffsets(prog, delta, secondIdx);
+  adjustHeaderEndAddr(prog, delta);
 
   // Re-run all post-processing flags.
   flagAll(prog);
@@ -1213,6 +1218,39 @@ function fixLinePointers(prog: Program): void {
  *
  * No-op on programs with no lines.
  */
+/**
+ * Adjust the header's end address by a byte delta — analogous to how
+ * adjustLineOffsets shifts each line's next-line pointer.  Called by
+ * edit functions after a byte-stream length change, before flagAll.
+ *
+ * Preserves any pre-existing error in endAddr: if the stored value was
+ * already off by N before the edit, it stays off by N afterwards (same
+ * semantics as next-line pointer adjustment).  To recalibrate endAddr
+ * to match the actual program layout use fixHeaderEndAddr instead.
+ *
+ * No-op on programs with no lines or a zero delta.
+ */
+function adjustHeaderEndAddr(prog: Program, delta: number): void {
+  if (delta === 0 || prog.lines.length === 0) return;
+  const newEndAddr = prog.header.endAddr + delta;
+  const newEndHi   = (newEndAddr >> 8) & 0xFF;
+  const newEndLo   = newEndAddr & 0xFF;
+  const hiIdx      = prog.header.byteIndex + 4;
+  const loIdx      = prog.header.byteIndex + 5;
+
+  // Same originalBytesDelta pattern as fixHeaderEndAddr — snapshot the
+  // full header originals before replacing, so displaced values round-
+  // trip through save/load metadata.
+  const fullOriginal = getHeaderOriginalBytes(prog);
+  prog.bytes[hiIdx] = fullOriginal.length > 4 && newEndHi === fullOriginal[4].v ? fullOriginal[4]
+    : { v: newEndHi, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+  prog.bytes[loIdx] = fullOriginal.length > 5 && newEndLo === fullOriginal[5].v ? fullOriginal[5]
+    : { v: newEndLo, firstBit: 0, lastBit: 0, unclear: false, chkErr: false, edited: 'automatic' };
+  storeHeaderOriginalBytesDelta(prog, fullOriginal);
+
+  prog.header.endAddr = newEndAddr;
+}
+
 export function fixHeaderEndAddr(prog: Program): void {
   if (prog.lines.length === 0) return;
   const lastLine = prog.lines[prog.lines.length - 1];
