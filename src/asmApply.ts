@@ -114,7 +114,7 @@ export function applyAssembler(
   // 3. Precompute patches (DATA lines with clean output) and errors.
   //    We separate planning from applying so `applyLineEdit`'s byte-stream
   //    side-effects don't disturb later lookups.
-  const patches: { lineIdx: number; newText: string }[] = [];
+  const patches: { lineIdx: number; newText: string; ownedByteIndices: number[] }[] = [];
   const errors:  AsmApplyError[] = [];
 
   for (let i = 0; i < prog.lines.length; i++) {
@@ -131,20 +131,22 @@ export function applyAssembler(
       state.bytes.length  >  0  &&
       hostKind(prog, i)   === 'data';
     if (patchable) {
-      patches.push({
-        lineIdx: i,
-        newText: buildNewDataLineText(prog, i, state.bytes, state.formats, state.minDigits),
-      });
+      const { newText, ownedByteIndices } =
+        buildNewDataLineText(prog, i, state.bytes, state.formats, state.minDigits);
+      patches.push({ lineIdx: i, newText, ownedByteIndices });
     }
   }
 
   // 4. Apply Phase 5 patches.  Line indices are stable across `applyLineEdit`
   //    calls (byte offsets shift, but lines don't get renumbered), so
-  //    iteration order doesn't matter.
+  //    iteration order doesn't matter.  `markAssemblerBytesAutomatic`
+  //    precisely flips only the bytes the assembler produced; any user
+  //    `'explicit'` edits on other parts of the line (line number,
+  //    annotation, etc.) survive unchanged.
   const linesPatched: number[] = [];
   for (const p of patches) {
     applyLineEdit(prog, p.lineIdx, p.newText);
-    markLineEditsAutomatic(prog, p.lineIdx);
+    markAssemblerBytesAutomatic(prog, p.ownedByteIndices);
     linesPatched.push(p.lineIdx);
   }
 
@@ -276,14 +278,27 @@ function formatDataValues(
  *  overwritten with `newBytes`, preserving any existing annotation
  *  chunk (from the first `'` to end-of-line) exactly.  The parallel
  *  `formats` / `minDigits` arrays come from pass 2 and record the
- *  hex-vs-decimal choice and min emit width per byte. */
+ *  hex-vs-decimal choice and min emit width per byte.
+ *
+ *  Also returns `ownedByteIndices` — the absolute indices in
+ *  `prog.bytes` where the new DATA values will land after
+ *  `applyLineEdit` re-tokenises the text.  Used for precise attribution
+ *  of the new bytes as `edited: 'automatic'` without touching user
+ *  edits elsewhere on the line.
+ *
+ *  Index math: after parseLine, the line-number text becomes 2 bytes
+ *  in the header slot (not content) and the content begins at
+ *  `firstByte + 4`.  Our rebuild puts `"DATA "` at content bytes 0–1
+ *  (TOKEN_DATA + space) and the values at content bytes 2 onward, each
+ *  value character tokenising to one ASCII byte in the DATA literal
+ *  section. */
 function buildNewDataLineText(
   prog:      Program,
   lineIdx:   number,
   newBytes:  number[],
   formats:   DataFormat[],
   minDigits: number[],
-): string {
+): { newText: string; ownedByteIndices: number[] } {
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
 
@@ -292,17 +307,29 @@ function buildNewDataLineText(
   const annot = apost >= 0 ? v.slice(apost) : '';   // includes the ' itself
   const sep   = annot ? ' ' : '';
 
-  return `${lineNum} DATA ${formatDataValues(newBytes, formats, minDigits)}${sep}${annot}`;
+  const values = formatDataValues(newBytes, formats, minDigits);
+  const newText = `${lineNum} DATA ${values}${sep}${annot}`;
+
+  const valuesStartByte = line.firstByte + 4 + 2;  // content starts at +4; values at content offset 2
+  const ownedByteIndices: number[] = [];
+  for (let k = 0; k < values.length; k++) ownedByteIndices.push(valuesStartByte + k);
+
+  return { newText, ownedByteIndices };
 }
 
-/** Downgrade any `edited: 'explicit'` marks within `lineIdx`'s byte
- *  range to `'automatic'`.  Called immediately after `applyLineEdit`
- *  so the new bytes reflect tool origin rather than user input. */
-function markLineEditsAutomatic(prog: Program, lineIdx: number): void {
-  const line = prog.lines[lineIdx];
-  for (let i = line.firstByte; i <= line.lastByte; i++) {
-    const bi = prog.bytes[i];
-    if (bi.edited === 'explicit') bi.edited = 'automatic';
+/** Downgrade `edited: 'explicit'` to `'automatic'` for exactly the
+ *  `prog.bytes` indices the assembler produced on this re-assembly run.
+ *  The index list comes from `buildNewDataLineText` /
+ *  `rewriteLineForBackPatch`, both of which track which of their
+ *  emitted bytes came from the assembler's output (as opposed to
+ *  being copied verbatim from the input line).  Byte positions
+ *  elsewhere on the line — line number, keyword, annotation, commas,
+ *  unpatched placeholder literals, etc. — are untouched, preserving
+ *  any user `'explicit'` edits they carry. */
+function markAssemblerBytesAutomatic(prog: Program, indices: number[]): void {
+  for (const idx of indices) {
+    const bi = prog.bytes[idx];
+    if (bi !== undefined && bi.edited === 'explicit') bi.edited = 'automatic';
   }
 }
 
@@ -402,23 +429,53 @@ function formatBackPatchValue(value: number, originalLiteral: string): string {
 /** Reconstruct the line's BASIC text with back-patch substitutions
  *  applied at each patch site.  Called after the directive count has
  *  been verified to match the patch-site count — we don't defend
- *  against mismatch here.  Returns the new line text and any per-site
- *  errors (undefined symbol, non-literal argument). */
+ *  against mismatch here.
+ *
+ *  Returns the new line text, any per-site errors (undefined symbol,
+ *  non-literal argument), and `ownedByteIndices` — the absolute
+ *  `prog.bytes` indices of just the bytes the assembler generated
+ *  (substituted-literal bytes).  Used for precise `'automatic'`
+ *  attribution that leaves user edits elsewhere on the line untouched.
+ *
+ *  Index math: content bytes begin at `firstByte + 4`.  We advance a
+ *  `contentByteOffset` counter by 1 per output byte as we emit — one
+ *  emit-unit tokenises to one byte (a keyword text like `"CALL"` →
+ *  `TOKEN_CALL`, a single ASCII char → itself, etc.).  Substituted
+ *  literals are runs of pure ASCII (`#`, hex/dec digits), so each char
+ *  is its own output byte. */
 function rewriteLineForBackPatch(
   prog:       Program,
   lineIdx:    number,
   directives: BackPatchDirective[],
   symbols:    Symbols,
-): { newText: string; errors: string[] } {
+): { newText: string; errors: string[]; ownedByteIndices: number[] } {
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
   const errors: string[] = [];
+  const ownedByteIndices: number[] = [];
 
-  let out          = `${lineNum} `;
-  let inString     = false;
-  let inAnnotation = false;
-  let siteIdx      = 0;
-  let i            = line.firstByte + 4;
+  let out               = `${lineNum} `;
+  let inString          = false;
+  let inAnnotation      = false;
+  let siteIdx           = 0;
+  let i                 = line.firstByte + 4;
+  let contentByteOffset = 0;                       // relative to firstByte + 4
+
+  // Emit exactly one content byte's worth of text (keyword, ASCII, hex
+  // escape — anything that tokenises back to one byte).
+  const emitByte = (s: string): void => {
+    out += s;
+    contentByteOffset++;
+  };
+  // Emit an ASCII run where each char is its own content byte,
+  // optionally flagging those bytes as assembler-owned.
+  const emitAsciiRun = (s: string, owned: boolean): void => {
+    for (let k = 0; k < s.length; k++) {
+      if (owned) ownedByteIndices.push(line.firstByte + 4 + contentByteOffset);
+      contentByteOffset++;
+    }
+    out += s;
+  };
 
   while (i <= line.lastByte) {
     const b = prog.bytes[i].v;
@@ -428,27 +485,27 @@ function rewriteLineForBackPatch(
     // don't want to "patch" occurrences of verb tokens that the BASIC
     // tokeniser may have stamped inside the annotation's text.
     if (!inAnnotation && !inString && b === 0x27) inAnnotation = true;
-    if (inAnnotation) { out += renderByte(b); i++; continue; }
+    if (inAnnotation) { emitByte(renderByte(b)); i++; continue; }
 
     // String-literal tracking.
     if (inString) {
-      out += renderByte(b);
+      emitByte(renderByte(b));
       if (b === 0x22) inString = false;
       i++;
       continue;
     }
-    if (b === 0x22) { out += '"'; inString = true; i++; continue; }
+    if (b === 0x22) { emitByte('"'); inString = true; i++; continue; }
 
     // Patch-site verb token.
     if (isBackPatchToken(b)) {
-      out += KEYWORDS[b - 0x80];
+      emitByte(KEYWORDS[b - 0x80]);
       i++;
 
       // Emit any whitespace and an optional opening paren before the literal.
       while (i <= line.lastByte) {
         const bj = prog.bytes[i].v;
         if (bj === 0) break;
-        if (bj === 0x20 || bj === 0x28) { out += String.fromCharCode(bj); i++; continue; }
+        if (bj === 0x20 || bj === 0x28) { emitByte(String.fromCharCode(bj)); i++; continue; }
         break;
       }
 
@@ -473,7 +530,7 @@ function rewriteLineForBackPatch(
       siteIdx++;
 
       if (!directive || directive.kind === 'skip') {
-        out += literal;
+        emitAsciiRun(literal, false);    // echoing original literal; not owned
         continue;
       }
 
@@ -482,25 +539,25 @@ function rewriteLineForBackPatch(
         errors.push(
           `back-patch at '${KEYWORDS[b - 0x80]}' has no numeric literal argument`,
         );
-        out += literal;
+        emitAsciiRun(literal, false);    // emit original on error; not owned
         continue;
       }
       const sym = symbols.get(directive.name);
       if (!sym) {
         errors.push(`undefined symbol in back-patch: ${directive.name}`);
-        out += literal;
+        emitAsciiRun(literal, false);
         continue;
       }
-      out += formatBackPatchValue(sym.value, literal);
+      emitAsciiRun(formatBackPatchValue(sym.value, literal), true);
       continue;
     }
 
     // Default: render and advance.
-    out += renderByte(b);
+    emitByte(renderByte(b));
     i++;
   }
 
-  return { newText: out, errors };
+  return { newText: out, errors, ownedByteIndices };
 }
 
 /** Orchestrate back-patching for one line: eligibility check, directive
@@ -545,13 +602,13 @@ function applyBackPatchesToLine(
   }
 
   // Rewrite the line.
-  const { newText, errors: siteErrors } =
+  const { newText, errors: siteErrors, ownedByteIndices } =
     rewriteLineForBackPatch(prog, lineIdx, parsed.directives, symbols);
   const wrapped: AsmApplyError[] = siteErrors.map(m => ({ lineIdx, lineNum, message: m }));
   if (wrapped.length > 0) return { patched: false, errors: wrapped };
 
   applyLineEdit(prog, lineIdx, newText);
-  markLineEditsAutomatic(prog, lineIdx);
+  markAssemblerBytesAutomatic(prog, ownedByteIndices);
   return { patched: true, errors: [] };
 }
 

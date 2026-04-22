@@ -26,7 +26,7 @@
 
 import type { ByteInfo, LineInfo, Program } from '../src/decoder';
 import { emptyBitStream, buildLineElements } from '../src/decoder';
-import { parseLine } from '../src/editor';
+import { parseLine, applyLineEdit } from '../src/editor';
 import { applyAssembler } from '../src/asmApply';
 
 // ── Runner glue ──────────────────────────────────────────────────────────────
@@ -71,6 +71,13 @@ function mkProgram(lineTexts: string[]): Program {
   const START_ADDR = 0x0501;
   const bytes: ByteInfo[] = [];
   const lines: LineInfo[] = [];
+
+  // Nine-byte placeholder TAP header at the front of prog.bytes.
+  // `applyLineEdit` triggers `adjustHeaderEndAddr`, which writes to
+  // `prog.bytes[header.byteIndex + 4]` and `[+5]` — so we need real
+  // byte slots there or those writes clobber line content.  Values
+  // don't matter for the tests.
+  for (let i = 0; i < 9; i++) bytes.push(mkByte(0));
 
   let nextMemAddr = START_ADDR;
 
@@ -279,6 +286,168 @@ test('patched bytes are marked edited: "automatic", not "explicit"', () => {
   }
   if (sawExplicit)    return `at least one byte is still marked "explicit"`;
   if (!sawAutomatic)  return `no bytes marked "automatic" (expected some after re-writing)`;
+  return null;
+});
+
+// ── User-edit preservation across re-assembly ────────────────────────────────
+//
+// Pre-existing `'explicit'` edits from the user — anywhere on a line
+// except the specific bytes the assembler is rewriting — must survive
+// a re-assembly run.  The assembler tracks its own emitted byte
+// indices and only flips those to `'automatic'`.
+
+test("user's annotation edit stays 'explicit' after re-assembly", () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDA #$00"]);
+  // Simulate the user editing the annotation from `LDA #$00` to `LDA #$BB`.
+  // The two `B` chars replace the two `0` chars in the annotation and are
+  // marked `'explicit'` by applyLineEdit's normal LCS path.
+  applyLineEdit(p, 0, "10 DATA 0,0 ' LDA #$BB");
+
+  // Run the re-assembler.  DATA gets rewritten to match `LDA #$BB`.
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+
+  const line = p.lines[0];
+  // Find the annotation's last two bytes (the user's `BB`).  They sit
+  // just before the 0x00 terminator (or at the end of the line's byte
+  // range if the terminator isn't in range).
+  // Find the content terminator (0x00) searching from firstByte+4 —
+  // skipping the 4-byte line header whose line_num_hi can legitimately
+  // be 0x00 for small line numbers.
+  let end = line.lastByte;
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
+    if (p.bytes[i].v === 0) { end = i - 1; break; }
+  }
+  const b1 = p.bytes[end - 1];
+  const b0 = p.bytes[end];
+  if (b1.v !== 0x42 || b0.v !== 0x42) {
+    return `expected last two bytes to be 'B' 'B', got ${b1.v.toString(16)},${b0.v.toString(16)}`;
+  }
+  if (b0.edited !== 'explicit') return `last B: expected 'explicit', got ${b0.edited}`;
+  if (b1.edited !== 'explicit') return `penultimate B: expected 'explicit', got ${b1.edited}`;
+
+  // And the DATA-values region (assembler-owned) should be 'automatic'.
+  // Values start at firstByte+6 (after pointer+lineNum+TOKEN_DATA+space).
+  // Walk until we hit the space before the `'` annotation marker.
+  let apostIdx = -1;
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
+    if (p.bytes[i].v === 0x27) { apostIdx = i; break; }
+  }
+  if (apostIdx < 0) return 'no annotation marker post-run';
+  // DATA value bytes are firstByte+6 to apostIdx-2 (skipping the space
+  // before the apostrophe at apostIdx-1).  They should either be
+  // 'automatic' (the assembler wrote them) or undefined (bytes that
+  // LCS matched back to the original — e.g. the comma that happens to
+  // be at the same position in both old and new).  Crucially, none
+  // should still be 'explicit'.
+  let sawAutomatic = false;
+  for (let i = line.firstByte + 6; i < apostIdx - 1; i++) {
+    const b = p.bytes[i];
+    if (b.edited === 'explicit') {
+      return `DATA byte at ${i} ('${String.fromCharCode(b.v)}'): unexpected 'explicit'`;
+    }
+    if (b.edited === 'automatic') sawAutomatic = true;
+  }
+  if (!sawAutomatic) return 'expected at least one DATA byte marked automatic';
+  return null;
+});
+
+test("user's line-number edit stays 'explicit' after re-assembly", () => {
+  const p = mkProgram(["10 DATA 0 ' RTS"]);
+  // Simulate the user changing the line number from 10 to 20.
+  applyLineEdit(p, 0, "20 DATA 0 ' RTS");
+
+  const line = p.lines[0];
+  // Line-number low byte is at firstByte+2; user's 20 = 0x14.
+  if (p.bytes[line.firstByte + 2].v !== 0x14) {
+    return `line-number byte: expected 0x14, got 0x${p.bytes[line.firstByte + 2].v.toString(16)}`;
+  }
+  if (p.bytes[line.firstByte + 2].edited !== 'explicit') {
+    return `pre-run: line-number byte should be 'explicit', got ${p.bytes[line.firstByte + 2].edited}`;
+  }
+
+  // Run the re-assembler.  RTS → byte 0x60 replaces the DATA value.
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+
+  // Line-number edit must survive.
+  if (p.bytes[line.firstByte + 2].edited !== 'explicit') {
+    return `after re-run: line-number byte should remain 'explicit', got ${p.bytes[line.firstByte + 2].edited}`;
+  }
+  // Assembler output (the DATA value byte at firstByte+6) should be 'automatic'.
+  if (p.bytes[line.firstByte + 6].edited !== 'automatic') {
+    return `DATA value byte should be 'automatic', got ${p.bytes[line.firstByte + 6].edited}`;
+  }
+  return null;
+});
+
+test("user's annotation edit stays 'explicit' after back-patch", () => {
+  const p = mkProgram([
+    "10 REM ' .LOOP = $9800",
+    "20 CALL #0000 ' .LOOP",
+  ]);
+  // Simulate the user appending a ` ; note` comment to the back-patch
+  // directive's annotation.  The ` ; note` chars are new bytes and will
+  // be marked `'explicit'` by applyLineEdit.
+  applyLineEdit(p, 1, "20 CALL #0000 ' .LOOP ; note");
+
+  const line = p.lines[1];
+  // Walk to the last non-terminator byte; it should be the final 'e'
+  // of "note", marked 'explicit'.
+  // Find the content terminator (0x00) searching from firstByte+4 —
+  // skipping the 4-byte line header whose line_num_hi can legitimately
+  // be 0x00 for small line numbers.
+  let end = line.lastByte;
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
+    if (p.bytes[i].v === 0) { end = i - 1; break; }
+  }
+  if (p.bytes[end].v !== 0x65) {  // 'e' = 0x65
+    return `pre-run: last byte expected 'e', got 0x${p.bytes[end].v.toString(16)}`;
+  }
+  if (p.bytes[end].edited !== 'explicit') {
+    return `pre-run: last byte should be 'explicit', got ${p.bytes[end].edited}`;
+  }
+
+  // Run the re-assembler.  The #0000 literal gets back-patched to #9800.
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+
+  // Find the new end (skip past the 4-byte line header).
+  end = line.lastByte;
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
+    if (p.bytes[i].v === 0) { end = i - 1; break; }
+  }
+  // The user's trailing ` ; note` chars should all still be 'explicit'.
+  // Scan backward from end, checking the last 5 chars are 'note' (or 'note').
+  // Simpler: check the last byte ('e') is 'explicit'.
+  if (p.bytes[end].edited !== 'explicit') {
+    return `after re-run: last byte should remain 'explicit', got ${p.bytes[end].edited}`;
+  }
+
+  // The patched literal `#9800` should have at least one byte marked
+  // 'automatic' (bytes that differ from original `#0000`) and no bytes
+  // marked 'explicit' (the patch region is assembler-owned).  Bytes
+  // that coincidentally match the original via LCS stay undefined,
+  // which is fine.
+  let apostIdx = -1;
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
+    if (p.bytes[i].v === 0x27) { apostIdx = i; break; }
+  }
+  if (apostIdx < 0) return 'no annotation marker post-run';
+  let sawAutomaticDigit = false;
+  let litDigits = 0;
+  for (let i = line.firstByte + 4; i < apostIdx; i++) {
+    const b = p.bytes[i];
+    if (b.v >= 0x30 && b.v <= 0x39) {
+      litDigits++;
+      if (b.edited === 'explicit') {
+        return `literal digit byte at ${i}: unexpected 'explicit'`;
+      }
+      if (b.edited === 'automatic') sawAutomaticDigit = true;
+    }
+  }
+  if (litDigits !== 4)     return `expected 4 hex digits in literal, found ${litDigits}`;
+  if (!sawAutomaticDigit)  return 'expected at least one literal digit byte marked automatic';
   return null;
 });
 
