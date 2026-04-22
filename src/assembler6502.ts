@@ -196,22 +196,36 @@ for (let op = 0; op < 256; op++) {
 
 // ── Expressions (literals and symbol references) ───────────────────────────
 
+/** Format a DATA value should be emitted in when propagated from an
+ *  assembler operand literal back into a BASIC DATA statement.  `'hex'`
+ *  means `#XX` output, `'decimal'` means bare `<num>`.  Binary (`%…`)
+ *  maps to hex; ASCII char (`'c`) maps to decimal (per design note in
+ *  `oric-asm-syntax.md` / project decisions).  Opcodes and REL offsets
+ *  are always hex and don't consult this. */
+export type DataFormat = 'hex' | 'decimal';
+
 /** An expression is either a literal value or a reference to a named
  *  symbol (label or equate).  `forceWide` carries the "3+ hex digits"
  *  signal for literals; for symbols, size is determined at resolution
- *  time from the resolved symbol's `forceWide`. */
+ *  time from the resolved symbol's `forceWide`.  `dataFormat` records
+ *  which way a literal's bytes should be rendered back into DATA
+ *  statements (see {@link DataFormat}). */
 type Expr =
-  | { kind: 'lit'; value: number; forceWide: boolean }
+  | { kind: 'lit'; value: number; forceWide: boolean; dataFormat: DataFormat }
   | { kind: 'sym'; name: string };
 
 /** A resolved value — either what a literal Expr already carries, or the
  *  result of looking up a symbol in the symbol table.  `isLabel` is set
  *  for symbols declared via `.LABEL` (value = PC at declaration); equates
- *  and inline literals leave it undefined. */
+ *  and inline literals leave it undefined.  `dataFormat` is the DATA
+ *  rendering preference: inherited from the literal form for equates,
+ *  defaulting to `'hex'` for code labels (since labels are addresses
+ *  and hex reads more naturally). */
 export interface ResolvedSymbol {
-  value:     number;
-  forceWide: boolean;
-  isLabel?:  boolean;
+  value:      number;
+  forceWide:  boolean;
+  isLabel?:   boolean;
+  dataFormat: DataFormat;
 }
 // Short in-module alias to keep existing code tidy.
 type Resolved = ResolvedSymbol;
@@ -223,28 +237,31 @@ const IDENT_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /** Parse a numeric literal — `$HH[HH]` hex, `%…` binary, `'c` ASCII, or
  *  decimal — OR a bare identifier naming a label/equate.  Literals carry
- *  `forceWide` to distinguish `$04` (ZP-preferred) from `$0004` (ABS).
- *  Identifiers are resolved later against the symbol table. */
+ *  `forceWide` to distinguish `$04` (ZP-preferred) from `$0004` (ABS),
+ *  plus a `dataFormat` that records how re-emitting the literal into a
+ *  DATA statement should look (hex → `#XX`, decimal → bare digits; `%`
+ *  binary maps to hex, `'c` char maps to decimal).  Identifiers are
+ *  resolved later against the symbol table. */
 function parseExpr(text: string): Expr | { error: string } {
   const t = text.trim();
   if (t.length === 0) return { error: 'missing operand' };
   if (t.startsWith('$')) {
     const hex = t.slice(1);
     if (!/^[0-9A-Fa-f]+$/.test(hex)) return { error: `invalid hex literal: ${t}` };
-    return { kind: 'lit', value: parseInt(hex, 16), forceWide: hex.length >= 3 };
+    return { kind: 'lit', value: parseInt(hex, 16), forceWide: hex.length >= 3, dataFormat: 'hex' };
   }
   if (t.startsWith('%')) {
     const bin = t.slice(1);
     if (!/^[01]+$/.test(bin)) return { error: `invalid binary literal: ${t}` };
-    return { kind: 'lit', value: parseInt(bin, 2), forceWide: false };
+    return { kind: 'lit', value: parseInt(bin, 2), forceWide: false, dataFormat: 'hex' };
   }
   if (t.startsWith("'")) {
     const rest = t.slice(1);
     if (rest.length !== 1) return { error: `invalid ASCII literal: ${t}` };
-    return { kind: 'lit', value: rest.charCodeAt(0), forceWide: false };
+    return { kind: 'lit', value: rest.charCodeAt(0), forceWide: false, dataFormat: 'decimal' };
   }
   if (/^-?\d+$/.test(t)) {
-    return { kind: 'lit', value: parseInt(t, 10), forceWide: false };
+    return { kind: 'lit', value: parseInt(t, 10), forceWide: false, dataFormat: 'decimal' };
   }
   if (IDENT_RE.test(t)) {
     return { kind: 'sym', name: t };
@@ -258,14 +275,16 @@ function parseLiteralOnly(text: string): Resolved | { error: string } {
   const e = parseExpr(text);
   if ('error' in e) return e;
   if (e.kind !== 'lit') return { error: `expected a literal, got identifier: ${e.name}` };
-  return { value: e.value, forceWide: e.forceWide };
+  return { value: e.value, forceWide: e.forceWide, dataFormat: e.dataFormat };
 }
 
 /** Look up an expression's value in the symbol table.  Returns the
  *  resolved value, `null` if the symbol is unresolved, or an error for
  *  structural issues (should not happen for well-formed Exprs). */
 function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
-  if (expr.kind === 'lit') return { value: expr.value, forceWide: expr.forceWide };
+  if (expr.kind === 'lit') {
+    return { value: expr.value, forceWide: expr.forceWide, dataFormat: expr.dataFormat };
+  }
   const sym = symbols.get(expr.name);
   return sym ?? null;
 }
@@ -491,8 +510,18 @@ interface Prepared {
   lineIdx:  number;   // which annotation this came from
 }
 
-/** Per-line working state returned by pass 1 and pass 2. */
-interface LineState { bytes: number[]; errors: AsmError[] }
+/** Per-line working state returned by pass 1 and pass 2.  `formats` is
+ *  parallel to `bytes` — one entry per emitted byte — recording how
+ *  that byte should be rendered when written back into a BASIC DATA
+ *  statement (see {@link DataFormat}).  Opcode bytes and REL-offset
+ *  bytes are always `'hex'`; operand bytes inherit from the operand
+ *  expression's `dataFormat` (literal) or the resolved symbol's
+ *  (identifier). */
+interface LineState {
+  bytes:   number[];
+  formats: DataFormat[];
+  errors:  AsmError[];
+}
 
 /** Emit the operand bytes for a concrete (mode, value) pair.  For REL
  *  also does the signed-offset computation and range check. */
@@ -542,7 +571,7 @@ function pass1(
   orgSeen:    boolean;
 } {
   const symbols: Symbols = new Map();
-  const lineStates: LineState[] = annotations.map(() => ({ bytes: [], errors: [] }));
+  const lineStates: LineState[] = annotations.map(() => ({ bytes: [], formats: [], errors: [] }));
   const prepared: Prepared[] = [];
   let pc = (startAddr ?? 0) & 0xFFFF;
   let orgSeen = startAddr !== undefined;
@@ -569,7 +598,9 @@ function pass1(
           break;
 
         case 'label': {
-          const err = declare(lineIdx, stmt.name, { value: pc, forceWide: true, isLabel: true });
+          const err = declare(lineIdx, stmt.name, {
+            value: pc, forceWide: true, isLabel: true, dataFormat: 'hex',
+          });
           if (err) stateErrs.push({ message: err });
           break;
         }
@@ -639,6 +670,7 @@ function pass2(
     // IMP/ACC have no expression; emit just the opcode.
     if (p.op.expr === null) {
       lineState.bytes.push(p.opcode);
+      lineState.formats.push('hex');
       continue;
     }
 
@@ -684,7 +716,15 @@ function pass2(
 
     const emit = emitOperand(p.mode, resolved.value, p.pc);
     if ('error' in emit) { lineState.errors.push({ message: emit.error }); continue; }
+    // Operand format: REL offsets are computed, not user-written, so they
+    // always read as hex.  Everything else inherits from the resolved value
+    // (literal-direct) or the symbol's declared format (identifier).  Both
+    // bytes of a 2-byte operand get the same format — the low and high
+    // bytes come from one source literal, so it would look odd to split
+    // their rendering.
+    const operandFormat: DataFormat = (p.mode === 'REL') ? 'hex' : resolved.dataFormat;
     lineState.bytes.push(p.opcode, ...emit.bytes);
+    lineState.formats.push('hex', ...emit.bytes.map(() => operandFormat));
     // Sanity: what we emit must match the size we committed in pass 1.
     if (1 + emit.bytes.length !== p.size) {
       lineState.errors.push({ message: `internal: size mismatch at $${p.pc.toString(16)}` });

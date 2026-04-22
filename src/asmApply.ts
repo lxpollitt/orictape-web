@@ -41,7 +41,7 @@ import {
   KEYWORDS,
 } from './decoder';
 import { applyLineEdit } from './editor';
-import { assembleProgram, type Symbols } from './assembler6502';
+import { assembleProgram, type Symbols, type DataFormat } from './assembler6502';
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -131,7 +131,7 @@ export function applyAssembler(
       state.bytes.length  >  0  &&
       hostKind(prog, i)   === 'data';
     if (patchable) {
-      patches.push({ lineIdx: i, newText: buildNewDataLineText(prog, i, state.bytes) });
+      patches.push({ lineIdx: i, newText: buildNewDataLineText(prog, i, state.bytes, state.formats) });
     }
   }
 
@@ -246,18 +246,32 @@ function extractAnnotation(lineText: string, kind: AnnotationHostKind): string {
   return i < 0 ? '' : lineText.slice(i + 1);
 }
 
-/** Format a byte array as BASIC DATA values.  V1 uses uniform `#XX`
- *  uppercase hex; per-byte format preservation is tracked in `todo.md`. */
-function formatDataValues(bytes: number[]): string {
-  return bytes
-    .map(b => '#' + b.toString(16).toUpperCase().padStart(2, '0'))
-    .join(',');
+/** Format a byte array as BASIC DATA values, each byte rendered per its
+ *  paired `DataFormat` entry.  `'hex'` → `#XX` uppercase, 2 digits;
+ *  `'decimal'` → bare base-10 with no leading zeros.  The `formats` array
+ *  must be the same length as `bytes` (that's how pass-2 always builds
+ *  them), but we guard against a short array by defaulting to hex — so
+ *  a bug upstream degrades to the old behaviour rather than producing
+ *  garbage. */
+function formatDataValues(bytes: number[], formats: DataFormat[]): string {
+  return bytes.map((b, i) => {
+    const fmt = formats[i] ?? 'hex';
+    if (fmt === 'hex') return '#' + b.toString(16).toUpperCase().padStart(2, '0');
+    return b.toString(10);
+  }).join(',');
 }
 
 /** Build replacement text for a DATA line whose values will be
  *  overwritten with `newBytes`, preserving any existing annotation
- *  chunk (from the first `'` to end-of-line) exactly. */
-function buildNewDataLineText(prog: Program, lineIdx: number, newBytes: number[]): string {
+ *  chunk (from the first `'` to end-of-line) exactly.  The parallel
+ *  `formats` array comes from pass 2 and records hex-vs-decimal per
+ *  emitted byte. */
+function buildNewDataLineText(
+  prog: Program,
+  lineIdx: number,
+  newBytes: number[],
+  formats: DataFormat[],
+): string {
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
 
@@ -266,7 +280,7 @@ function buildNewDataLineText(prog: Program, lineIdx: number, newBytes: number[]
   const annot = apost >= 0 ? v.slice(apost) : '';   // includes the ' itself
   const sep   = annot ? ' ' : '';
 
-  return `${lineNum} DATA ${formatDataValues(newBytes)}${sep}${annot}`;
+  return `${lineNum} DATA ${formatDataValues(newBytes, formats)}${sep}${annot}`;
 }
 
 /** Downgrade any `edited: 'explicit'` marks within `lineIdx`'s byte

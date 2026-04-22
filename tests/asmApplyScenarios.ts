@@ -828,6 +828,155 @@ test('markers strip cleanly from annotations before assembler sees them', () => 
   return null;
 });
 
+// ── DATA byte format preservation: hex/decimal per literal form ──────────────
+
+test('hex literal operand → DATA emitted as hex byte', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDA #$BB"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Opcode always hex (#A9); operand from $BB → hex (#BB).
+  if (!/^10 DATA #A9,#BB/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('decimal literal operand → DATA emitted as decimal byte', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDA #249"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Opcode still hex (#A9); operand from decimal 249 → decimal (249).
+  if (!/^10 DATA #A9,249/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('binary literal operand → DATA emitted as hex byte (binary → hex)', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDA #%01111111"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Binary %01111111 = 0x7F → emitted as #7F.
+  if (!/^10 DATA #A9,#7F/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('ASCII char literal → DATA emitted as decimal byte (char → decimal)', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDA #'A"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // 'A = 65 → decimal.
+  if (!/^10 DATA #A9,65/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('2-byte hex operand (ABS) → both bytes emitted as hex', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $1000",
+    "20 DATA 0,0,0 ' LDA $9800",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // LDA $9800 → AD 00 98.  Opcode hex #AD; operand's low and high both hex.
+  if (!/^20 DATA #AD,#00,#98/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('2-byte decimal operand (ABS) → both bytes emitted as decimal', () => {
+  const p = mkProgram([
+    "10 REM ' ORG 4096",
+    "20 DATA 0,0,0 ' LDA 38912",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // LDA 38912 ($9800) → AD 00 98.  Operand inherits decimal → 0, 152.
+  if (!/^20 DATA #AD,0,152/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('code label reference → DATA emitted as hex (label default)', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA 0,0,0 ' JMP TARGET",
+    "30 DATA 0 ' RTS",
+    "40 REM ' .TARGET",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // TARGET resolves at $9804 (after JMP's 3 bytes + RTS's 1 byte).
+  // JMP ABS → 4C 04 98.  Operand hex (label default).
+  if (!/^20 DATA #4C,#04,#98/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('equate declared in hex → reference emits hex', () => {
+  const p = mkProgram([
+    "10 REM ' .LIVES = $04",
+    "20 DATA 0,0 ' DEC LIVES",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DATA #C6,#04/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('equate declared in decimal → reference emits decimal', () => {
+  const p = mkProgram([
+    "10 REM ' .COUNT = 50",
+    "20 DATA 0,0 ' DEC COUNT",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // DEC ZP = C6; operand inherits decimal from equate → 50.
+  if (!/^20 DATA #C6,50/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('REL branch offset always emitted as hex (computed, no source literal)', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA 0,0 ' .LOOP:NOP",
+    "30 DATA 0,0 ' BNE LOOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // BNE LOOP → D0 <offset>.  Offset is a computed value, rendered hex.
+  if (!/^30 DATA #D0,#F[CED]/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
+  return null;
+});
+
+test('mixed: hex immediate + decimal-operand instruction', () => {
+  const p = mkProgram([
+    "10 DATA 0,0,0,0 ' LDA #$BB:STA 100",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // LDA #$BB → A9 BB (opcode hex, operand hex from $).
+  // STA 100 → 85 64 (opcode hex; operand from decimal 100 → decimal).
+  if (!/^10 DATA #A9,#BB,#85,100/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('round-trip: re-assembling the output leaves it unchanged', () => {
+  // After the first apply we have bytes + a DATA-styled annotation that
+  // reflects the source literal formats.  A second apply should observe
+  // the annotation, re-assemble the same bytes, and emit the DATA the
+  // same way — the rendered line should be byte-identical.
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA 0,0 ' LDA #$BB",
+    "30 DATA 0,0 ' LDA #249",
+    "40 DATA 0,0,0 ' LDA $1234",
+    "50 DATA 0 ' RTS",
+  ]);
+  applyAssembler(p);
+  const after1 = p.lines.map(l => l.v);
+  applyAssembler(p);
+  const after2 = p.lines.map(l => l.v);
+  for (let i = 0; i < after1.length; i++) {
+    if (after1[i] !== after2[i]) {
+      return `line ${i} differs between runs:\n  run1: ${after1[i]}\n  run2: ${after2[i]}`;
+    }
+  }
+  return null;
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;
