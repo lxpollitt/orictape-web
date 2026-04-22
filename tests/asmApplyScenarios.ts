@@ -746,6 +746,74 @@ test('repeated markers are idempotent', () => {
   return null;
 });
 
+// ── REM strict-host-shape rule: apostrophe-in-comment regressions ──────────
+//
+// REM is an assembler host only when the body directly after `REM`
+// starts with `'`.  Ordinary BASIC comments whose body contains an
+// apostrophe for unrelated reasons (possessives, contractions, quoted
+// strings) must NOT be interpreted as annotations.
+
+test("REM UDG's is a plain comment, not an assembler host", () => {
+  // Embedded apostrophe inside a word — the `'` at position 11 is
+  // literal text, not the annotation marker, because the body after
+  // REM starts with 'U', not '.
+  const p = mkProgram(["9700 REM UDG's"]);
+  const r = applyAssembler(p);
+  if (r.errors.length  !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.length !== 0) return `unexpectedly patched: ${JSON.stringify(r.linesPatched)}`;
+  return null;
+});
+
+test("REM UDG's DATA is a plain comment (both issues combined)", () => {
+  const p = mkProgram(["20000 REM UDG's DATA"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.length !== 0) return `unexpectedly patched`;
+  return null;
+});
+
+test("REM don't touch this — contraction apostrophe is not an annotation", () => {
+  const p = mkProgram(["100 REM don't touch this"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.length !== 0) return `unexpectedly patched`;
+  return null;
+});
+
+test("REM with in-word apostrophe followed by real-looking text still ignored", () => {
+  // Even though this text after the `'` might look like valid assembly,
+  // the REM rule requires the `'` to be the body's first non-whitespace
+  // char — and it isn't, so this whole line is a plain comment.
+  const p = mkProgram(["100 REM note's LDA #$BB here"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.length !== 0) return `unexpectedly patched`;
+  return null;
+});
+
+test("REM ' ... still works (annotation host, strict rule satisfied)", () => {
+  // Sanity: the allowed shape hasn't regressed.
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.LIVES = $04",
+    "20 DATA 0,0 ' DEC LIVES",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
+  if (!/^20 DATA #C6,#04/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test("REM with leading whitespace before ' is still a host", () => {
+  // Multiple spaces between REM and the annotation opener — still the
+  // allowed shape.
+  const p = mkProgram(["10 REM    ' ORG $9800:.FOO = $1234"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.symbols.get('FOO')?.value !== 0x1234) return 'FOO not declared';
+  return null;
+});
+
 test('markers strip cleanly from annotations before assembler sees them', () => {
   // REM annotation "[[:ORG $9800:.LIVES = $04" should reach the assembler
   // as "ORG $9800:.LIVES = $04" — the [[ must not produce an assembler

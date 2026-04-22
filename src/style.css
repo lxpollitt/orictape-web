@@ -810,6 +810,63 @@ header h1 {
   margin-left: auto;
 }
 
+/* ── Re-assemble error modal (Phase 7) ───────────────────────────────────
+   Shown after Cmd/Ctrl+Shift+A when the re-assembly pass produced at
+   least one error.  Reuses .tap-modal-overlay / .tap-modal-box; overrides
+   the box size to something wider (error messages can be long) but still
+   constrained.  Scrolls vertically if the error list is long. */
+.tap-modal-box.asm-error-modal-box {
+  width: min(640px, 92vw);
+  max-height: min(70vh, 600px);
+  height: auto;
+}
+.tap-modal-body.asm-error-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  overflow: hidden;   /* let .asm-error-list scroll instead */
+}
+.asm-error-header {
+  font-size: 14px;
+  opacity: 0.85;
+  border-bottom: 1px solid #333;
+  padding-bottom: 8px;
+}
+.asm-error-header strong {
+  color: var(--bright);
+  font-weight: 600;
+}
+.asm-error-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  font-family: var(--mono, monospace);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.asm-error-row {
+  display: flex;
+  gap: 10px;
+  padding: 4px 6px;
+  border-radius: 3px;
+}
+.asm-error-row:hover { background: #1a1a1a; }
+.asm-error-linenum {
+  color: var(--dim, #888);
+  min-width: 5ch;
+  text-align: right;
+  flex: 0 0 auto;
+}
+.asm-error-message {
+  color: var(--red, #e66);
+  flex: 1 1 auto;
+}
+.tap-modal-footer > .asm-error-close {
+  margin-left: auto;
+}
+
 #tap-meta-label {
   display: flex;
   align-items: center;

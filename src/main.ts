@@ -6,6 +6,7 @@ import type { Program, LineInfo, ByteInfo } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary, programHasExplicitEdits, lineFirstAddr } from './decoder';
 import { readProgramLines, readProgramBytes, flagNonMonotonicLines, splitProgram, joinPrograms } from './decoder';
 import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit, restoreLineToOriginalBytes, fixPointersAndTerminators } from './editor';
+import { applyAssembler, type AsmApplyError } from './asmApply';
 import {
   alignPrograms, bestSource, isLineClean,
   hexViewProgram, progLineIdxForCol, mliForProgLineIdx,
@@ -2593,6 +2594,17 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     return;
   }
 
+  // Cmd/Ctrl+Shift+A: re-assemble inline-asm annotations (tape view only).
+  // Shift avoids the clash with the browser's Select-All.  `e.key` is
+  // 'A' when Shift is held; compare case-insensitively for safety.
+  if (e.shiftKey && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+    if (viewMode === 'tape' && programs[activeProgIdx]) {
+      e.preventDefault();
+      runReassembler();
+    }
+    return;
+  }
+
   // Shift+Escape: restore selected line to original bytes (tape view only).
   if (e.key === 'Escape' && e.shiftKey && viewMode === 'tape' && focusedPanel === 'basic' && selByte !== null) {
     const prog = programs[activeProgIdx];
@@ -3165,4 +3177,98 @@ function confirmAction(messageHtml: string): Promise<boolean> {
 
     overlay.querySelector<HTMLButtonElement>('.confirm-ok')!.focus();
   });
+}
+
+/**
+ * Show a modal listing assembly errors produced by the most recent
+ * `applyAssembler` call.  The header summarises any partial success
+ * ("N lines updated · M errors").  Errors are sorted by BASIC line
+ * number.  Escape / Enter / the Close button / clicking outside the box
+ * all dismiss it.  Purely informational — no return value.
+ */
+function showAsmErrorModal(errors: AsmApplyError[], linesPatched: number[]): void {
+  const nPatched = linesPatched.length;
+  const nErrors  = errors.length;
+  const sorted   = [...errors].sort((a, b) => a.lineNum - b.lineNum);
+
+  const headerBits: string[] = [];
+  if (nPatched > 0) {
+    headerBits.push(`<strong>${nPatched}</strong> line${nPatched !== 1 ? 's' : ''} updated`);
+  }
+  headerBits.push(`<strong>${nErrors}</strong> error${nErrors !== 1 ? 's' : ''}`);
+  const header = headerBits.join(' · ');
+
+  const rows = sorted.map(e =>
+    '<div class="asm-error-row">' +
+      `<span class="asm-error-linenum">${e.lineNum}</span>` +
+      `<span class="asm-error-message">${escHtml(e.message)}</span>` +
+    '</div>'
+  ).join('');
+
+  const overlay = document.createElement('div');
+  overlay.className = 'tap-modal-overlay';
+  overlay.innerHTML =
+    '<div class="tap-modal-box asm-error-modal-box">' +
+      '<div class="tap-modal-body asm-error-body">' +
+        `<div class="asm-error-header">${header}</div>` +
+        `<div class="asm-error-list">${rows}</div>` +
+      '</div>' +
+      '<div class="tap-modal-footer">' +
+        '<button class="asm-error-close">Close</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  const close = (): void => { overlay.remove(); };
+
+  overlay.querySelector<HTMLButtonElement>('.asm-error-close')!
+    .addEventListener('click', close);
+  // Click on the overlay backdrop (not the box) dismisses.
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  // Keys captured at the overlay so they don't bubble to the global handler.
+  overlay.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape' || e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+  });
+
+  overlay.querySelector<HTMLButtonElement>('.asm-error-close')!.focus();
+}
+
+/**
+ * Run the 6502 re-assembler over the active BASIC program, update the
+ * panels if any DATA / back-patch lines were rewritten, and show the
+ * error modal if any errors came back.  `statusEl` always gets a short
+ * summary so the user has feedback even for the no-change case.
+ *
+ * `startAddr` is intentionally left undefined — programs that use labels
+ * in absolute-addressing contexts (JMP/JSR, ABS indexing, back-patch
+ * targets) are required to declare `ORG` themselves.  The assembler
+ * reports a clear error otherwise.
+ */
+function runReassembler(): void {
+  const prog = programs[activeProgIdx];
+  if (!prog) return;
+
+  const { linesPatched, errors } = applyAssembler(prog);
+  const nPatched = linesPatched.length;
+  const nErrors  = errors.length;
+
+  // Status-bar feedback (always set — even if nothing changed, so the
+  // user can see the action ran).  Uses the bottom statusBar, where
+  // contextual messages live, rather than the top statusEl which carries
+  // the load-summary line.
+  if (nPatched === 0 && nErrors === 0) {
+    statusBar.innerHTML = '<span class="sb-dim">Re-assemble: no changes.</span>';
+  } else {
+    const parts: string[] = [];
+    if (nPatched > 0) parts.push(`${nPatched} line${nPatched !== 1 ? 's' : ''} updated`);
+    if (nErrors  > 0) parts.push(`${nErrors} error${nErrors !== 1 ? 's' : ''}`);
+    statusBar.innerHTML = `<span class="sb-dim">Re-assemble: ${parts.join(', ')}.</span>`;
+  }
+
+  if (nPatched > 0) renderAll();
+  if (nErrors  > 0) showAsmErrorModal(errors, linesPatched);
 }

@@ -4,7 +4,7 @@ Conventions for assembler annotations and tool directives embedded in Oric BASIC
 
 ## Container
 
-- All annotations follow Oric BASIC `'`.
+- All annotations follow Oric BASIC `'`.  What counts as the annotation-opening `'` depends on the host line kind (see Host Line Eligibility below); apostrophes that don't match the host's required shape are ordinary literal characters, not annotation markers.
 - Assembler code annotations pair with a `DATA` statement on the same line — the DATA's values are what the annotation assembles to.
 - Declarations (`ORG`, labels, equates) may live on `REM` lines with no DATA attached.
 - BASIC back-patch directives live on `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` lines.
@@ -13,7 +13,7 @@ Conventions for assembler annotations and tool directives embedded in Oric BASIC
 
 Annotations are only interpreted as assembler input when they appear on a line whose first statement (immediately after the line number) is one of:
 
-- `REM` — single statement per line.  Annotation must consist of valid assembly fragments only (declarations like `ORG`, labels, and equates, separated by `:`).  Human comments are permitted only at the very end of the annotation via `;`.
+- `REM` — the line is recognised as an assembler host only when the body directly after the `REM` keyword starts with `'` (allowing any whitespace between), i.e. exactly the shape `<line number> REM ' …`.  REM lines whose body starts with anything else — including ordinary comments containing apostrophes like `REM UDG's` or `REM don't touch` — are plain BASIC comments and are left untouched.  When the line is a host, the annotation (everything after the opening `'`) must consist of valid assembly fragments only (declarations like `ORG`, labels, and equates, separated by `:`); human comments are permitted only at the very end via `;`.  Single statement per line.
 - `DATA` — single statement per line.  The annotation's assembled bytes overwrite the DATA's values in full — any pre-existing values on the DATA (in any count or format) are replaced by the assembled output.  Annotation must consist of valid assembly fragments only (instructions, and/or `:`-separated local label declarations); trailing `;` comments are permitted.
 - `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` — any line containing one or more of these tokens (as statements, or as function calls inside expressions).  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
 

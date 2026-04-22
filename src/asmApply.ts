@@ -85,7 +85,13 @@ export function applyAssembler(
   //    fully-backward-compatible default).  The result is a per-line
   //    array of filtered annotation strings — markers stripped, inactive
   //    statements dropped — that feeds both Phase 5 and Phase 6.
-  const rawAnnotations  = prog.lines.map(l => extractAnnotation(l.v));
+  //
+  //    Annotation extraction is kind-aware: REM lines only yield a
+  //    non-empty annotation when the body starts with `'` (so
+  //    `REM UDG's` is a plain comment, not a host); DATA/CALL-family
+  //    use the first-`'` rule; other lines contribute nothing.
+  const hostKinds       = prog.lines.map((_, i) => annotationHostKind(prog, i));
+  const rawAnnotations  = prog.lines.map((l, i) => extractAnnotation(l.v, hostKinds[i]));
   const anyMarker       = rawAnnotations.some(a => annotationContainsMarker(a));
   let   activeState     = !anyMarker;
   const filteredAnnots: string[] = [];
@@ -172,11 +178,70 @@ function hostKind(prog: Program, lineIdx: number): HostKind {
   return 'other';
 }
 
-/** Everything after the first `'` in a line's rendered text.  Empty
- *  string if the line has no annotation.  Note: doesn't track BASIC
- *  string-literal context — fine for REM/DATA lines, which don't
- *  typically contain `"..."`. */
-function extractAnnotation(lineText: string): string {
+/** The broader annotation-host classification used for annotation
+ *  extraction and bounded-region marker scanning.  `hostKind` handles
+ *  Phase 5's REM/DATA gate; for everything else, we still need to know
+ *  whether a line is a CALL-family back-patch host (so its annotation
+ *  can hold back-patch directives or `[[`/`]]` markers).  Lines with no
+ *  annotation-host role are `'other'` and contribute nothing. */
+type AnnotationHostKind = 'rem' | 'data' | 'callfamily' | 'other';
+
+/** Quick check: does a line contain any back-patch verb token in its
+ *  BASIC code body (outside strings, stopping at the `'` annotation
+ *  marker)?  Used to classify CALL-family hosts without paying the
+ *  full `countBackPatchTokens` cost when we only care about presence. */
+function hasAnyBackPatchToken(prog: Program, lineIdx: number): boolean {
+  const line = prog.lines[lineIdx];
+  let inString = false;
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
+    const b = prog.bytes[i].v;
+    if (b === 0) break;
+    if (inString) { if (b === 0x22) inString = false; continue; }
+    if (b === 0x22) { inString = true; continue; }
+    if (b === 0x27) break;
+    if (isBackPatchToken(b)) return true;
+  }
+  return false;
+}
+
+function annotationHostKind(prog: Program, lineIdx: number): AnnotationHostKind {
+  const hk = hostKind(prog, lineIdx);
+  if (hk === 'rem' || hk === 'data') return hk;
+  if (hasAnyBackPatchToken(prog, lineIdx)) return 'callfamily';
+  return 'other';
+}
+
+/** Extract the annotation text from a line's rendered `v` string, with
+ *  a rule that depends on the line's host kind:
+ *
+ *   - **REM** — strict: the body directly after the `REM` keyword must
+ *     start with `'` (allowing whitespace between).  REM lines whose
+ *     body begins with anything else (including ordinary comments like
+ *     `REM UDG's` that happen to contain apostrophes) are *not*
+ *     annotation hosts and produce an empty string.
+ *   - **DATA** / **CALL-family** — permissive: the annotation begins at
+ *     the first `'` in the rendered text.  DATA values and CALL-family
+ *     BASIC arguments don't typically contain apostrophes, so the first
+ *     `'` is overwhelmingly the annotation marker in practice.
+ *   - **other** — no annotation; returns empty string.
+ *
+ *  Returns the annotation text with the opening `'` stripped, or `""`
+ *  if the line is not an annotation host.
+ */
+function extractAnnotation(lineText: string, kind: AnnotationHostKind): string {
+  if (kind === 'other') return '';
+
+  if (kind === 'rem') {
+    // buildLineElements renders TOKEN_REM as the literal text "REM", so
+    // the first occurrence of "REM" in the line is the keyword.
+    const remIdx = lineText.indexOf('REM');
+    if (remIdx < 0) return '';
+    const afterRem = lineText.slice(remIdx + 3).replace(/^\s+/, '');
+    if (!afterRem.startsWith("'")) return '';
+    return afterRem.slice(1);
+  }
+
+  // DATA, CALL-family: first `'` in the line text is the annotation marker.
   const i = lineText.indexOf("'");
   return i < 0 ? '' : lineText.slice(i + 1);
 }
