@@ -19,6 +19,25 @@ Annotations are only interpreted as assembler input when they appear on a line w
 
 Annotations on lines of any other kind (e.g. `PRINT`, `LET`, `GOTO`) — and REM/DATA lines that violate the single-statement rule above — are treated as human comments and ignored outright.
 
+## Bounded Regions
+
+Two annotation statements — `[[` and `]]` — bound the portion of the program the re-assembler considers.  They are useful when converting an existing program incrementally (process a few lines at a time, leaving the rest untouched), or as a master switch to disable re-assembly across the whole program.
+
+- **`[[`** sets the active state to *on* (from that statement onward).
+- **`]]`** sets the active state to *off* (from that statement onward).
+- Both are **absolute state setters**, not counted open/close pairs.  `[[` after `[[` is a no-op; `]]` after `]]` is a no-op.  They may each appear any number of times, including multiple on the same annotation.
+- Markers themselves emit no bytes and declare no symbols.  They are stripped before the annotation reaches the assembler.
+- State tracking is **statement-level**: within a single annotation, `' [[:LDX #0:]]:LDY #5` activates, keeps `LDX #0`, deactivates, and drops `LDY #5`.
+
+**Initial state rule.**  If the program contains at least one `[[` *or* at least one `]]` anywhere in an annotation, the initial state is **off** (nothing is processed until a `[[` activates it).  If the program contains neither marker, the initial state is **on** (the re-assembler processes everything, for full backward compatibility).
+
+**Common patterns.**
+- Mark a single conversion region: `[[` at the start line, `]]` at the end line.  Outside the region, the re-assembler does nothing.
+- Disable everything: a single `]]` anywhere (typically as the only statement on a REM line near the top).  Initial state is off, `]]` keeps it off, the rest of the program is silently skipped.
+- Multiple regions: alternate `[[` and `]]` markers to cover several non-contiguous ranges.
+
+**Where markers may appear.**  Anywhere an annotation is accepted — i.e. `REM`, `DATA`, or `CALL`/`POKE`/`DOKE`/`PEEK`/`DEEK` lines per the Host Line Eligibility rules.  Markers may be combined with other valid annotation statements on the same line (`' [[:LDX #0`, `' .LOOPA:]]`, etc.).
+
 ## Numeric Literals
 
 | Form    | Syntax          | Example       |

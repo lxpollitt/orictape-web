@@ -595,6 +595,171 @@ test('running applyAssembler twice yields identical back-patched line', () => {
   return null;
 });
 
+// ── Phase 6b: bounded regions ────────────────────────────────────────────────
+
+test('no markers → process everything (backward compatible)', () => {
+  const p = mkProgram([
+    "10 DATA 0 ' LDA #$BB",
+    "20 DATA 0 ' RTS",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.length !== 2) return `expected both lines patched, got ${JSON.stringify(r.linesPatched)}`;
+  return null;
+});
+
+test('[[ alone: lines before skipped, lines from [[ onward processed', () => {
+  const p = mkProgram([
+    "10 DATA 0 ' LDA #$AA",              // before [[, not processed
+    "20 REM ' [[",
+    "30 DATA 0 ' LDA #$BB",              // inside region
+    "40 DATA 0 ' RTS",                    // inside region
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.includes(0)) return `line 0 (before [[) should not be patched`;
+  if (!r.linesPatched.includes(2)) return `line 2 should be patched`;
+  if (!r.linesPatched.includes(3)) return `line 3 should be patched`;
+  // Line 0's DATA body should still read "0" (original), not #AA.
+  if (!/^10 DATA 0 /.test(p.lines[0].v)) return `line 0 was modified: ${p.lines[0].v}`;
+  return null;
+});
+
+test('[[ and ]] bracket a region', () => {
+  const p = mkProgram([
+    "10 DATA 0 ' LDA #$AA",              // before [[: not processed
+    "20 REM ' [[",
+    "30 DATA 0 ' LDA #$BB",              // inside: processed
+    "40 REM ' ]]",
+    "50 DATA 0 ' LDA #$CC",              // after ]]: not processed
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.includes(0)) return `line 0 before [[ should not be patched`;
+  if (!r.linesPatched.includes(2)) return `line 2 inside region should be patched`;
+  if (r.linesPatched.includes(4)) return `line 4 after ]] should not be patched`;
+  if (!/^30 DATA #A9,#BB/.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  return null;
+});
+
+test('[[ combined with instruction on same line', () => {
+  const p = mkProgram([
+    "10 DATA 0 ' LDA #$AA",              // before [[: not processed
+    "20 DATA 0 ' [[:LDA #$BB",           // [[ activates mid-annotation, LDA is in-region
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.includes(0)) return `line 0 should not be patched`;
+  if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
+  if (!/^20 DATA #A9,#BB/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('marker mid-line: drops only statements after ]]', () => {
+  const p = mkProgram([
+    "10 DATA 0 ' [[",
+    "20 DATA 0 ' LDA #$BB:]]:LDA #$CC",  // LDA #$BB active, then ]] deactivates, LDA #$CC dropped
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Line 1 patched with LDA #$BB (2 bytes), the LDA #$CC is dropped.
+  if (!/^20 DATA #A9,#BB/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  // Should NOT contain more than just the LDA #$BB bytes.
+  if (/#A9,#BB,#A9,#CC/.test(p.lines[1].v)) return `LDA #$CC after ]] wasn't dropped: ${p.lines[1].v}`;
+  return null;
+});
+
+test('multiple non-contiguous regions', () => {
+  const p = mkProgram([
+    "10 REM ' [[",
+    "20 DATA 0 ' LDA #$11",              // region 1: processed
+    "30 REM ' ]]",
+    "40 DATA 0 ' LDA #$22",              // gap: not processed
+    "50 REM ' [[",
+    "60 DATA 0 ' LDA #$33",              // region 2: processed
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
+  if (r.linesPatched.includes(3))  return `line 3 in gap should not be patched`;
+  if (!r.linesPatched.includes(5)) return `line 5 should be patched`;
+  if (!/^20 DATA #A9,#11/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  if (!/^40 DATA 0/.test(p.lines[3].v))       return `line 3 was modified: ${p.lines[3].v}`;
+  if (!/^60 DATA #A9,#33/.test(p.lines[5].v)) return `line 5: ${p.lines[5].v}`;
+  return null;
+});
+
+test('solo ]] at top disables everything (kill switch)', () => {
+  // Presence of ]] anywhere forces initial state = inactive.  With no [[
+  // to re-activate, nothing gets processed.
+  const p = mkProgram([
+    "10 REM ' ]]",
+    "20 DATA 0 ' LDA #$BB",
+    "30 DATA 0 ' RTS",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.length !== 0) return `nothing should be patched, got ${JSON.stringify(r.linesPatched)}`;
+  return null;
+});
+
+test('markers interact with back-patch directives', () => {
+  // [[ on a CALL line, followed by the back-patch directive — the marker
+  // is stripped by the filter, leaving ".LOOPA" which is a valid
+  // back-patch annotation.
+  const p = mkProgram([
+    "10 REM ' [[:ORG $9800:.LOOPA",
+    "20 DATA 0 ' RTS",
+    "30 CALL #0000 ' [[:.LOOPA",         // [[ (no-op — already active), then .LOOPA
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^30 CALL #9800/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
+  return null;
+});
+
+test(']] before any [[ in a program: nothing processed', () => {
+  // Since ANY marker triggers initial-inactive, an early ]] doesn't do
+  // anything (state already off) and without a later [[ to open, nothing
+  // is processed.
+  const p = mkProgram([
+    "10 DATA 0 ' LDA #$BB",
+    "20 REM ' ]]",
+    "30 DATA 0 ' RTS",
+  ]);
+  const r = applyAssembler(p);
+  if (r.linesPatched.length !== 0) return `nothing should be patched`;
+  return null;
+});
+
+test('repeated markers are idempotent', () => {
+  // [[ [[ is equivalent to just [[; ]] ]] is equivalent to just ]].
+  const p = mkProgram([
+    "10 REM ' [[:[[",
+    "20 DATA 0 ' LDA #$BB",              // active from first [[
+    "30 REM ' ]]:]]",
+    "40 DATA 0 ' LDA #$CC",              // inactive from first ]]
+  ]);
+  const r = applyAssembler(p);
+  if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
+  if (r.linesPatched.includes(3))  return `line 3 should not be patched`;
+  return null;
+});
+
+test('markers strip cleanly from annotations before assembler sees them', () => {
+  // REM annotation "[[:ORG $9800:.LIVES = $04" should reach the assembler
+  // as "ORG $9800:.LIVES = $04" — the [[ must not produce an assembler
+  // error ("unknown mnemonic" etc.).
+  const p = mkProgram([
+    "10 REM ' [[:ORG $9800:.LIVES = $04",
+    "20 DATA 0 ' DEC LIVES",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DATA #C6,#04/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;

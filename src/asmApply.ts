@@ -78,14 +78,32 @@ export function applyAssembler(
   prog:       Program,
   startAddr?: number,
 ): AsmApplyResult {
-  // 1. Build the annotation list, gated by host-line eligibility.
-  const annotations: string[] = prog.lines.map((line, i) => {
+  // 0. Bounded-region pre-filter (Phase 6b).  Walks every annotation in
+  //    program order, tracking a single active/inactive state that
+  //    `[[` and `]]` markers flip.  The initial state is *inactive* if
+  //    any marker appears anywhere in the program, else *active* (the
+  //    fully-backward-compatible default).  The result is a per-line
+  //    array of filtered annotation strings — markers stripped, inactive
+  //    statements dropped — that feeds both Phase 5 and Phase 6.
+  const rawAnnotations  = prog.lines.map(l => extractAnnotation(l.v));
+  const anyMarker       = rawAnnotations.some(a => annotationContainsMarker(a));
+  let   activeState     = !anyMarker;
+  const filteredAnnots: string[] = [];
+  for (const a of rawAnnotations) {
+    const { filtered, active } = filterStatementsByState(a, activeState);
+    filteredAnnots.push(filtered);
+    activeState = active;
+  }
+
+  // 1. Build the Phase-5 annotation list, gated by host-line eligibility
+  //    and using the already-filtered annotation text.
+  const asmAnnotations: string[] = prog.lines.map((_line, i) => {
     const kind = hostKind(prog, i);
-    return (kind === 'rem' || kind === 'data') ? extractAnnotation(line.v) : '';
+    return (kind === 'rem' || kind === 'data') ? filteredAnnots[i] : '';
   });
 
   // 2. Assemble them together so symbols are shared program-wide.
-  const { perLine, symbols } = assembleProgram(annotations, startAddr);
+  const { perLine, symbols } = assembleProgram(asmAnnotations, startAddr);
 
   // 3. Precompute patches (DATA lines with clean output) and errors.
   //    We separate planning from applying so `applyLineEdit`'s byte-stream
@@ -121,11 +139,11 @@ export function applyAssembler(
     linesPatched.push(p.lineIdx);
   }
 
-  // 5. Phase 6: walk every line and apply back-patch directives to those
-  //    that are back-patch hosts.  The symbol table from Phase 5's
-  //    `assembleProgram` pass provides the label values.
+  // 5. Phase 6: walk every line and apply back-patch directives.  Uses the
+  //    filtered annotation so lines outside the active region are ignored
+  //    and markers embedded in the annotation are transparent.
   for (let i = 0; i < prog.lines.length; i++) {
-    const res = applyBackPatchesToLine(prog, i, symbols);
+    const res = applyBackPatchesToLine(prog, i, symbols, filteredAnnots[i]);
     errors.push(...res.errors);
     if (res.patched) linesPatched.push(i);
   }
@@ -395,19 +413,23 @@ function rewriteLineForBackPatch(
 }
 
 /** Orchestrate back-patching for one line: eligibility check, directive
- *  parsing, count check, rewrite, apply.  Returns whether the line was
- *  patched and any errors to surface. */
+ *  parsing, count check, rewrite, apply.  Takes the pre-filtered
+ *  annotation text (bounded-region markers stripped, inactive statements
+ *  already removed) so out-of-region lines never reach the directive
+ *  parser.  Returns whether the line was patched and any errors to
+ *  surface. */
 function applyBackPatchesToLine(
-  prog:    Program,
-  lineIdx: number,
-  symbols: Symbols,
+  prog:       Program,
+  lineIdx:    number,
+  symbols:    Symbols,
+  annotation: string,
 ): { patched: boolean; errors: AsmApplyError[] } {
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
 
-  // Gate: line must contain at least one back-patch token AND the
-  // annotation must carry a back-patch-shaped prefix (`.` or `-:`).
-  const annotation = extractAnnotation(line.v);
+  // Gate: annotation must carry a back-patch-shaped prefix (`.` or `-:`)
+  // after filtering, and the line must contain at least one back-patch
+  // token in its BASIC statements.
   if (!isBackPatchAnnotation(annotation)) return { patched: false, errors: [] };
   const siteCount = countBackPatchTokens(prog, lineIdx);
   if (siteCount === 0) return { patched: false, errors: [] };
@@ -440,4 +462,69 @@ function applyBackPatchesToLine(
   applyLineEdit(prog, lineIdx, newText);
   markLineEditsAutomatic(prog, lineIdx);
   return { patched: true, errors: [] };
+}
+
+// ── Phase 6b: bounded-region pre-filter ─────────────────────────────────────
+
+/** Check whether an annotation contains `[[` or `]]` as a top-level
+ *  statement.  Walks chars directly so we correctly respect `'c` ASCII
+ *  char literals (skip the next char after an unescaped `'`) and truncate
+ *  at the first `;` end-of-annotation comment. */
+function annotationContainsMarker(annotation: string): boolean {
+  let start = 0;
+  let end   = annotation.length;
+  const isMarker = (part: string): boolean => {
+    const t = part.trim();
+    return t === '[[' || t === ']]';
+  };
+  for (let i = 0; i < annotation.length; i++) {
+    if (annotation[i] === "'") { i++; continue; }
+    if (annotation[i] === ';') { end = i; break; }
+    if (annotation[i] === ':') {
+      if (isMarker(annotation.slice(start, i))) return true;
+      start = i + 1;
+    }
+  }
+  return isMarker(annotation.slice(start, end));
+}
+
+/** Walk an annotation's `:`-separated statements and filter by the
+ *  bounded-region active state.  `[[` sets active = true, `]]` sets
+ *  active = false (both idempotent if the state is already that way).
+ *  Inactive and marker statements are dropped; active non-marker
+ *  statements are kept in their original textual form.  Returns the
+ *  filtered annotation (markers stripped, may be empty) and the
+ *  post-walk active state for the next annotation to pick up.
+ *
+ *  Trailing `;` comments are dropped along the way — they're informative
+ *  only and the assembler strips them too. */
+function filterStatementsByState(
+  annotation:    string,
+  initialActive: boolean,
+): { filtered: string; active: boolean } {
+  // Split into statements, `'c`-literal aware, stopping at `;`.
+  const statements: string[] = [];
+  let start = 0;
+  let end   = annotation.length;
+  for (let i = 0; i < annotation.length; i++) {
+    if (annotation[i] === "'") { i++; continue; }
+    if (annotation[i] === ';') { end = i; break; }
+    if (annotation[i] === ':') {
+      statements.push(annotation.slice(start, i));
+      start = i + 1;
+    }
+  }
+  statements.push(annotation.slice(start, end));
+
+  // Walk, flip state on markers, keep the active non-marker statements.
+  let active = initialActive;
+  const kept: string[] = [];
+  for (const raw of statements) {
+    const t = raw.trim();
+    if (t === '[[') { active = true;  continue; }
+    if (t === ']]') { active = false; continue; }
+    if (active) kept.push(raw);
+  }
+
+  return { filtered: kept.join(':'), active };
 }
