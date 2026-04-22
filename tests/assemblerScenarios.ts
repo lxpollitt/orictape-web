@@ -579,6 +579,113 @@ test('branch out of range errors', () => {
   return null;
 });
 
+// ── Branch direct-offset operands (width-based interpretation) ───────────────
+//
+// Numeric operands to REL branches are interpreted as EITHER a target
+// address (2-byte input: hex 3+ digits, label) OR a direct offset byte
+// (1-byte input: hex ≤ 2 digits, decimal in [-128, +127]).  Decimal
+// outside [-128, +127] errors to avoid ambiguity.
+
+test('BNE -7 emits D0 F9 (direct signed offset)',
+  () => compareBytes(asm('BNE -7'), [0xD0, 0xF9]));
+
+test('BNE +5 emits D0 05 (explicit positive sign)',
+  () => compareBytes(asm('BNE +5'), [0xD0, 0x05]));
+
+test('BNE 5 emits D0 05 (bare positive decimal, direct offset)',
+  () => compareBytes(asm('BNE 5'), [0xD0, 0x05]));
+
+test('BNE -128 emits D0 80 (max negative)',
+  () => compareBytes(asm('BNE -128'), [0xD0, 0x80]));
+
+test('BNE 127 emits D0 7F (max positive signed decimal)',
+  () => compareBytes(asm('BNE 127'), [0xD0, 0x7F]));
+
+test('BNE $F9 emits D0 F9 (direct hex byte)',
+  () => compareBytes(asm('BNE $F9'), [0xD0, 0xF9]));
+
+test('BNE $FF emits D0 FF (hex byte, -1 signed)',
+  () => compareBytes(asm('BNE $FF'), [0xD0, 0xFF]));
+
+test('BNE $05 emits D0 05 (hex byte, forward)',
+  () => compareBytes(asm('BNE $05'), [0xD0, 0x05]));
+
+test('BNE direct offset is PC-independent', () => {
+  // The same `BNE -7` at different PCs should produce identical bytes,
+  // unlike target-address branches which depend on PC.
+  const r1 = assemble('BNE -7', 0x0000);
+  const r2 = assemble('BNE -7', 0x9800);
+  if (r1.errors.length !== 0) return `r1 err: ${r1.errors[0].message}`;
+  if (r2.errors.length !== 0) return `r2 err: ${r2.errors[0].message}`;
+  return compareBytes(r1.bytes, r2.bytes, 'PC independence');
+});
+
+test('BNE 128 errors (decimal out of signed-byte range)', () => {
+  const err = asmErrMulti('BNE 128');
+  if (err === null) return 'expected error, got success';
+  if (!/decimal branch operand 128 out of signed-byte range/i.test(err)) {
+    return `wrong message: ${err}`;
+  }
+  return null;
+});
+
+test('BNE 249 errors (decimal out of signed-byte range)', () => {
+  const err = asmErrMulti('BNE 249');
+  if (err === null) return 'expected error, got success';
+  if (!/decimal branch operand 249 out of signed-byte range/i.test(err)) {
+    return `wrong message: ${err}`;
+  }
+  return null;
+});
+
+test('BNE 300 errors (decimal, out of signed-byte range)', () => {
+  const err = asmErrMulti('BNE 300');
+  if (err === null) return 'expected error, got success';
+  if (!/decimal branch operand 300 out of signed-byte range/i.test(err)) {
+    return `wrong message: ${err}`;
+  }
+  return null;
+});
+
+test('BNE -129 errors (below signed-byte range)', () => {
+  const err = asmErrMulti('BNE -129');
+  if (err === null) return 'expected error, got success';
+  if (!/decimal branch operand -129 out of signed-byte range/i.test(err)) {
+    return `wrong message: ${err}`;
+  }
+  return null;
+});
+
+test('BNE $9800 still works as target address (compute offset)', () => {
+  // 4-digit hex → 2-byte target.  At PC=$9800: offset = $9800 - $9802 = -2.
+  const r = assemble('BNE $9800', 0x9800);
+  if (r.errors.length !== 0) return `unexpected error: ${r.errors[0].message}`;
+  return compareBytes(r.bytes, [0xD0, 0xFE]);
+});
+
+test('BNE $0004 is a 2-byte target address (3+ digits = forceWide)', () => {
+  // At PC=0: target $0004, offset = 4 - 2 = 2.
+  const r = assemble('BNE $0004', 0x0000);
+  if (r.errors.length !== 0) return `unexpected error: ${r.errors[0].message}`;
+  return compareBytes(r.bytes, [0xD0, 0x02]);
+});
+
+test('equate with negative decimal works as direct offset', () => {
+  // `.OFF = -7 : BNE OFF` — equate is decimal-in-range, direct offset.
+  const r = assemble('.OFF = -7 : BNE OFF', 0x0000);
+  if (r.errors.length !== 0) return `unexpected error: ${r.errors[0].message}`;
+  return compareBytes(r.bytes, [0xD0, 0xF9]);
+});
+
+test('equate with out-of-range decimal errors', () => {
+  const err = asmErrMulti('.VAL = 249 : BNE VAL');
+  if (err === null) return 'expected error, got success';
+  if (!/decimal branch operand 249 out of signed-byte range/i.test(err)) {
+    return `wrong message: ${err}`;
+  }
+  return null;
+});
+
 // ── Phase 4: error paths (symbols) ───────────────────────────────────────────
 
 test('undefined symbol (LDA UNDEFINED)', () => {

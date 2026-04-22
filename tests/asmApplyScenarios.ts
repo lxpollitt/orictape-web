@@ -953,6 +953,147 @@ test('mixed: hex immediate + decimal-operand instruction', () => {
   return null;
 });
 
+// ── Digit-count preservation (byte operands) ─────────────────────────────────
+
+test('LDY #00 round-trips as DATA 00 (decimal 2-digit preserved)', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDY #00"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Opcode A0, operand 0 emitted decimal with min width 2 → "00".
+  if (!/^10 DATA #A0,00/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('LDY #0 round-trips as DATA 0 (no padding)', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDY #0"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #A0,0$/.test(p.lines[0].v) && !/^10 DATA #A0,0 /.test(p.lines[0].v)) {
+    return `line 0: ${p.lines[0].v}`;
+  }
+  return null;
+});
+
+test('LDA #$09 emits #09 (2-digit hex preserved)', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDA #$09"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #A9,#09/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('LDA #$9 emits #9 (1-digit hex preserved)', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDA #$9"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Literal written as 1 hex digit → emit 1 hex digit.
+  if (!/^10 DATA #A9,#9$/.test(p.lines[0].v) && !/^10 DATA #A9,#9 /.test(p.lines[0].v)) {
+    return `line 0: ${p.lines[0].v}`;
+  }
+  return null;
+});
+
+test('LDA #001 emits 001 (3-digit decimal preserved)', () => {
+  const p = mkProgram(["10 DATA 0,0 ' LDA #001"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #A9,001/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('Equate digit count propagates to references (hex)', () => {
+  const p = mkProgram([
+    "10 REM ' .LIVES = $04",
+    "20 DATA 0,0 ' DEC LIVES",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // LIVES declared as $04 (2 hex digits) → reference emits #04.
+  if (!/^20 DATA #C6,#04/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('Equate digit count propagates to references (decimal)', () => {
+  const p = mkProgram([
+    "10 REM ' .COUNT = 05",
+    "20 DATA 0,0 ' DEC COUNT",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // COUNT declared as 05 (2 decimal digits) → reference emits 05.
+  if (!/^20 DATA #C6,05/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('Equate with 1-digit decimal → 1-digit emission', () => {
+  const p = mkProgram([
+    "10 REM ' .COUNT = 5",
+    "20 DATA 0,0 ' DEC COUNT",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // COUNT declared as 5 (1 digit) → emit 5, no padding.
+  if (!/^20 DATA #C6,5$/.test(p.lines[1].v) && !/^20 DATA #C6,5 /.test(p.lines[1].v)) {
+    return `line 1: ${p.lines[1].v}`;
+  }
+  return null;
+});
+
+test('Word operand always uses default width (2 hex per byte)', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $1000",
+    "20 DATA 0,0,0 ' LDA $9800",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Word operand always emitted as 2 hex digits per byte regardless of
+  // literal's total width.
+  if (!/^20 DATA #AD,#00,#98/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('REL offsets always hex 2-digit regardless of label width', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA 0,0 ' .LOOP:NOP",
+    "30 DATA 0,0 ' BNE LOOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // REL offset emitted as 2-digit hex.
+  if (!/^30 DATA #D0,#F[CED]/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
+  return null;
+});
+
+test('BNE -7 in annotation → DATA #D0,249 (young-Alex style)', () => {
+  // The classic: user writes a backward-branch offset in signed decimal;
+  // the DATA renders the byte unsigned in decimal with min-width 1
+  // (which is 3 naturally, since 249 has 3 digits).
+  const p = mkProgram(["10 DATA 0,0 ' BNE -7"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #D0,249/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('BNE $F9 in annotation → DATA #D0,#F9 (hex direct offset)', () => {
+  const p = mkProgram(["10 DATA 0,0 ' BNE $F9"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #D0,#F9/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
+test('LDY #00:LDA #$BB preserves both widths independently (1983 style)', () => {
+  // The "young Alex" example: decimal zeros padded to 2 digits to match
+  // the column width of the hex values next to them.
+  const p = mkProgram(["10 DATA 0,0,0,0 ' LDY #00:LDA #$BB"]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #A0,00,#A9,#BB/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  return null;
+});
+
 test('round-trip: re-assembling the output leaves it unchanged', () => {
   // After the first apply we have bytes + a DATA-styled annotation that
   // reflects the source literal formats.  A second apply should observe

@@ -40,12 +40,14 @@ Two annotation statements — `[[` and `]]` — bound the portion of the program
 
 ## Numeric Literals
 
-| Form    | Syntax          | Example       |
-|---------|-----------------|---------------|
-| Hex     | `$` prefix      | `$BB`, `$9800`|
-| Decimal | bare            | `40`, `-10`   |
-| Binary  | `%` prefix      | `%01111111`   |
-| ASCII   | `'c` (one char) | `'s`, `'A`    |
+| Form    | Syntax              | Example           |
+|---------|---------------------|-------------------|
+| Hex     | `$` prefix          | `$BB`, `$9800`    |
+| Decimal | bare or signed      | `40`, `-10`, `+5` |
+| Binary  | `%` prefix          | `%01111111`       |
+| ASCII   | `'c` (one char)     | `'s`, `'A`        |
+
+An explicit leading `+` on decimal literals is accepted (equivalent to the bare positive form) and is useful for branches where a signed literal like `+5` or `-7` reads as an explicit offset.
 
 ## Operand Syntax
 
@@ -80,8 +82,13 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 
 ## Branches
 
-- Always written by label, never as a raw numeric offset.
-- Assembler computes the signed byte offset and errors if out of range.
+- Normally written by label; the assembler computes the signed byte offset from the label's address to the branch and errors if out of range (±127 bytes from PC+2).
+
+- Numeric operands are interpreted by **input width**, not by value:
+  - A **2-byte input** (hex with 3+ digits like `$9800` or `$0004`) is a **target address**.  The assembler computes the offset from the branch's PC+2 to the target, and errors if it doesn't fit in a signed byte.
+  - A **1-byte input** is a **direct signed offset byte**, emitted as written with format preservation:
+    - **Hex** 1-2 digits (`$EF`, `$04`): value range [0, 255].
+    - **Decimal** (signed with `+`/`-` or bare positive): value range **[-128, +127]**.  Decimal values outside this range error — `BNE 249` must be written as `BNE -7` or `BNE $F9`; `BNE 300` must use a hex literal or a label.
 
 ## Comments
 

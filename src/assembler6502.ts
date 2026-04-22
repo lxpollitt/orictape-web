@@ -209,9 +209,14 @@ export type DataFormat = 'hex' | 'decimal';
  *  signal for literals; for symbols, size is determined at resolution
  *  time from the resolved symbol's `forceWide`.  `dataFormat` records
  *  which way a literal's bytes should be rendered back into DATA
- *  statements (see {@link DataFormat}). */
+ *  statements (see {@link DataFormat}).  `digitCount` is the number of
+ *  digits the user wrote (not counting the `$`/`%`/`'` prefix) — used
+ *  as the minimum emit width when the byte propagates into a DATA
+ *  value, so `LDY #00` round-trips through DATA as `00`.  Undefined
+ *  for binary (`%…`) and ASCII (`'c`) literals since those don't
+ *  correspond to hex/decimal digit widths. */
 type Expr =
-  | { kind: 'lit'; value: number; forceWide: boolean; dataFormat: DataFormat }
+  | { kind: 'lit'; value: number; forceWide: boolean; dataFormat: DataFormat; digitCount?: number }
   | { kind: 'sym'; name: string };
 
 /** A resolved value — either what a literal Expr already carries, or the
@@ -220,12 +225,16 @@ type Expr =
  *  and inline literals leave it undefined.  `dataFormat` is the DATA
  *  rendering preference: inherited from the literal form for equates,
  *  defaulting to `'hex'` for code labels (since labels are addresses
- *  and hex reads more naturally). */
+ *  and hex reads more naturally).  `digitCount` is the user-typed digit
+ *  width (for byte-operand DATA emission minimum-width preservation);
+ *  inherited from a declaring literal for equates, undefined for code
+ *  labels and for binary/char-derived equates. */
 export interface ResolvedSymbol {
-  value:      number;
-  forceWide:  boolean;
-  isLabel?:   boolean;
-  dataFormat: DataFormat;
+  value:       number;
+  forceWide:   boolean;
+  isLabel?:    boolean;
+  dataFormat:  DataFormat;
+  digitCount?: number;
 }
 // Short in-module alias to keep existing code tidy.
 type Resolved = ResolvedSymbol;
@@ -248,20 +257,40 @@ function parseExpr(text: string): Expr | { error: string } {
   if (t.startsWith('$')) {
     const hex = t.slice(1);
     if (!/^[0-9A-Fa-f]+$/.test(hex)) return { error: `invalid hex literal: ${t}` };
-    return { kind: 'lit', value: parseInt(hex, 16), forceWide: hex.length >= 3, dataFormat: 'hex' };
+    return {
+      kind: 'lit', value: parseInt(hex, 16),
+      forceWide: hex.length >= 3,
+      dataFormat: 'hex',
+      digitCount: hex.length,
+    };
   }
   if (t.startsWith('%')) {
+    // Binary maps to hex on DATA output, but the user didn't write hex
+    // digits — so we have no digitCount to preserve.
     const bin = t.slice(1);
     if (!/^[01]+$/.test(bin)) return { error: `invalid binary literal: ${t}` };
     return { kind: 'lit', value: parseInt(bin, 2), forceWide: false, dataFormat: 'hex' };
   }
   if (t.startsWith("'")) {
+    // ASCII maps to decimal on DATA output.  The char literal is one
+    // character; no user-chosen digit width to carry.
     const rest = t.slice(1);
     if (rest.length !== 1) return { error: `invalid ASCII literal: ${t}` };
     return { kind: 'lit', value: rest.charCodeAt(0), forceWide: false, dataFormat: 'decimal' };
   }
-  if (/^-?\d+$/.test(t)) {
-    return { kind: 'lit', value: parseInt(t, 10), forceWide: false, dataFormat: 'decimal' };
+  if (/^[+-]?\d+$/.test(t)) {
+    // Decimal digit width is preserved too — `LDY #00` → DATA `00`,
+    // `LDY #0` → DATA `0`.  Leading sign (`+` or `-`) is not counted
+    // as a digit.  An explicit `+` is accepted so that branch operands
+    // can be written as `BNE +5` for a forward-branch offset in parallel
+    // with `BNE -7` for a backward one.
+    const digits = /^[+-]/.test(t) ? t.slice(1) : t;
+    return {
+      kind: 'lit', value: parseInt(t, 10),
+      forceWide: false,
+      dataFormat: 'decimal',
+      digitCount: digits.length,
+    };
   }
   if (IDENT_RE.test(t)) {
     return { kind: 'sym', name: t };
@@ -275,7 +304,12 @@ function parseLiteralOnly(text: string): Resolved | { error: string } {
   const e = parseExpr(text);
   if ('error' in e) return e;
   if (e.kind !== 'lit') return { error: `expected a literal, got identifier: ${e.name}` };
-  return { value: e.value, forceWide: e.forceWide, dataFormat: e.dataFormat };
+  return {
+    value:      e.value,
+    forceWide:  e.forceWide,
+    dataFormat: e.dataFormat,
+    digitCount: e.digitCount,
+  };
 }
 
 /** Look up an expression's value in the symbol table.  Returns the
@@ -283,7 +317,12 @@ function parseLiteralOnly(text: string): Resolved | { error: string } {
  *  structural issues (should not happen for well-formed Exprs). */
 function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
   if (expr.kind === 'lit') {
-    return { value: expr.value, forceWide: expr.forceWide, dataFormat: expr.dataFormat };
+    return {
+      value:      expr.value,
+      forceWide:  expr.forceWide,
+      dataFormat: expr.dataFormat,
+      digitCount: expr.digitCount,
+    };
   }
   const sym = symbols.get(expr.name);
   return sym ?? null;
@@ -510,17 +549,22 @@ interface Prepared {
   lineIdx:  number;   // which annotation this came from
 }
 
-/** Per-line working state returned by pass 1 and pass 2.  `formats` is
- *  parallel to `bytes` — one entry per emitted byte — recording how
- *  that byte should be rendered when written back into a BASIC DATA
- *  statement (see {@link DataFormat}).  Opcode bytes and REL-offset
- *  bytes are always `'hex'`; operand bytes inherit from the operand
- *  expression's `dataFormat` (literal) or the resolved symbol's
- *  (identifier). */
+/** Per-line working state returned by pass 1 and pass 2.  `formats` and
+ *  `minDigits` are both parallel to `bytes` — one entry per emitted
+ *  byte — controlling how each byte is rendered when written back into
+ *  a BASIC DATA statement: `formats` picks hex vs decimal (see
+ *  {@link DataFormat}), `minDigits` is the minimum emit width (padded
+ *  with leading zeros if the value is narrower).  Opcode bytes and
+ *  REL-offset bytes are always `'hex'` with minDigits = 2.  Byte-op
+ *  operand bytes inherit minDigits from the operand expression's
+ *  `digitCount` (literal) or the resolved symbol's (identifier), so
+ *  `LDY #00` round-trips as DATA `00`.  Word-op operand bytes use the
+ *  format default (hex: 2, decimal: 1) per byte. */
 interface LineState {
-  bytes:   number[];
-  formats: DataFormat[];
-  errors:  AsmError[];
+  bytes:     number[];
+  formats:   DataFormat[];
+  minDigits: number[];
+  errors:    AsmError[];
 }
 
 /** Emit the operand bytes for a concrete (mode, value) pair.  For REL
@@ -528,11 +572,19 @@ interface LineState {
 function emitOperand(
   mode:  Mode,
   value: number,
-  pc:    number,
+  pc:             number,
+  isDirectOffset: boolean = false,
 ): { bytes: number[] } | { error: string } {
   const n = operandBytes(mode);
   if (mode === 'REL') {
-    // REL is 1 operand byte, signed offset from the byte after this instruction.
+    if (isDirectOffset) {
+      // User supplied a 1-byte input (hex `$XX` with ≤ 2 digits, or a
+      // signed decimal in [-128, 127]) — emit as the offset byte
+      // directly.  Callers have already range-checked; mask for safety.
+      return { bytes: [value & 0xFF] };
+    }
+    // Target-address interpretation: compute offset from this
+    // instruction's PC+2 to the target, validate ±127 range.
     const offset = value - ((pc + 2) & 0xFFFF);
     if (offset < -128 || offset > 127) {
       return { error: `branch out of range: offset ${offset} to $${value.toString(16).toUpperCase().padStart(4, '0')}` };
@@ -571,7 +623,9 @@ function pass1(
   orgSeen:    boolean;
 } {
   const symbols: Symbols = new Map();
-  const lineStates: LineState[] = annotations.map(() => ({ bytes: [], formats: [], errors: [] }));
+  const lineStates: LineState[] = annotations.map(() => ({
+    bytes: [], formats: [], minDigits: [], errors: [],
+  }));
   const prepared: Prepared[] = [];
   let pc = (startAddr ?? 0) & 0xFFFF;
   let orgSeen = startAddr !== undefined;
@@ -671,6 +725,7 @@ function pass2(
     if (p.op.expr === null) {
       lineState.bytes.push(p.opcode);
       lineState.formats.push('hex');
+      lineState.minDigits.push(2);
       continue;
     }
 
@@ -708,23 +763,61 @@ function pass2(
       lineState.errors.push({ message: `IND address out of 16-bit range: ${resolved.value}` });
       continue;
     }
+
+    // For REL (branches), the operand is either a **direct offset**
+    // (1-byte input: hex with ≤ 2 digits, or a decimal in
+    // [-128, +127]) emitted as-is, or a **target address** (2-byte
+    // input: label, hex with 3+ digits) from which we compute an
+    // offset.  Decimal out of signed-byte range is an error — avoids
+    // the "did the user mean 249 as an address or as -7 as an offset?"
+    // ambiguity.
+    const isDirectOffset =
+      p.mode === 'REL' && !resolved.isLabel && !resolved.forceWide;
+    if (p.mode === 'REL' && isDirectOffset && resolved.dataFormat === 'decimal' &&
+        (resolved.value < -128 || resolved.value > 127)) {
+      lineState.errors.push({
+        message: `decimal branch operand ${resolved.value} out of signed-byte range ` +
+                 `[-128, +127]; use a signed value, a hex literal, or a label`,
+      });
+      continue;
+    }
+    // Range check for the remaining non-REL direct-memory forms.  REL
+    // is handled above (direct offset lets negatives through).
     if ((p.op.form === 'DIR' || p.op.form === 'DIRX' || p.op.form === 'DIRY') &&
+        p.mode !== 'REL' &&
         (resolved.value < 0 || resolved.value > 0xFFFF)) {
       lineState.errors.push({ message: `address out of 16-bit range: ${resolved.value}` });
       continue;
     }
 
-    const emit = emitOperand(p.mode, resolved.value, p.pc);
+    const emit = emitOperand(p.mode, resolved.value, p.pc, isDirectOffset);
     if ('error' in emit) { lineState.errors.push({ message: emit.error }); continue; }
-    // Operand format: REL offsets are computed, not user-written, so they
-    // always read as hex.  Everything else inherits from the resolved value
-    // (literal-direct) or the symbol's declared format (identifier).  Both
-    // bytes of a 2-byte operand get the same format — the low and high
-    // bytes come from one source literal, so it would look odd to split
-    // their rendering.
-    const operandFormat: DataFormat = (p.mode === 'REL') ? 'hex' : resolved.dataFormat;
+    // Operand format: REL target-branches (label or word-sized input)
+    // produce a computed offset byte — no source literal to inherit
+    // from, so default to hex.  Direct-offset REL branches and all
+    // other operand forms inherit from the resolved value (literal
+    // directly, or symbol's declared format).  Both bytes of a 2-byte
+    // operand get the same format — the low/high bytes come from one
+    // source literal, so splitting their rendering would look odd.
+    const operandFormat: DataFormat = (p.mode === 'REL' && !isDirectOffset)
+      ? 'hex'
+      : resolved.dataFormat;
+
+    // Operand min-digit width: byte operands preserve the source
+    // literal's digit count (so `LDY #00` → DATA `00`); word operands
+    // and REL target-branches use the format default (hex: 2,
+    // decimal: 1) per byte.  Direct-offset REL branches count as byte
+    // operands here, so `BNE -7` → `DATA … 249` with the `-7` digit
+    // count of 1 propagating.
+    const formatDefault = (operandFormat === 'hex') ? 2 : 1;
+    const isByteOperand = (emit.bytes.length === 1) && (p.mode !== 'REL' || isDirectOffset);
+    const operandMinDigits = isByteOperand
+      ? (resolved.digitCount ?? formatDefault)
+      : formatDefault;
+
     lineState.bytes.push(p.opcode, ...emit.bytes);
     lineState.formats.push('hex', ...emit.bytes.map(() => operandFormat));
+    lineState.minDigits.push(2, ...emit.bytes.map(() => operandMinDigits));
     // Sanity: what we emit must match the size we committed in pass 1.
     if (1 + emit.bytes.length !== p.size) {
       lineState.errors.push({ message: `internal: size mismatch at $${p.pc.toString(16)}` });

@@ -131,7 +131,10 @@ export function applyAssembler(
       state.bytes.length  >  0  &&
       hostKind(prog, i)   === 'data';
     if (patchable) {
-      patches.push({ lineIdx: i, newText: buildNewDataLineText(prog, i, state.bytes, state.formats) });
+      patches.push({
+        lineIdx: i,
+        newText: buildNewDataLineText(prog, i, state.bytes, state.formats, state.minDigits),
+      });
     }
   }
 
@@ -246,31 +249,40 @@ function extractAnnotation(lineText: string, kind: AnnotationHostKind): string {
   return i < 0 ? '' : lineText.slice(i + 1);
 }
 
-/** Format a byte array as BASIC DATA values, each byte rendered per its
- *  paired `DataFormat` entry.  `'hex'` → `#XX` uppercase, 2 digits;
- *  `'decimal'` → bare base-10 with no leading zeros.  The `formats` array
- *  must be the same length as `bytes` (that's how pass-2 always builds
- *  them), but we guard against a short array by defaulting to hex — so
- *  a bug upstream degrades to the old behaviour rather than producing
- *  garbage. */
-function formatDataValues(bytes: number[], formats: DataFormat[]): string {
+/** Format a byte array as BASIC DATA values.  Each byte is rendered per
+ *  its paired `format` (hex → `#XX`, decimal → `NN`) with `minDigits`
+ *  setting a minimum width (zero-padded) — so `LDY #00` round-trips
+ *  through DATA as `00`, not `0`.  The minimum is never *truncating*;
+ *  oversized values just print their natural width.
+ *
+ *  `formats` / `minDigits` must be the same length as `bytes` (pass-2
+ *  always builds them that way), but we defensively fall back to
+ *  format defaults if an entry is missing, so an upstream bug degrades
+ *  to the old behaviour rather than producing garbage. */
+function formatDataValues(
+  bytes:     number[],
+  formats:   DataFormat[],
+  minDigits: number[],
+): string {
   return bytes.map((b, i) => {
-    const fmt = formats[i] ?? 'hex';
-    if (fmt === 'hex') return '#' + b.toString(16).toUpperCase().padStart(2, '0');
-    return b.toString(10);
+    const fmt = formats[i]   ?? 'hex';
+    const min = minDigits[i] ?? (fmt === 'hex' ? 2 : 1);
+    if (fmt === 'hex') return '#' + b.toString(16).toUpperCase().padStart(min, '0');
+    return b.toString(10).padStart(min, '0');
   }).join(',');
 }
 
 /** Build replacement text for a DATA line whose values will be
  *  overwritten with `newBytes`, preserving any existing annotation
  *  chunk (from the first `'` to end-of-line) exactly.  The parallel
- *  `formats` array comes from pass 2 and records hex-vs-decimal per
- *  emitted byte. */
+ *  `formats` / `minDigits` arrays come from pass 2 and record the
+ *  hex-vs-decimal choice and min emit width per byte. */
 function buildNewDataLineText(
-  prog: Program,
-  lineIdx: number,
-  newBytes: number[],
-  formats: DataFormat[],
+  prog:      Program,
+  lineIdx:   number,
+  newBytes:  number[],
+  formats:   DataFormat[],
+  minDigits: number[],
 ): string {
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
@@ -280,7 +292,7 @@ function buildNewDataLineText(
   const annot = apost >= 0 ? v.slice(apost) : '';   // includes the ' itself
   const sep   = annot ? ' ' : '';
 
-  return `${lineNum} DATA ${formatDataValues(newBytes, formats)}${sep}${annot}`;
+  return `${lineNum} DATA ${formatDataValues(newBytes, formats, minDigits)}${sep}${annot}`;
 }
 
 /** Downgrade any `edited: 'explicit'` marks within `lineIdx`'s byte
