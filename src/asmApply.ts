@@ -55,6 +55,21 @@ export interface AsmApplyError {
   message: string;
 }
 
+/** A machine-code TAP block generated from a `[[ CSAVE "<name>"
+ *  [AUTO] ... ]]` region.  The caller (typically the UI layer)
+ *  decides what to do with it — the standard treatment is to load
+ *  `bytes` as if the user had opened a `<name>.tap` file via the
+ *  usual "Load Files…" flow, adding a new tape entry to the tape
+ *  list.  `name` + `autorun` are also supplied so the caller can
+ *  label the tape and preserve the autorun choice when constructing
+ *  display metadata.  `bytes` is a complete TAP block (sync +
+ *  header + name + data), ready to be handed to `parseTapFile`. */
+export interface GeneratedTap {
+  name:    string;
+  autorun: boolean;
+  bytes:   Uint8Array;
+}
+
 export interface AsmApplyResult {
   /** Indices of lines whose bytes were rewritten by this call. */
   linesPatched: number[];
@@ -64,6 +79,11 @@ export interface AsmApplyResult {
   /** Resolved symbol table from the assembly pass.  Exposed for the
    *  Phase 6 back-patch directive implementation. */
   symbols: Symbols;
+  /** Any TAP blocks generated from `[[ CSAVE … ]]` regions.  Only
+   *  populated when the overall assembly produced zero errors — any
+   *  error in the program suppresses all TAP creation (per-line
+   *  DATA patches are independent of this gate and still apply). */
+  generatedTaps: GeneratedTap[];
 }
 
 /**
@@ -145,6 +165,19 @@ export function applyAssembler(
   };
   const dataOutputRegions: DataOutputRegion[] = [];
   let   activeDataRegion: { openLineIdx: number; targetLine: number } | null = null;
+
+  /** Regions opened by `[[ CSAVE "<name>" [AUTO]` that become virtual
+   *  machine-code TAP blocks after assembly.  Shape parallels
+   *  `DataOutputRegion`; `name` is the filename stored in the TAP
+   *  header and `autorun` maps to the header's autorun flag. */
+  type TapOutputRegion = {
+    openLineIdx:  number;
+    closeLineIdx: number;
+    name:         string;
+    autorun:      boolean;
+  };
+  const tapOutputRegions: TapOutputRegion[] = [];
+  let   activeTapRegion: { openLineIdx: number; name: string; autorun: boolean } | null = null;
   /** Errors raised while parsing bounded-region params, tagged with
    *  line info at collection time below. */
   const filterErrors: AsmApplyError[] = [];
@@ -164,30 +197,67 @@ export function applyAssembler(
     blockEndAfterLine.push(res.sawCloseMarker);
     activeState   = res.active;
     wordModeState = res.wordMode;
-    // Track DATA-output regions.  A `[[ DATA <line>` opens one; the
-    // next `]]` closes it.  The open line and close line are both
-    // considered part of the region (their emissions, if any, get
-    // included in the byte collection).
-    if (res.openedOutput && res.openedOutput.kind === 'data') {
-      activeDataRegion = { openLineIdx: i, targetLine: res.openedOutput.lineNum };
+    // Track output-sink regions.  A `[[ DATA <line>` or
+    // `[[ CSAVE "name"` opens one; the next `]]` closes it.  The
+    // open line and close line are both considered part of the
+    // region (their emissions, if any, get included in the byte
+    // collection).  Output sinks are only valid on type-2 `[[`
+    // markers (line-start, bare-assembler-between-markers form) —
+    // using them inside a type-1 `'` annotation is a mistake, since
+    // type-1 assembler already has its output mechanism (per-line
+    // DATA patching of the host line).
+    if (res.openedOutput) {
+      if (hostKinds[i] !== 'type2-open') {
+        filterErrors.push({
+          lineIdx: i, lineNum,
+          message: `[[ ${res.openedOutput.kind === 'data' ? 'DATA' : 'CSAVE'} is only valid on a type-2 `
+                 + `[[ region (bare-assembler form), not inside a ' annotation`,
+        });
+      } else if (res.openedOutput.kind === 'data') {
+        activeDataRegion = { openLineIdx: i, targetLine: res.openedOutput.lineNum };
+      } else {
+        activeTapRegion = {
+          openLineIdx: i,
+          name:        res.openedOutput.name,
+          autorun:     res.openedOutput.autorun,
+        };
+      }
     }
-    if (res.sawCloseMarker && activeDataRegion !== null) {
-      dataOutputRegions.push({
-        openLineIdx:  activeDataRegion.openLineIdx,
-        closeLineIdx: i,
-        targetLine:   activeDataRegion.targetLine,
-      });
-      activeDataRegion = null;
+    if (res.sawCloseMarker) {
+      if (activeDataRegion !== null) {
+        dataOutputRegions.push({
+          openLineIdx:  activeDataRegion.openLineIdx,
+          closeLineIdx: i,
+          targetLine:   activeDataRegion.targetLine,
+        });
+        activeDataRegion = null;
+      }
+      if (activeTapRegion !== null) {
+        tapOutputRegions.push({
+          openLineIdx:  activeTapRegion.openLineIdx,
+          closeLineIdx: i,
+          name:         activeTapRegion.name,
+          autorun:      activeTapRegion.autorun,
+        });
+        activeTapRegion = null;
+      }
     }
     for (const msg of res.errors) filterErrors.push({ lineIdx: i, lineNum, message: msg });
   }
-  // If a `[[ DATA` region was never closed, extend it to the end
-  // of the program.
+  // If any output-sink region was never closed, extend to end of program.
   if (activeDataRegion !== null) {
     dataOutputRegions.push({
       openLineIdx:  activeDataRegion.openLineIdx,
       closeLineIdx: prog.lines.length - 1,
       targetLine:   activeDataRegion.targetLine,
+    });
+  }
+  if (activeTapRegion !== null) {
+    tapOutputRegions.push({
+      openLineIdx:  activeTapRegion.openLineIdx,
+      closeLineIdx: prog.lines.length - 1,
+      name:         activeTapRegion.name,
+      autorun:      activeTapRegion.autorun,
     });
   }
 
@@ -214,6 +284,26 @@ export function applyAssembler(
     return filteredAnnots[i];
   });
   const isDataLine: boolean[] = prog.lines.map((_line, i) => hostKind(prog, i) === 'data');
+
+  // 1b. CSAVE regions without any `ORG` default to load-address $501
+  //     (user-chosen sensible default — above the BASIC system area,
+  //     the conventional machine-code entry point).  We inject a
+  //     synthetic `ORG $501` into the region's opening line's
+  //     annotation, so the assembler sees it naturally and the
+  //     region's labels get anchored properly for back-patching.
+  //     Regions that DO have an ORG of their own are left alone —
+  //     the user's choice takes precedence.
+  for (const region of tapOutputRegions) {
+    let hasOrg = false;
+    for (let i = region.openLineIdx; i <= region.closeLineIdx; i++) {
+      if (annotationHasOrg(asmAnnotations[i])) { hasOrg = true; break; }
+    }
+    if (!hasOrg) {
+      const existing = asmAnnotations[region.openLineIdx];
+      asmAnnotations[region.openLineIdx] =
+        existing === '' ? 'ORG $501' : `ORG $501:${existing}`;
+    }
+  }
 
   // 2. Assemble them together so symbols are shared program-wide.
   const { perLine, symbols, emissions } = assembleProgram(
@@ -337,9 +427,53 @@ export function applyAssembler(
     }
 
     const buf = buildRegionByteBuffer(emissions, region.openLineIdx, region.closeLineIdx);
-    if (!buf) continue;        // nothing to emit (region had no instructions)
+    if (!buf) {
+      const openLine = prog.lines[region.openLineIdx];
+      const openLineNum = prog.bytes[openLine.firstByte + 2].v
+                        + prog.bytes[openLine.firstByte + 3].v * 256;
+      errors.push({
+        lineIdx: region.openLineIdx, lineNum: openLineNum,
+        message: `[[ region produced no assembled bytes`,
+      });
+      continue;
+    }
     const { newText, ownedByteIndices } = buildType2DataLineText(prog, targetIdx, buf.bytes);
     patches.push({ lineIdx: targetIdx, newText, ownedByteIndices });
+  }
+
+  // Type-2 TAP-output blocks.  For each `[[ CSAVE "<name>" [AUTO]`
+  // region that assembled cleanly, collect its bytes into a
+  // contiguous buffer and construct a raw TAP block.  The result
+  // goes into `generatedTaps` — the UI layer round-trips it through
+  // `parseTapFile` to produce a virtual tape.  Regions with any
+  // error in their lines are skipped; emission of *any* TAP is
+  // additionally gated globally (below) on zero overall errors, so
+  // a broken program never produces partial TAP output.
+  const candidateTaps: GeneratedTap[] = [];
+  for (const region of tapOutputRegions) {
+    let regionHasErrors = false;
+    for (let i = region.openLineIdx; i <= region.closeLineIdx; i++) {
+      if (perLine[i].errors.length > 0) { regionHasErrors = true; break; }
+    }
+    if (regionHasErrors) continue;
+
+    const buf = buildRegionByteBuffer(emissions, region.openLineIdx, region.closeLineIdx);
+    if (!buf) {
+      const openLine = prog.lines[region.openLineIdx];
+      const openLineNum = prog.bytes[openLine.firstByte + 2].v
+                        + prog.bytes[openLine.firstByte + 3].v * 256;
+      errors.push({
+        lineIdx: region.openLineIdx, lineNum: openLineNum,
+        message: `[[ region produced no assembled bytes`,
+      });
+      continue;
+    }
+
+    candidateTaps.push({
+      name:    region.name,
+      autorun: region.autorun,
+      bytes:   buildMachineCodeTap(region.name, region.autorun, buf.startPc, buf.bytes),
+    });
   }
 
   // 4. Apply Phase 5 patches.  Line indices are stable across `applyLineEdit`
@@ -373,7 +507,16 @@ export function applyAssembler(
     if (res.patched) linesPatched.push(i);
   }
 
-  return { linesPatched, errors, symbols };
+  // Global gate for TAP generation: per the user's preference, any
+  // error anywhere in the program suppresses all TAP creation.  Per-
+  // line DATA patches are independently gated (per-line `state.errors`
+  // check above) and stay in effect even when other errors exist —
+  // easier for the user to see partial progress in the per-line DATA
+  // mode.  TAP creation is all-or-nothing because a half-correct
+  // machine-code binary is dangerous to run.
+  const generatedTaps: GeneratedTap[] = errors.length === 0 ? candidateTaps : [];
+
+  return { linesPatched, errors, symbols, generatedTaps };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -679,6 +822,55 @@ function buildType2DataLineText(
   for (let k = 0; k < values.length; k++) ownedByteIndices.push(valuesStartByte + k);
 
   return { newText, ownedByteIndices };
+}
+
+/** Assemble a raw TAP block for a machine-code region.  Produces
+ *  the exact byte sequence that `parseTapFile` consumes: the canonical
+ *  8× `0x16` + `0x24` sync, the 9-byte header, a null-terminated
+ *  filename, and the program's data bytes.  No Program object is
+ *  constructed — we're creating fresh output that the UI layer
+ *  round-trips through `parseTapFile` to get its own Program.
+ *
+ *  Header layout (matches `tapEncoder.encodeTapBlock` and
+ *  `tapDecoder.parseTapFile`):
+ *    [00][00][fileType][autorun][endHi][endLo][startHi][startLo][00]
+ *
+ *  `fileType` is `0x01` for machine code.  `endAddr` is exclusive
+ *  (first byte past program data).  `autorun` is `0x80` when the
+ *  caller asks for it. */
+function buildMachineCodeTap(
+  name:      string,
+  autorun:   boolean,
+  startAddr: number,
+  bytes:     number[],
+): Uint8Array {
+  const endAddr = (startAddr + bytes.length) & 0xFFFF;   // exclusive
+  const out: number[] = [];
+  // Sync.
+  for (let i = 0; i < 8; i++) out.push(0x16);
+  out.push(0x24);
+  // Header.
+  out.push(0x00);
+  out.push(0x00);
+  out.push(0x01);                                  // fileType = machine code
+  out.push(autorun ? 0x80 : 0x00);
+  out.push((endAddr   >> 8) & 0xFF);
+  out.push( endAddr         & 0xFF);
+  out.push((startAddr >> 8) & 0xFF);
+  out.push( startAddr       & 0xFF);
+  out.push(0x00);
+  // Name, null-terminated.  Name already validated non-empty and NUL-
+  // free by parseMarkerParams.  Characters beyond 0x7E are clamped to
+  // 0x7E (the Oric's 7-bit display range) — preserves visual parity
+  // with how buildLineElements renders content.
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i);
+    out.push(c & 0x7F);
+  }
+  out.push(0x00);
+  // Data.
+  for (const b of bytes) out.push(b & 0xFF);
+  return new Uint8Array(out);
 }
 
 /** Downgrade `edited: 'explicit'` to `'automatic'` for exactly the
@@ -1034,15 +1226,29 @@ type ParsedMarker =
   | { kind: 'plain' }
   | { kind: 'error'; message: string };
 
-/** Output-sink spec attached to a `[[` marker.  `kind: 'data'` routes
- *  the region's assembled bytes into a single BASIC DATA statement on
- *  an existing line (`lineNum`); intended for type-2 style sources
- *  where assembler lives bare between `[[` and `]]` and the program's
- *  POKE loop reads back the bytes.  Future: `kind: 'tap'` for TAP
- *  output.  `undefined` means "no output sink declared" — type-1
- *  per-line DATA behaviour applies. */
+/** Output-sink spec attached to a `[[` marker.  Two flavours:
+ *
+ *  - `kind: 'data'` routes the region's assembled bytes into a
+ *    single BASIC DATA statement on an existing line (`lineNum`).
+ *    Intended for programs where a POKE loop reads back the bytes
+ *    at runtime — compact for small programs, but slow and subject
+ *    to Oric-1's ~78-char edit-line limit for the resulting DATA.
+ *  - `kind: 'tap'` packages the region into a standalone machine-
+ *    code TAP block that the tool surfaces as a new virtual tape
+ *    (same UI treatment as a loaded `.tap` file).  `autorun`
+ *    maps to the TAP header's autorun flag — true if the user
+ *    wrote `AUTO` after the name.  Intended for larger programs
+ *    where DATA-and-POKE would be impractical.
+ *
+ *  Both sinks are valid only on type-2 `[[` markers (line-start
+ *  bare-assembler form); type-1 inline `[[` inside a `'` annotation
+ *  is rejected with an error.
+ *
+ *  `undefined` means "no output sink declared" — type-1 per-line
+ *  DATA behaviour applies. */
 type OutputSink =
-  | { kind: 'data'; lineNum: number };
+  | { kind: 'data'; lineNum: number }
+  | { kind: 'tap';  name: string; autorun: boolean };
 
 interface MarkerParams {
   /** undefined → preserve the prevailing mode. */
@@ -1051,42 +1257,89 @@ interface MarkerParams {
   output?:  OutputSink;
 }
 
-/** Parse a `[[`-open statement's parameter list.  Params are
- *  whitespace-separated tokens after the `[[` marker, case-insensitive
- *  where the user's preferences admit it (mnemonic/ORG-style).  Order
- *  within the list doesn't matter.  Currently recognised:
+/** Parse a `[[`-open statement's parameter list.  Params are whitespace-
+ *  separated (except inside `"..."` string literals, which tolerate
+ *  spaces and preserve case).  Keyword matching is case-insensitive.
+ *
+ *  Currently recognised:
  *
  *    - `WORDS` / `BYTES` — per-line DATA render mode (sticky setting).
- *    - `DATA <line>`     — type-2 output sink: emit the region's
- *      bytes into a single DATA statement on the given BASIC line
- *      number.  The `<line>` token must immediately follow `DATA`.
+ *    - `DATA <line>`     — output sink: emit the region's bytes into
+ *      a single DATA statement on the given BASIC line number.
+ *    - `CSAVE "<name>" [AUTO]` — output sink: package the region's
+ *      bytes as a virtual machine-code TAP block named `<name>`,
+ *      with autorun flag set iff `AUTO` follows.  Name must be
+ *      non-empty and contain no NUL byte.
  *
- *  Unknown tokens (or `DATA` without a numeric operand) are errors.
- *  No params → `{wordMode: undefined}` (preserve prevailing). */
+ *  Unknown tokens, malformed operands, or unterminated strings are
+ *  errors.  No params → `{wordMode: undefined, output: undefined}`. */
 function parseMarkerParams(rest: string): { params: MarkerParams } | { error: string } {
-  const toks = rest.trim().split(/\s+/).filter(t => t.length > 0);
+  // Hand-rolled string-aware tokeniser: each token is either a run of
+  // non-space, non-quote chars, or a quoted string (outer `"`s
+  // stripped; no escape handling — Oric filenames don't use them).
+  const toks: { text: string; quoted: boolean }[] = [];
+  let i = 0;
+  while (i < rest.length) {
+    const c = rest[i];
+    if (c === ' ' || c === '\t') { i++; continue; }
+    if (c === '"') {
+      const end = rest.indexOf('"', i + 1);
+      if (end < 0) return { error: `unterminated string literal in [[ parameters` };
+      toks.push({ text: rest.slice(i + 1, end), quoted: true });
+      i = end + 1;
+      continue;
+    }
+    let j = i;
+    while (j < rest.length && rest[j] !== ' ' && rest[j] !== '\t' && rest[j] !== '"') j++;
+    toks.push({ text: rest.slice(i, j), quoted: false });
+    i = j;
+  }
+
   let wordMode: boolean | undefined = undefined;
   let output:   OutputSink | undefined = undefined;
-  for (let i = 0; i < toks.length; i++) {
-    const t = toks[i];
-    const u = t.toUpperCase();
+
+  for (let k = 0; k < toks.length; k++) {
+    const t = toks[k];
+    if (t.quoted) return { error: `unexpected string literal at position ${k + 1}` };
+    const u = t.text.toUpperCase();
     if (u === 'WORDS')      { wordMode = true;  continue; }
     if (u === 'BYTES')      { wordMode = false; continue; }
     if (u === 'DATA') {
-      // Consume the next token as the target line number.
-      const arg = toks[i + 1];
-      if (arg === undefined || !/^\d+$/.test(arg)) {
+      const arg = toks[k + 1];
+      if (arg === undefined || arg.quoted || !/^\d+$/.test(arg.text)) {
         return { error: `DATA requires a BASIC line number: [[ DATA <line>` };
       }
-      const lineNum = parseInt(arg, 10);
+      const lineNum = parseInt(arg.text, 10);
       if (lineNum < 0 || lineNum > 0xFFFF) {
-        return { error: `DATA target line number out of range: ${arg}` };
+        return { error: `DATA target line number out of range: ${arg.text}` };
       }
       output = { kind: 'data', lineNum };
-      i++;                 // skip the consumed argument
+      k++;
       continue;
     }
-    return { error: `unknown bounded-region parameter: ${t}` };
+    if (u === 'CSAVE') {
+      const nameTok = toks[k + 1];
+      if (nameTok === undefined || !nameTok.quoted) {
+        return { error: `CSAVE requires a quoted name: [[ CSAVE "<name>" [AUTO]` };
+      }
+      if (nameTok.text.length === 0) {
+        return { error: `CSAVE name must not be empty` };
+      }
+      if (nameTok.text.includes('\0')) {
+        return { error: `CSAVE name must not contain NUL bytes` };
+      }
+      let autorun = false;
+      let consumed = 1;
+      const flagTok = toks[k + 2];
+      if (flagTok && !flagTok.quoted && flagTok.text.toUpperCase() === 'AUTO') {
+        autorun = true;
+        consumed = 2;
+      }
+      output = { kind: 'tap', name: nameTok.text, autorun };
+      k += consumed;
+      continue;
+    }
+    return { error: `unknown bounded-region parameter: ${t.text}` };
   }
   return { params: { wordMode, output } };
 }

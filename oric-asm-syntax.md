@@ -53,18 +53,27 @@ Currently defined parameters:
 |------------------|------------------------------------------------------------------------|
 | `WORDS`          | 2-byte operands (ABS/ABX/ABY/IND) render as one 4-hex-digit word: `LDA $9800` → `DATA #AD,#9800`.  **This is the default.** |
 | `BYTES`          | 2-byte operands render as two separate bytes: `LDA $9800` → `DATA #AD,#00,#98`. |
-| `DATA <line>`    | **Output sink.** All assembled bytes from this `[[`-opened region are concatenated into a single BASIC `DATA` statement on the given line number, rendered byte-per-value as `#XX,#XX,…`.  Pairs with a pre-existing `DATA 0` (or similar placeholder) at the target line; the placeholder's value is overwritten in full, matching the `edited: 'automatic'` contract of the per-line DATA mode.  See *Output Sinks* below. |
+| `DATA <line>`    | **Output sink** (type-2 only). All assembled bytes from this `[[`-opened region are concatenated into a single BASIC `DATA` statement on the given line number, rendered byte-per-value as `#XX,#XX,…`.  Pairs with a pre-existing `DATA 0` (or similar placeholder) at the target line; the placeholder's value is overwritten in full.  See *Output Sinks* below. |
+| `CSAVE "<name>" [AUTO]` | **Output sink** (type-2 only). Packages the region's assembled bytes as a standalone machine-code TAP block named `<name>`, surfaced in the UI as a new virtual tape (same treatment as a loaded `.tap`).  `AUTO` sets the TAP header's autorun flag.  Name is any non-empty byte string that doesn't contain a NUL (spaces and symbols like `&` are fine).  See *Output Sinks* below. |
 
 Per-line granularity: the render mode applied to a given DATA line is the mode prevailing at the start of its first active statement.  Mid-annotation mode changes (`' LDA $9800:[[ BYTES`) take effect at the next line, not within the current annotation's emission.  In practice, mode changes are best placed on a dedicated REM line.
 
 ### Output Sinks
 
-By default, the re-assembler writes assembled bytes back into the originating DATA host lines (per-line DATA mode, one-to-one with the source annotations).  An **output sink** declared on a `[[` marker overrides this for the region it opens, routing every byte the region assembles into a single target location instead:
+By default, the re-assembler writes assembled bytes back into the originating DATA host lines (per-line DATA mode, one-to-one with the source annotations).  An **output sink** declared on a `[[` marker overrides this for the region it opens, routing every byte the region assembles into a single target location instead.  Output sinks are valid only on line-start (type-2) `[[` markers — not on `[[` inside a `'` annotation (type-1 already has its output path via per-line DATA patching).
 
-- `[[ DATA <line>` — collect the region's bytes into a single DATA statement on the given BASIC line number.  Values are rendered as `#XX,#XX,…` (byte-per-value hex), irrespective of the region's WORDS/BYTES setting; a type-2 blob is typically read back by a `FOR I=NAME TO NAME_END : READ X : POKE I,X : NEXT` loop that requires one byte per `READ`.  Gaps between non-contiguous `ORG`s inside the region are zero-filled.  Error if the target line number is not found in the program, or if the target line falls inside the region itself.
-- (More sinks may be added later, e.g. for generating standalone TAP files.)
+Two flavours are supported:
 
-The output-sink declaration scopes to the `[[` that carries it: the region's end is the matching `]]` (or end of program if unclosed).  Named assembler blocks (`ORG $xxxx .NAME`) and their `NAME` / `NAME_END` labels work normally inside an output-sink region, making it straightforward to back-patch a `FOR … TO …` loader loop that reads back from the generated DATA line.
+- **`[[ DATA <line>`** — collect the region's bytes into a single DATA statement on the given BASIC line number.  Values are rendered as `#XX,#XX,…` (byte-per-value hex), irrespective of the region's WORDS/BYTES setting; a blob of this form is typically read back by a `FOR I=NAME TO NAME_END : READ X : POKE I,X : NEXT` loop that requires one byte per `READ`.  Gaps between non-contiguous `ORG`s inside the region are zero-filled.  Error if the target line number is not found in the program, or if the target line falls inside the region itself.
+
+- **`[[ CSAVE "<name>" [AUTO]`** — package the region's bytes as a machine-code TAP block named `<name>`.  The tool surfaces the result as a new virtual tape in the tape list, identical in treatment to a loaded `.tap` file — the user can click through to its program, inspect it, or include it via *Build TAP…* for emulator testing.  `AUTO` sets the TAP header's autorun flag, so CLOAD auto-executes from the start address.  Each `applyAssembler` run appends new tapes; existing tapes are never overwritten (close and re-run if you want a clean slate).  The TAP's start address defaults to `$501` if the region has no explicit `ORG`; an explicit `ORG $xxxx` (named or bare) at the region's top overrides this and sets the start address directly.  `endAddr` = last assembled byte + 1.  Gaps between non-contiguous `ORG`s are zero-filled.
+
+**Common rules for output sinks:**
+
+- Output-sink declarations scope to the `[[` that carries them: the region's end is the matching `]]` (or end of program if unclosed).
+- Named assembler blocks (`ORG $xxxx .NAME`) and their `NAME` / `NAME_END` labels work normally inside an output-sink region.  For DATA sinks, this lets the user's POKE loop auto-patch its `FOR … TO …` bounds.  For CSAVE sinks, the labels may be referenced from BASIC code elsewhere (e.g. a `CALL NAME` after the TAP has been CLOADed into memory).
+- A region that produced no assembled bytes is an error ("`[[ region produced no assembled bytes`").
+- For CSAVE specifically, any assembler error **anywhere** in the program suppresses **all** TAP generation for that run — a half-correct machine-code binary is dangerous to run, so we take an all-or-nothing stance.  Per-line type-1 DATA patches are independent of this gate and still apply.
 
 ## Numeric Literals
 

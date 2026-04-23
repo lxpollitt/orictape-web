@@ -3252,25 +3252,58 @@ function runReassembler(): void {
   const prog = programs[activeProgIdx];
   if (!prog) return;
 
-  const { linesPatched, errors } = applyAssembler(prog);
+  const { linesPatched, errors, generatedTaps } = applyAssembler(prog);
   const nPatched = linesPatched.length;
   const nErrors  = errors.length;
+
+  // Any `[[ CSAVE "<name>" [AUTO] ... ]]` regions in the source
+  // produce virtual tapes — one per region.  We round-trip through
+  // `parseTapFile` so the Program structure is built via the same
+  // path as user-loaded TAPs (catches any encoding edge-cases and
+  // gives consistent metadata).  Each generated tape is APPENDED —
+  // we don't overwrite prior tapes with the same name (matches the
+  // load-a-file-twice UX and avoids silently destroying tabs the
+  // user may want to compare).  The global error gate inside
+  // `applyAssembler` guarantees `generatedTaps` is empty when the
+  // program has any error, so we never produce broken TAPs.
+  let nTapsAdded = 0;
+  for (const tap of generatedTaps) {
+    let tapPrograms: Program[];
+    try { tapPrograms = parseTapFile(tap.bytes.buffer as ArrayBuffer); }
+    catch (err) {
+      errors.push({
+        lineIdx: 0, lineNum: 0,
+        message: `[[ CSAVE "${tap.name}": internal error building TAP: ${err}`,
+      });
+      continue;
+    }
+    assignProgNumbers(tapPrograms);
+    tapes.push({
+      filename:   `${tap.name}.tap`,
+      samples:    new Int16Array(0),
+      sampleRate: 48000,
+      programs:   tapPrograms,
+      fromTap:    true,
+    });
+    nTapsAdded++;
+  }
 
   // Render first: `renderAll()` calls `updateStatusBar()` which would
   // overwrite our message, so the order matters — render, then set the
   // feedback message last.
-  if (nPatched > 0) renderAll();
+  if (nPatched > 0 || nTapsAdded > 0) renderAll();
 
   // Status-bar feedback (always set — even if nothing changed, so the
   // user can see the action ran).  Uses the bottom statusBar, where
   // contextual messages live, rather than the top statusEl which carries
   // the load-summary line.
-  if (nPatched === 0 && nErrors === 0) {
+  if (nPatched === 0 && nErrors === 0 && nTapsAdded === 0) {
     statusBar.innerHTML = '<span class="sb-dim">Re-assemble: no changes.</span>';
   } else {
     const parts: string[] = [];
-    if (nPatched > 0) parts.push(`${nPatched} line${nPatched !== 1 ? 's' : ''} updated`);
-    if (nErrors  > 0) parts.push(`${nErrors} error${nErrors !== 1 ? 's' : ''}`);
+    if (nPatched   > 0) parts.push(`${nPatched} line${nPatched !== 1 ? 's' : ''} updated`);
+    if (nTapsAdded > 0) parts.push(`${nTapsAdded} TAP${nTapsAdded !== 1 ? 's' : ''} generated`);
+    if (nErrors    > 0) parts.push(`${nErrors} error${nErrors !== 1 ? 's' : ''}`);
     statusBar.innerHTML = `<span class="sb-dim">Re-assemble: ${parts.join(', ')}.</span>`;
   }
 

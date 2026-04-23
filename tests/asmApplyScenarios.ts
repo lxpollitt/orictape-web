@@ -1868,6 +1868,225 @@ test('type-2: label names containing BASIC keywords (.SFORWT, .NEXTRC) work', ()
   return null;
 });
 
+// ── Type-2 `[[ CSAVE "<name>" [AUTO]` output ──────────────────────────────
+
+test('CSAVE: basic region → one generated TAP', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $9800",
+    "120 LDA #$FF",                       // A9 FF
+    "130 RTS",                            // 60
+    "140 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps.length !== 1) return `expected 1 TAP, got ${r.generatedTaps.length}`;
+  const t = r.generatedTaps[0];
+  if (t.name !== 'GAME')   return `name: ${t.name}`;
+  if (t.autorun !== false) return `autorun should be false`;
+  // Quick header check: sync = 8× 0x16 + 0x24; then header; then name "GAME"\0; then data.
+  const b = t.bytes;
+  for (let i = 0; i < 8; i++) if (b[i] !== 0x16) return `sync[${i}]: ${b[i]}`;
+  if (b[8] !== 0x24)  return `sync release: ${b[8]}`;
+  if (b[11] !== 0x01) return `fileType: ${b[11]}`;           // machine code
+  if (b[12] !== 0x00) return `autorun byte: ${b[12]}`;
+  // startAddr = $9800, endAddr = $9803 (exclusive: 3 bytes emitted).
+  const endAddr   = (b[13] << 8) | b[14];
+  const startAddr = (b[15] << 8) | b[16];
+  if (startAddr !== 0x9800) return `startAddr: ${startAddr.toString(16)}`;
+  if (endAddr   !== 0x9803) return `endAddr: ${endAddr.toString(16)}`;
+  // Name + null + bytes.
+  const nameStart = 18;
+  const expectName = 'GAME';
+  for (let i = 0; i < expectName.length; i++) {
+    if (b[nameStart + i] !== expectName.charCodeAt(i)) return `name byte ${i}: ${b[nameStart + i]}`;
+  }
+  if (b[nameStart + 4] !== 0x00) return `name null: ${b[nameStart + 4]}`;
+  // Data: A9 FF 60.
+  const dataStart = nameStart + 5;
+  if (b[dataStart] !== 0xA9 || b[dataStart + 1] !== 0xFF || b[dataStart + 2] !== 0x60) {
+    return `data: ${[...b.slice(dataStart, dataStart + 3)].map(x => x.toString(16)).join(' ')}`;
+  }
+  return null;
+});
+
+test('CSAVE: AUTO flag sets autorun byte', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\" AUTO",
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps[0].autorun !== true) return 'autorun should be true';
+  if (r.generatedTaps[0].bytes[12] !== 0x80) return `autorun byte: ${r.generatedTaps[0].bytes[12]}`;
+  return null;
+});
+
+test('CSAVE: no explicit ORG defaults to $501', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 LDA #$FF",                       // no ORG — default $501
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  const b = r.generatedTaps[0].bytes;
+  const startAddr = (b[15] << 8) | b[16];
+  if (startAddr !== 0x0501) return `startAddr: ${startAddr.toString(16)}`;
+  return null;
+});
+
+test('CSAVE: user ORG overrides $501 default', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $C000",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  const b = r.generatedTaps[0].bytes;
+  const startAddr = (b[15] << 8) | b[16];
+  if (startAddr !== 0xC000) return `startAddr: ${startAddr.toString(16)}`;
+  return null;
+});
+
+test('CSAVE: name with spaces and ampersand', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"HARRIER & CO\"",
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps[0].name !== 'HARRIER & CO') return `name: ${r.generatedTaps[0].name}`;
+  return null;
+});
+
+test('CSAVE: missing quoted name is an error', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE",
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error';
+  if (!/CSAVE requires a quoted name/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('CSAVE: empty name is an error', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"\"",
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error';
+  if (!/name must not be empty/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('CSAVE: empty region errors with generic zero-bytes message', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $9800",
+    "120 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error';
+  if (!/produced no assembled bytes/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('CSAVE: multiple regions with same name → multiple TAPs', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+    "200 [[ CSAVE \"GAME\"",
+    "210 ORG $9900",
+    "220 RTS",
+    "230 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps.length !== 2) return `expected 2 TAPs, got ${r.generatedTaps.length}`;
+  return null;
+});
+
+test('CSAVE: any assembler error → no TAPs generated (global gate)', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $9800",
+    "120 JMP UNDEFINED",                  // undefined symbol → assembler error
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error';
+  if (r.generatedTaps.length !== 0) return `expected 0 TAPs, got ${r.generatedTaps.length}`;
+  return null;
+});
+
+test('CSAVE: back-patches still resolve block labels correctly', () => {
+  const p = mkProgram([
+    "1 REM ' [[",                          // activate (program has markers → initial off)
+    "5 CALL #0 ' .BLOCKA",                 // back-patch to block's start
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $9800 .BLOCKA",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^5 CALL #9800/.test(p.lines[1].v)) return `line 5: ${p.lines[1].v}`;
+  return null;
+});
+
+test('CSAVE: type-1 inline [[ CSAVE is rejected', () => {
+  const p = mkProgram([
+    "100 REM ' [[ CSAVE \"GAME\"",
+    "110 REM ' ORG $9800",
+    "120 REM ' RTS",
+    "130 REM ' ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error';
+  if (!/only valid on a type-2/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('[[ DATA N also rejected on type-1 inline [[', () => {
+  const p = mkProgram([
+    "10 DATA 0",
+    "100 REM ' [[ DATA 10",
+    "110 REM ' ORG $9800",
+    "120 REM ' RTS",
+    "130 REM ' ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error';
+  if (!/only valid on a type-2/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
 test('type-2: ORG survives BASIC `OR` tokenisation round-trip', () => {
   // Oric BASIC tokenises the `OR` substring inside `ORG`, so
   // `110 ORG $9800` stores as [OR-token][G][space]...  The rendered
