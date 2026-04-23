@@ -96,17 +96,26 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 - `ORG $xxxx` — set assembly address. May appear multiple times for non-contiguous code.
 - `ORG` is required if any label is referenced in an absolute addressing context (`JMP LABEL`, `JSR LABEL`, `LDA LABEL` in ABS form, etc.) or by a back-patch directive. Programs that use only equates, relative branches, and REL-only label references may omit `ORG`.
 
-## PC-Breaks from Zero-Emit DATA Lines
+## Assembler Blocks
 
-A DATA line whose annotation produces **zero assembled bytes** — because the annotation is empty, consists only of a `*` comment, or declares labels/equates without any instruction — leaves the line's raw DATA values unassembled.  Those pre-existing values still occupy memory somewhere, but the assembler has no information about which address, so PC arithmetic through that line is broken.  This is called a **PC-break**.
+The re-assembler treats the annotated lines of a program as one or more **assembler blocks** — contiguous runs of assembled instructions (and the labels/equates declared alongside them) that share a single program counter.  Every block is either **ORG-declared** (anchored to a specific memory address via an `ORG $xxxx`) or undeclared (useful only for relative-only uses — see below).
 
-**Effect on labels.**  A label declared while PC is unanchored (either because the program hasn't seen an `ORG` yet, or because a PC-break has occurred since the last `ORG`) is marked *unanchored*.  Any attempt to use an unanchored label in an absolute addressing context — `JMP LABEL`, `JSR LABEL`, `LDA LABEL` (ABS), or a back-patch `.LABEL` on `CALL`/`POKE`/`DOKE`/`PEEK`/`DEEK` — is an error.
+**What ends the current block.**  A DATA line whose annotation produces **no assembled output** — because the annotation is empty, consists only of a `*` comment, or declares labels/equates without any instruction — ends the current block.  Its raw DATA values still occupy memory somewhere, but the assembler has no information about which address, so the block cannot continue through that line.  The next annotated line after it belongs to a new block.
 
-**Effect on branches.**  REL branches (`BNE LABEL`, `BEQ LABEL`, etc.) are valid within a single PC-consistent region.  A branch whose target label lives in a different region (across a PC-break or across an intervening `ORG`) is an error — the computed signed-byte offset would be meaningless.
+**ORG declarations.**  An `ORG $xxxx` anchors a block at the specified memory address.  If a block has no `ORG` (e.g. the program starts with assembly that never declares one, or the previous block ended and no `ORG` has appeared yet), the block is undeclared.
 
-**Re-anchoring.**  An `ORG $xxxx` after a PC-break re-anchors PC and starts a new region.  Labels declared after the `ORG` are anchored again.  A bounded-region skip (`]]` around the problematic line, then `[[` to resume) also avoids the break — inactive lines never enter the assembler so contribute nothing to PC.
+**ORG is required for.**  Any use of a block's labels in:
 
-**Strict vs lenient mode.**  The behaviour above is the *lenient* (fully-backward-compatible) mode and applies when the program contains no `[[` / `]]` markers anywhere.  When the program does contain markers, the tool switches to **strict mode**: a DATA line inside an active region that emits zero bytes is a **hard error** at that line (not just a silent PC-break).  The rationale: `[[` is the user declaring "everything in this region is assembler"; a zero-emit DATA line inside is almost certainly a mistake (forgotten annotation, typo'd mnemonic that parsed as a comment, or stray non-code DATA that should have been wrapped in `]]`/`[[`).  The fix is one of: annotate with instructions, skip the line with `]]` and `[[`, or move any pure directive (`ORG`, label, equate) onto a REM line where zero-emit annotations are idiomatic.
+- An absolute addressing context — `JMP LABEL`, `JSR LABEL`, `LDA LABEL` (ABS form), etc.
+- A back-patch directive — `.LABEL` on a `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` line.
+
+Using a label whose block has no `ORG` in either of these contexts is an error.  Blocks that use only equates, relative branches, and REL-only label references may omit `ORG` entirely.
+
+**Relative branches stay within the block.**  `BNE LABEL`, `BEQ LABEL`, etc. must branch to a label in the **same block** as the branch.  A branch that would cross a block boundary is an error — the signed-byte offset would be meaningless.  REL to a label in the same block is valid whether the block has an `ORG` or not.
+
+**Skipping non-code lines.**  A bounded-region skip (`]]` before the non-code line and `[[` after it) removes the line from the assembler's view entirely, so the current block continues across it.  This is how you tell the tool "these DATA values aren't assembly — please ignore them for assembly purposes".
+
+**Strict vs lenient enforcement.**  The behaviour above is the *lenient* default and applies when the program contains no `[[` / `]]` markers anywhere (full backward compatibility).  When the program does contain markers, the tool switches to **strict mode**: a DATA line inside an active region that produces no assembled output is a **hard error** at that line, rather than silently ending the block.  The rationale: `[[` is the user declaring "everything in this region is assembler"; a no-output DATA line inside is almost certainly a mistake (forgotten annotation, typo'd mnemonic that parsed as a comment, or stray non-code DATA that should have been skipped).  The fix is one of: annotate with instructions, skip it with `]]` and `[[`, or move any pure directive (`ORG`, label, equate) onto a REM line.
 
 ## Branches
 
