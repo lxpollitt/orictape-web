@@ -228,13 +228,24 @@ type Expr =
  *  and hex reads more naturally).  `digitCount` is the user-typed digit
  *  width (for byte-operand DATA emission minimum-width preservation);
  *  inherited from a declaring literal for equates, undefined for code
- *  labels and for binary/char-derived equates. */
+ *  labels and for binary/char-derived equates.  `anchored` and
+ *  `regionId` apply to labels only — `anchored` is true when an `ORG`
+ *  anchored PC before this label was declared (either via a prior
+ *  `ORG` directive, an explicit `startAddr`, or the current region had
+ *  `ORG` applied before the label); `regionId` identifies the
+ *  contiguous PC-consistent region the label lives in (bumped by each
+ *  `ORG` and by each PC-break from a zero-emit DATA line).  Pass 2
+ *  uses `anchored` to gate ABS label references and `regionId` to
+ *  gate cross-region REL branches.  Equates leave both undefined
+ *  (their values are PC-independent). */
 export interface ResolvedSymbol {
   value:       number;
   forceWide:   boolean;
   isLabel?:    boolean;
   dataFormat:  DataFormat;
   digitCount?: number;
+  anchored?:   boolean;
+  regionId?:   number;
 }
 // Short in-module alias to keep existing code tidy.
 type Resolved = ResolvedSymbol;
@@ -541,7 +552,10 @@ function parseStatement(raw: string): Statement {
 
 // ── Two-pass assembly ──────────────────────────────────────────────────────
 
-/** A per-instruction record produced by pass 1 and consumed by pass 2. */
+/** A per-instruction record produced by pass 1 and consumed by pass 2.
+ *  `regionId` is the PC-consistent region this instruction lives in —
+ *  REL branches require their target label's `regionId` to match, or
+ *  the computed offset spans a PC-break and is meaningless. */
 interface Prepared {
   mnemonic: string;
   op:       ParsedOperand;
@@ -550,6 +564,7 @@ interface Prepared {
   opcode:   number;
   size:     number;
   lineIdx:  number;   // which annotation this came from
+  regionId: number;
 }
 
 /** One emit unit from the assembler — either an opcode byte, or an
@@ -629,28 +644,43 @@ function emitOperand(
  * `prepared` list feeds pass 2.
  *
  * `startAddr` may be undefined, in which case the initial PC is 0 but
- * `orgSeen` starts false — meaning labels declared before any ORG
+ * `anchored` starts false — meaning labels declared before any ORG
  * directive have values that are only safe to use in relative-addressing
  * contexts.  Pass 2 flags any attempt to emit such a label as an
  * absolute address.
+ *
+ * `isDataLine[i]` tells pass 1 which source lines are DATA lines (as
+ * opposed to REM lines or non-host-line empty strings).  When a DATA
+ * line's annotation emits zero instruction-bytes AND doesn't process
+ * an `ORG`, its raw DATA values are "unassembled" — we don't know where
+ * they sit in memory relative to `pc`, so we un-anchor PC from that
+ * point onward (bumping `regionId`).  Subsequent labels declared before
+ * the next `ORG` are flagged unanchored, and pass 2 errors on any ABS
+ * use of them (same mechanism as the no-ORG-at-all case).
+ *
+ * `regionId` increments on every ORG and on every PC-break.  Labels
+ * and instructions stamp the current `regionId`; pass 2 REL checks
+ * require branch and target to share a region (the computed offset
+ * only makes sense within a single PC-consistent stretch).
  */
 function pass1(
   annotations: string[],
   startAddr:   number | undefined,
+  isDataLine:  boolean[],
 ): {
   prepared:   Prepared[];
   symbols:    Symbols;
   lineStates: LineState[];
   endAddr:    number;
-  orgSeen:    boolean;
 } {
   const symbols: Symbols = new Map();
   const lineStates: LineState[] = annotations.map(() => ({
     bytes: [], formats: [], minDigits: [], chunks: [], errors: [],
   }));
   const prepared: Prepared[] = [];
-  let pc = (startAddr ?? 0) & 0xFFFF;
-  let orgSeen = startAddr !== undefined;
+  let pc        = (startAddr ?? 0) & 0xFFFF;
+  let anchored  = startAddr !== undefined;
+  let regionId  = 0;
 
   const declare = (lineIdx: number, name: string, value: Resolved): string | null => {
     if (symbols.has(name)) return `symbol already declared: ${name}`;
@@ -664,6 +694,9 @@ function pass1(
     const rawStatements = splitStatements(stripped);
     const stateErrs = lineStates[lineIdx].errors;
 
+    const preparedBefore = prepared.length;
+    let sawOrgThisLine   = false;
+
     for (const raw of rawStatements) {
       const stmt = parseStatement(raw);
       switch (stmt.kind) {
@@ -676,6 +709,7 @@ function pass1(
         case 'label': {
           const err = declare(lineIdx, stmt.name, {
             value: pc, forceWide: true, isLabel: true, dataFormat: 'hex',
+            anchored, regionId,
           });
           if (err) stateErrs.push({ message: err });
           break;
@@ -688,8 +722,18 @@ function pass1(
         }
 
         case 'org':
-          pc = stmt.address & 0xFFFF;
-          orgSeen = true;
+          // ORG re-anchors PC.  It starts a new region only when it
+          // changes the anchored state (unanchored → anchored) — PC
+          // arithmetic is then discontinuous across the boundary so
+          // cross-region REL must be blocked.  An ORG that just
+          // repositions PC within an already-anchored stretch keeps
+          // the same region (consecutive ORGs for non-contiguous
+          // anchored code still give well-defined real-memory
+          // offsets on either side).
+          if (!anchored) regionId = regionId + 1;
+          pc       = stmt.address & 0xFFFF;
+          anchored = true;
+          sawOrgThisLine = true;
           break;
 
         case 'instr': {
@@ -710,15 +754,28 @@ function pass1(
             opcode:   sel.opcode,
             size,
             lineIdx,
+            regionId,
           });
           pc = (pc + size) & 0xFFFF;
           break;
         }
       }
     }
+
+    // PC-break detection: a DATA line whose annotation neither emits
+    // instructions nor processes an ORG leaves the original DATA
+    // values unassembled at an unknown memory address.  Unanchor so
+    // subsequent absolute label uses are flagged.  An ORG on the
+    // line's own annotation suppresses the break (the user told us
+    // where PC is).
+    const emittedInstructions = prepared.length > preparedBefore;
+    if (isDataLine[lineIdx] && !emittedInstructions && !sawOrgThisLine) {
+      regionId = regionId + 1;
+      anchored = false;
+    }
   }
 
-  return { prepared, symbols, lineStates, endAddr: pc, orgSeen };
+  return { prepared, symbols, lineStates, endAddr: pc };
 }
 
 /**
@@ -728,17 +785,24 @@ function pass1(
  * computed here; undefined symbols and out-of-range branches become
  * errors attached to the originating line.
  *
- * `orgSeen` carries over from pass 1.  When it's false (no `startAddr`
- * was passed and no `ORG` directive fired), any attempt to emit a
- * label's value as an absolute address is flagged — the label's PC was
- * never anchored to a real memory location, so emitting it would be
- * meaningless.  REL-mode branches are exempt (offsets are base-independent).
+ * Two PC-consistency gates run here:
+ *
+ *  - **ABS/absolute label use** requires the label to be `anchored`.
+ *    Equivalent to "an `ORG` directive (or explicit `startAddr`) was
+ *    in effect when the label was declared, with no intervening
+ *    PC-break from a zero-emit DATA line".  Equates and literals are
+ *    always fine (they're PC-independent).
+ *  - **REL branch to a label** requires the branch's `regionId` to
+ *    match the target label's `regionId`.  Within one PC-consistent
+ *    region the offset is valid whether or not either end is anchored;
+ *    across a PC-break, the offset is meaningless (PC arithmetic got
+ *    interrupted) so we error.  Offsets computed from non-label
+ *    targets (literal address, direct offset) bypass this check.
  */
 function pass2(
   prepared:   Prepared[],
   symbols:    Symbols,
   lineStates: LineState[],
-  orgSeen:    boolean,
 ): void {
   for (const p of prepared) {
     const lineState = lineStates[p.lineIdx];
@@ -759,12 +823,29 @@ function pass2(
       continue;
     }
 
-    // A label used as an absolute address requires a known program origin.
-    // REL-mode uses offsets (base-independent) so is exempt.
-    if (resolved.isLabel && p.mode !== 'REL' && !orgSeen) {
+    // A label used as an absolute address requires a known program
+    // origin (either an `ORG` or an explicit `startAddr`) with no
+    // intervening PC-break from a zero-emit DATA line.  REL-mode is
+    // gated separately (see below) — offsets are base-independent
+    // within a region but are meaningless across a PC-break.
+    if (resolved.isLabel && p.mode !== 'REL' && !resolved.anchored) {
       const name = (p.op.expr.kind === 'sym') ? p.op.expr.name : '?';
       lineState.errors.push({
-        message: `label ${name} used in absolute addressing but no ORG was declared`,
+        message: `label ${name} used in absolute addressing but no ORG was declared ` +
+                 `for this block of assembler`,
+      });
+      continue;
+    }
+
+    // REL branch to a label across a PC-break: the branch's PC and the
+    // label's PC come from different regions, so the computed offset
+    // is meaningless.  Within one region (anchored or not), REL is
+    // fine: PC arithmetic is internally consistent.
+    if (resolved.isLabel && p.mode === 'REL' && resolved.regionId !== p.regionId) {
+      const name = (p.op.expr.kind === 'sym') ? p.op.expr.name : '?';
+      lineState.errors.push({
+        message: `branch to label ${name} is between different blocks of assembler ` +
+                 `and requires ORG declarations for both blocks`,
       });
       continue;
     }
@@ -888,13 +969,26 @@ export interface AssembledProgram {
  * *but* label values are only safe for relative-addressing uses until
  * an `ORG` directive anchors the program; the assembler will flag any
  * attempt to use a pre-ORG label as an absolute address.
+ *
+ * `isDataLine[i]` marks which source annotations came from BASIC DATA
+ * lines (as opposed to REM lines, non-host lines, or ad-hoc single-
+ * annotation callers).  When a DATA line's annotation emits no
+ * instructions and carries no `ORG`, its raw DATA values aren't being
+ * assembled — so PC arithmetic through that line is broken and
+ * subsequent absolute label references are errors (same mechanism as
+ * the program-wide no-ORG case).  Callers that don't care about this
+ * (e.g. the single-annotation `assemble` wrapper and most tests) can
+ * omit the parameter — the default is "nothing is a DATA line", which
+ * disables PC-break detection and preserves the legacy behaviour.
  */
 export function assembleProgram(
   annotations: string[],
   startAddr?:  number,
+  isDataLine?: boolean[],
 ): AssembledProgram {
-  const { prepared, symbols, lineStates, endAddr, orgSeen } = pass1(annotations, startAddr);
-  pass2(prepared, symbols, lineStates, orgSeen);
+  const dataFlags = isDataLine ?? annotations.map(() => false);
+  const { prepared, symbols, lineStates, endAddr } = pass1(annotations, startAddr, dataFlags);
+  pass2(prepared, symbols, lineStates);
   return { perLine: lineStates, endAddr, symbols };
 }
 

@@ -1394,6 +1394,176 @@ test('round-trip: re-assembling the output leaves it unchanged', () => {
   return null;
 });
 
+// ── PC-break detection & strict/lenient mode ───────────────────────────────
+
+test('lenient: zero-emit DATA line triggers silent PC-break (no error if unused)', () => {
+  // No markers → lenient mode.  Line 20 is a DATA with comment-only
+  // annotation (no instructions).  It breaks PC, but nobody uses
+  // .LATER in ABS, so no error surfaces.
+  const p = mkProgram([
+    "10 REM ' [[ BYTES:ORG $9800",  // `[[ BYTES` makes this a marker program — switch to no markers below
+  ]);
+  // Rewrite to actually be marker-free.  Use the original-style input.
+  const p2 = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #EA ' *just a comment",
+    "30 DATA #EA ' NOP",
+    "40 DATA #EA ' .LATER:NOP",
+  ]);
+  const r = applyAssembler(p2);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  void p;
+  return null;
+});
+
+test('lenient: ABS use of unanchored-label-after-break errors', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #EA ' *comment",          // PC-break
+    "30 DATA #EA ' .TGT:NOP",          // TGT declared after break → unanchored
+    "40 DATA #4C,0,0 ' JMP TGT",       // ABS use → error
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an error';
+  if (!/absolute addressing.*no ORG/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('lenient: ORG after PC-break re-anchors subsequent labels', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #EA ' *comment",          // PC-break
+    "30 REM ' ORG $9820",              // re-anchor
+    "40 DATA #EA ' .TGT:NOP",          // anchored again
+    "50 DATA #4C,0,0 ' JMP TGT",       // ABS use → OK
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^50 DATA #4C,#9820/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
+  return null;
+});
+
+test('lenient: REL within same unanchored region works', () => {
+  // No ORG anywhere → whole program is unanchored but in one region.
+  // REL branches within the region still work.
+  const p = mkProgram([
+    "10 DATA #A0,00 ' LDY #0",
+    "20 DATA #C8 ' .LOOP:INY",
+    "30 DATA #D0,#FD ' BNE LOOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^30 DATA #D0,#FD/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
+  return null;
+});
+
+test('lenient: REL across PC-break errors', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #C8 ' .TGT:INY",
+    "30 DATA #EA ' *break",            // PC-break, new region starts
+    "40 DATA #D0,#FD ' BNE TGT",       // REL across regions → error
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an error';
+  if (!/between different blocks of assembler/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('lenient: labels declared after a PC-break + ORG live in fresh anchored region', () => {
+  // User's real program shape: code block 1, gap of un-annotated DATA,
+  // ORG to re-anchor, code block 2.  Labels in block 2 should work in
+  // ABS because the ORG re-anchored.
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #60 ' .A:RTS",
+    "30 DATA #EA,#EA,#EA,#EA ' *raw 4 bytes",   // PC-break
+    "40 DATA #EA,#EA,#EA ' *raw 3 bytes",       // still unanchored
+    "50 REM ' ORG $9868",                       // re-anchor
+    "60 DATA #60 ' .B:RTS",
+    "70 DATA #20,0,0 ' JSR B",                  // ABS use of B → OK
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^70 DATA #20,#9868/.test(p.lines[6].v)) return `line 6: ${p.lines[6].v}`;
+  return null;
+});
+
+test('strict ([[): zero-emit DATA line is a hard error', () => {
+  const p = mkProgram([
+    "10 REM ' [[:ORG $9800",
+    "20 DATA #EA ' *comment only",     // zero-emit DATA inside active region
+    "30 DATA #60 ' RTS",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected a strict-mode error';
+  if (!/DATA lines inside \[\[ regions must contain a non-zero number/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('strict ([[): zero-emit DATA in inactive region is NOT an error', () => {
+  const p = mkProgram([
+    "10 REM ' [[:ORG $9800",
+    "20 DATA #60 ' RTS",
+    "30 REM ' ]]",
+    "40 DATA #EA ' *no-op docs — in inactive region",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  return null;
+});
+
+test('strict ([[): wrapping un-annotated DATA with ]]/[[ avoids error', () => {
+  const p = mkProgram([
+    "10 REM ' [[:ORG $9800",
+    "20 DATA #60 ' .A:RTS",
+    "30 REM ' ]]",
+    "40 DATA #EA,#EA,#EA ' *raw 3 bytes",   // skipped by brackets
+    "50 REM ' [[:ORG $9820",                // re-anchor and re-activate
+    "60 DATA #60 ' .B:RTS",
+    "70 DATA #20,0,0 ' JSR B",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^70 DATA #20,#9820/.test(p.lines[6].v)) return `line 6: ${p.lines[6].v}`;
+  return null;
+});
+
+test('back-patch with unanchored label errors', () => {
+  const p = mkProgram([
+    "10 REM ' .TGT = $0",                // declares an equate (not a label) — different case
+    "20 DATA #EA ' *break",              // PC-break (lenient mode: no markers in this program)
+    "30 DATA #60 ' .LATE:RTS",           // LATE: unanchored
+    "40 CALL 0 ' .LATE",                 // back-patch to unanchored label → error
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an error';
+  if (!/back-patch label LATE is missing ORG declaration/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('back-patch to anchored label works after PC-break+ORG', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #EA ' *break",              // PC-break
+    "30 REM ' ORG $9820",                // re-anchor
+    "40 DATA #60 ' .HERE:RTS",           // anchored
+    "50 CALL #0 ' .HERE",                // hex literal → patched as #XXXX
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^50 CALL #9820/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
+  return null;
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;

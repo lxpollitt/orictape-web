@@ -96,6 +96,18 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 - `ORG $xxxx` — set assembly address. May appear multiple times for non-contiguous code.
 - `ORG` is required if any label is referenced in an absolute addressing context (`JMP LABEL`, `JSR LABEL`, `LDA LABEL` in ABS form, etc.) or by a back-patch directive. Programs that use only equates, relative branches, and REL-only label references may omit `ORG`.
 
+## PC-Breaks from Zero-Emit DATA Lines
+
+A DATA line whose annotation produces **zero assembled bytes** — because the annotation is empty, consists only of a `*` comment, or declares labels/equates without any instruction — leaves the line's raw DATA values unassembled.  Those pre-existing values still occupy memory somewhere, but the assembler has no information about which address, so PC arithmetic through that line is broken.  This is called a **PC-break**.
+
+**Effect on labels.**  A label declared while PC is unanchored (either because the program hasn't seen an `ORG` yet, or because a PC-break has occurred since the last `ORG`) is marked *unanchored*.  Any attempt to use an unanchored label in an absolute addressing context — `JMP LABEL`, `JSR LABEL`, `LDA LABEL` (ABS), or a back-patch `.LABEL` on `CALL`/`POKE`/`DOKE`/`PEEK`/`DEEK` — is an error.
+
+**Effect on branches.**  REL branches (`BNE LABEL`, `BEQ LABEL`, etc.) are valid within a single PC-consistent region.  A branch whose target label lives in a different region (across a PC-break or across an intervening `ORG`) is an error — the computed signed-byte offset would be meaningless.
+
+**Re-anchoring.**  An `ORG $xxxx` after a PC-break re-anchors PC and starts a new region.  Labels declared after the `ORG` are anchored again.  A bounded-region skip (`]]` around the problematic line, then `[[` to resume) also avoids the break — inactive lines never enter the assembler so contribute nothing to PC.
+
+**Strict vs lenient mode.**  The behaviour above is the *lenient* (fully-backward-compatible) mode and applies when the program contains no `[[` / `]]` markers anywhere.  When the program does contain markers, the tool switches to **strict mode**: a DATA line inside an active region that emits zero bytes is a **hard error** at that line (not just a silent PC-break).  The rationale: `[[` is the user declaring "everything in this region is assembler"; a zero-emit DATA line inside is almost certainly a mistake (forgotten annotation, typo'd mnemonic that parsed as a comment, or stray non-code DATA that should have been wrapped in `]]`/`[[`).  The fix is one of: annotate with instructions, skip the line with `]]` and `[[`, or move any pure directive (`ORG`, label, equate) onto a REM line where zero-emit annotations are idiomatic.
+
 ## Branches
 
 - Normally written by label; the assembler computes the signed byte offset from the label's address to the branch and errors if out of range (±127 bytes from PC+2).

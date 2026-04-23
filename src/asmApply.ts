@@ -103,29 +103,47 @@ export function applyAssembler(
    *  this annotation's first active statement.  Used by
    *  `buildNewDataLineText` to decide byte-wise vs word-wise emission. */
   const lineWordModes:  boolean[] = [];
+  /** Per-line "is this line sitting in an active region" flag.  True
+   *  if active state was on at the start of the line, OR the line
+   *  itself opened a region via `[[`.  Used by the strict-mode check
+   *  below to distinguish "zero-emit DATA inside a user-declared
+   *  assembler region" (error) from "zero-emit DATA outside any
+   *  assembler region" (silently skipped). */
+  const lineInActiveRegion: boolean[] = [];
   /** Errors raised while parsing bounded-region params, tagged with
    *  line info at collection time below. */
   const filterErrors: AsmApplyError[] = [];
   for (let i = 0; i < rawAnnotations.length; i++) {
     const line    = prog.lines[i];
     const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
+    const beforeActive = activeState;
     const res = filterStatementsByState(rawAnnotations[i], activeState, wordModeState);
     filteredAnnots.push(res.filtered);
     lineWordModes.push(res.lineWordMode);
+    // A line is "in an active region" if it started active (carrying
+    // state from a prior `[[`).  Lines whose annotation itself flips
+    // the active state are edge cases handled by the filter's normal
+    // statement-level tracking — the strict-mode gate uses only the
+    // coarse "was this line sitting inside an open region?" view.
+    lineInActiveRegion.push(beforeActive);
     activeState   = res.active;
     wordModeState = res.wordMode;
     for (const msg of res.errors) filterErrors.push({ lineIdx: i, lineNum, message: msg });
   }
 
   // 1. Build the Phase-5 annotation list, gated by host-line eligibility
-  //    and using the already-filtered annotation text.
+  //    and using the already-filtered annotation text.  Alongside it,
+  //    `isDataLine[i]` tells the assembler which source lines are DATA
+  //    lines (vs REM or non-host) so it can detect PC-breaks when a
+  //    DATA line emits zero instruction-bytes — see the pass 1 docs.
   const asmAnnotations: string[] = prog.lines.map((_line, i) => {
     const kind = hostKind(prog, i);
     return (kind === 'rem' || kind === 'data') ? filteredAnnots[i] : '';
   });
+  const isDataLine: boolean[] = prog.lines.map((_line, i) => hostKind(prog, i) === 'data');
 
   // 2. Assemble them together so symbols are shared program-wide.
-  const { perLine, symbols } = assembleProgram(asmAnnotations, startAddr);
+  const { perLine, symbols } = assembleProgram(asmAnnotations, startAddr, isDataLine);
 
   // 3. Precompute patches (DATA lines with clean output) and errors.
   //    We separate planning from applying so `applyLineEdit`'s byte-stream
@@ -142,6 +160,28 @@ export function applyAssembler(
 
     for (const e of state.errors) {
       errors.push({ lineIdx: i, lineNum, message: e.message });
+    }
+
+    // Strict mode: when the program contains any `[[` or `]]` marker,
+    // the user has explicitly declared one or more assembler regions.
+    // A DATA line inside an active region that emits zero assembled
+    // bytes is almost certainly a mistake (forgotten annotation,
+    // comment-only annotation, or stray non-code DATA inside what was
+    // meant to be an all-code region) — surface it as an error so the
+    // user is pushed to either annotate it with instructions, wrap it
+    // in `]]`/`[[` to skip, or move any ORG-only statement onto a REM
+    // line where zero-emit annotations are idiomatic.  In lenient mode
+    // (no markers anywhere) the same situation just triggers a silent
+    // PC-break; downstream ABS uses of later labels will error if
+    // affected.
+    if (anyMarker &&
+        isDataLine[i] &&
+        state.bytes.length === 0 &&
+        lineInActiveRegion[i]) {
+      errors.push({
+        lineIdx: i, lineNum,
+        message: `DATA lines inside [[ regions must contain a non-zero number of assembled bytes`,
+      });
     }
 
     const patchable =
@@ -577,6 +617,21 @@ function rewriteLineForBackPatch(
       const sym = symbols.get(directive.name);
       if (!sym) {
         errors.push(`undefined symbol in back-patch: ${directive.name}`);
+        emitAsciiRun(literal, false);
+        continue;
+      }
+      // Back-patch substitution writes an absolute 16-bit address into
+      // BASIC code, so it has the same "must be anchored" requirement
+      // as an assembler ABS reference: a label declared while PC was
+      // unanchored (no ORG in effect, or a zero-emit DATA line broke
+      // PC between the last ORG and the label) has a value that isn't
+      // tied to real memory, so patching it in would silently write
+      // garbage.  Equates skip this check because their values come
+      // from a literal and are PC-independent.
+      if (sym.isLabel && sym.anchored === false) {
+        errors.push(
+          `back-patch label ${directive.name} is missing ORG declaration for target assembler block`,
+        );
         emitAsciiRun(literal, false);
         continue;
       }

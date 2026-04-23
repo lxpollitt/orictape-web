@@ -866,16 +866,18 @@ test('ORG on one line unlocks labels declared on another (cross-line)', () => {
   return compareBytes(r.perLine[3].bytes, [0x4C, 0x00, 0x98]);
 });
 
-test('label declared before ORG but used in ABS: ORG still rescues', () => {
-  // `.PRE` declares at PC=0 (pre-ORG), ORG then jumps PC to $9800.  Using
-  // PRE in ABS from post-ORG code emits $0000 as the address — strange,
-  // but not an error (orgSeen was true by emission time).  This checks
-  // that the rule is "did ORG ever fire" not "was this label declared
-  // after ORG".
+test('label declared before ORG used in ABS: errors (per-label anchoring)', () => {
+  // `.PRE` declares at PC=0 (pre-ORG, unanchored).  ORG then jumps PC
+  // to $9800.  Under per-label anchoring, PRE remains unanchored even
+  // after the subsequent ORG — ORG only anchors labels declared AFTER
+  // it, not labels declared before it.  Using PRE in ABS errors.
   const r = assembleProgram(['.PRE : ORG $9800 : LDA PRE']);
-  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
-  // LDA PRE → ABS because PRE=$0000 with forceWide; opcode AD, operand $0000.
-  return compareBytes(r.perLine[0].bytes, [0xAD, 0x00, 0x00]);
+  const errs = r.perLine[0].errors;
+  if (errs.length !== 1) return `expected 1 error, got ${errs.length}`;
+  if (!/absolute addressing.*no ORG/i.test(errs[0].message)) {
+    return `wrong error: ${errs[0].message}`;
+  }
+  return null;
 });
 
 // ── Phase 4: worked mini-program (spec-style) ────────────────────────────────
