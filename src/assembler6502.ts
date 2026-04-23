@@ -552,21 +552,40 @@ interface Prepared {
   lineIdx:  number;   // which annotation this came from
 }
 
-/** Per-line working state returned by pass 1 and pass 2.  `formats` and
- *  `minDigits` are both parallel to `bytes` — one entry per emitted
- *  byte — controlling how each byte is rendered when written back into
- *  a BASIC DATA statement: `formats` picks hex vs decimal (see
+/** One emit unit from the assembler — either an opcode byte, or an
+ *  operand of 1 or 2 bytes.  `chunks` lets the DATA-line renderer
+ *  choose byte-wise or word-wise emission for 2-byte operands without
+ *  re-deriving the grouping from the flat byte stream.  Within a chunk,
+ *  `bytes`, `formats`, and `minDigits` are parallel arrays of the same
+ *  length; for 2-byte operands the low byte is at index 0 (little-endian
+ *  memory order, which matches the 6502's operand byte order).  Both
+ *  bytes of a 2-byte operand share the same `formats` entry and the
+ *  same `minDigits` entry in practice (they came from one source
+ *  literal). */
+export interface Chunk {
+  bytes:     number[];
+  formats:   DataFormat[];
+  minDigits: number[];
+}
+
+/** Per-line working state returned by pass 1 and pass 2.  `chunks` is
+ *  the primary emission record — one entry per opcode or operand.
+ *  `formats` and `minDigits` are flat views parallel to `bytes` (one
+ *  entry per emitted byte) controlling how each byte is rendered in
+ *  byte-wise DATA output: `formats` picks hex vs decimal (see
  *  {@link DataFormat}), `minDigits` is the minimum emit width (padded
  *  with leading zeros if the value is narrower).  Opcode bytes and
  *  REL-offset bytes are always `'hex'` with minDigits = 2.  Byte-op
  *  operand bytes inherit minDigits from the operand expression's
  *  `digitCount` (literal) or the resolved symbol's (identifier), so
  *  `LDY #00` round-trips as DATA `00`.  Word-op operand bytes use the
- *  format default (hex: 2, decimal: 1) per byte. */
+ *  format default (hex: 2, decimal: 1) per byte.  The flat arrays
+ *  remain in sync with `chunks` at all times. */
 interface LineState {
   bytes:     number[];
   formats:   DataFormat[];
   minDigits: number[];
+  chunks:    Chunk[];
   errors:    AsmError[];
 }
 
@@ -627,7 +646,7 @@ function pass1(
 } {
   const symbols: Symbols = new Map();
   const lineStates: LineState[] = annotations.map(() => ({
-    bytes: [], formats: [], minDigits: [], errors: [],
+    bytes: [], formats: [], minDigits: [], chunks: [], errors: [],
   }));
   const prepared: Prepared[] = [];
   let pc = (startAddr ?? 0) & 0xFFFF;
@@ -729,6 +748,7 @@ function pass2(
       lineState.bytes.push(p.opcode);
       lineState.formats.push('hex');
       lineState.minDigits.push(2);
+      lineState.chunks.push({ bytes: [p.opcode], formats: ['hex'], minDigits: [2] });
       continue;
     }
 
@@ -821,6 +841,18 @@ function pass2(
     lineState.bytes.push(p.opcode, ...emit.bytes);
     lineState.formats.push('hex', ...emit.bytes.map(() => operandFormat));
     lineState.minDigits.push(2, ...emit.bytes.map(() => operandMinDigits));
+    // Chunks: the opcode is always its own 1-byte chunk; the operand
+    // (if any) is one chunk of 1 or 2 bytes.  This grouping lets the
+    // DATA-line renderer emit 2-byte operands as a single word value
+    // (#XXXX) when WORDS mode is in effect.
+    lineState.chunks.push({ bytes: [p.opcode], formats: ['hex'], minDigits: [2] });
+    if (emit.bytes.length > 0) {
+      lineState.chunks.push({
+        bytes:     [...emit.bytes],
+        formats:   emit.bytes.map(() => operandFormat),
+        minDigits: emit.bytes.map(() => operandMinDigits),
+      });
+    }
     // Sanity: what we emit must match the size we committed in pass 1.
     if (1 + emit.bytes.length !== p.size) {
       lineState.errors.push({ message: `internal: size mismatch at $${p.pc.toString(16)}` });

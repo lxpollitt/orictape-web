@@ -41,7 +41,7 @@ import {
   KEYWORDS,
 } from './decoder';
 import { applyLineEdit } from './editor';
-import { assembleProgram, type Symbols, type DataFormat } from './assembler6502';
+import { assembleProgram, type Symbols, type Chunk } from './assembler6502';
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -94,11 +94,27 @@ export function applyAssembler(
   const rawAnnotations  = prog.lines.map((l, i) => extractAnnotation(l.v, hostKinds[i]));
   const anyMarker       = rawAnnotations.some(a => annotationContainsMarker(a));
   let   activeState     = !anyMarker;
+  // Sticky settings from `[[ PARAM ...`.  Default WORDS — unchanged
+  // programs that never opt in still get the new representation for
+  // 2-byte operands.  `[[ BYTES` opts out.
+  let   wordModeState   = true;
   const filteredAnnots: string[] = [];
-  for (const a of rawAnnotations) {
-    const { filtered, active } = filterStatementsByState(a, activeState);
-    filteredAnnots.push(filtered);
-    activeState = active;
+  /** Per-line render mode — the wordMode prevailing at the start of
+   *  this annotation's first active statement.  Used by
+   *  `buildNewDataLineText` to decide byte-wise vs word-wise emission. */
+  const lineWordModes:  boolean[] = [];
+  /** Errors raised while parsing bounded-region params, tagged with
+   *  line info at collection time below. */
+  const filterErrors: AsmApplyError[] = [];
+  for (let i = 0; i < rawAnnotations.length; i++) {
+    const line    = prog.lines[i];
+    const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
+    const res = filterStatementsByState(rawAnnotations[i], activeState, wordModeState);
+    filteredAnnots.push(res.filtered);
+    lineWordModes.push(res.lineWordMode);
+    activeState   = res.active;
+    wordModeState = res.wordMode;
+    for (const msg of res.errors) filterErrors.push({ lineIdx: i, lineNum, message: msg });
   }
 
   // 1. Build the Phase-5 annotation list, gated by host-line eligibility
@@ -113,9 +129,11 @@ export function applyAssembler(
 
   // 3. Precompute patches (DATA lines with clean output) and errors.
   //    We separate planning from applying so `applyLineEdit`'s byte-stream
-  //    side-effects don't disturb later lookups.
+  //    side-effects don't disturb later lookups.  Filter-stage errors
+  //    (from unknown bounded-region params) are surfaced here too so the
+  //    caller sees them alongside assembly errors.
   const patches: { lineIdx: number; newText: string; ownedByteIndices: number[] }[] = [];
-  const errors:  AsmApplyError[] = [];
+  const errors:  AsmApplyError[] = [...filterErrors];
 
   for (let i = 0; i < prog.lines.length; i++) {
     const line    = prog.lines[i];
@@ -132,7 +150,7 @@ export function applyAssembler(
       hostKind(prog, i)   === 'data';
     if (patchable) {
       const { newText, ownedByteIndices } =
-        buildNewDataLineText(prog, i, state.bytes, state.formats, state.minDigits);
+        buildNewDataLineText(prog, i, state.chunks, lineWordModes[i]);
       patches.push({ lineIdx: i, newText, ownedByteIndices });
     }
   }
@@ -251,34 +269,47 @@ function extractAnnotation(lineText: string, kind: AnnotationHostKind): string {
   return i < 0 ? '' : lineText.slice(i + 1);
 }
 
-/** Format a byte array as BASIC DATA values.  Each byte is rendered per
- *  its paired `format` (hex → `#XX`, decimal → `NN`) with `minDigits`
- *  setting a minimum width (zero-padded) — so `LDY #00` round-trips
- *  through DATA as `00`, not `0`.  The minimum is never *truncating*;
- *  oversized values just print their natural width.
+/** Format a chunk list as BASIC DATA values.  Each chunk is either a
+ *  single byte (opcode, IMM/ZP operand, REL offset) or a 2-byte operand
+ *  that can render either as a single word (WORDS mode) or as two
+ *  separate bytes (BYTES mode).
  *
- *  `formats` / `minDigits` must be the same length as `bytes` (pass-2
- *  always builds them that way), but we defensively fall back to
- *  format defaults if an entry is missing, so an upstream bug degrades
- *  to the old behaviour rather than producing garbage. */
-function formatDataValues(
-  bytes:     number[],
-  formats:   DataFormat[],
-  minDigits: number[],
-): string {
-  return bytes.map((b, i) => {
-    const fmt = formats[i]   ?? 'hex';
-    const min = minDigits[i] ?? (fmt === 'hex' ? 2 : 1);
-    if (fmt === 'hex') return '#' + b.toString(16).toUpperCase().padStart(min, '0');
-    return b.toString(10).padStart(min, '0');
-  }).join(',');
+ *  Byte rendering honours the chunk's paired `format` (hex → `#XX`,
+ *  decimal → `NN`) with `minDigits` setting a minimum width (zero-
+ *  padded) — so `LDY #00` round-trips through DATA as `00`, not `0`.
+ *  Word rendering (WORDS mode, 2-byte chunk) uses the chunk's first
+ *  format entry; minDigits default is 4 for hex and 1 for decimal.
+ *  The minimum is never *truncating*; oversized values just print
+ *  their natural width. */
+function formatDataValues(chunks: Chunk[], wordMode: boolean): string {
+  const parts: string[] = [];
+  for (const ch of chunks) {
+    if (ch.bytes.length === 2 && wordMode) {
+      const value = ch.bytes[0] | (ch.bytes[1] << 8);
+      const fmt   = ch.formats[0]   ?? 'hex';
+      const min   = Math.max(ch.minDigits[0] ?? 0, fmt === 'hex' ? 4 : 1);
+      if (fmt === 'hex') parts.push('#' + value.toString(16).toUpperCase().padStart(min, '0'));
+      else               parts.push(value.toString(10).padStart(min, '0'));
+      continue;
+    }
+    // Byte-wise: render each byte in the chunk separately.
+    for (let i = 0; i < ch.bytes.length; i++) {
+      const b   = ch.bytes[i];
+      const fmt = ch.formats[i]   ?? 'hex';
+      const min = ch.minDigits[i] ?? (fmt === 'hex' ? 2 : 1);
+      if (fmt === 'hex') parts.push('#' + b.toString(16).toUpperCase().padStart(min, '0'));
+      else               parts.push(b.toString(10).padStart(min, '0'));
+    }
+  }
+  return parts.join(',');
 }
 
 /** Build replacement text for a DATA line whose values will be
- *  overwritten with `newBytes`, preserving any existing annotation
- *  chunk (from the first `'` to end-of-line) exactly.  The parallel
- *  `formats` / `minDigits` arrays come from pass 2 and record the
- *  hex-vs-decimal choice and min emit width per byte.
+ *  overwritten with the bytes described by `chunks`, preserving any
+ *  existing annotation (from the first `'` to end-of-line) exactly.
+ *  `wordMode` picks whether 2-byte operand chunks render as one word
+ *  or as two bytes — driven by the per-line mode state tracked by
+ *  `filterStatementsByState` (see `[[ WORDS` / `[[ BYTES` directives).
  *
  *  Also returns `ownedByteIndices` — the absolute indices in
  *  `prog.bytes` where the new DATA values will land after
@@ -295,9 +326,8 @@ function formatDataValues(
 function buildNewDataLineText(
   prog:      Program,
   lineIdx:   number,
-  newBytes:  number[],
-  formats:   DataFormat[],
-  minDigits: number[],
+  chunks:    Chunk[],
+  wordMode:  boolean,
 ): { newText: string; ownedByteIndices: number[] } {
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
@@ -307,7 +337,7 @@ function buildNewDataLineText(
   const annot = apost >= 0 ? v.slice(apost) : '';   // includes the ' itself
   const sep   = annot ? ' ' : '';
 
-  const values = formatDataValues(newBytes, formats, minDigits);
+  const values = formatDataValues(chunks, wordMode);
   const newText = `${lineNum} DATA ${values}${sep}${annot}`;
 
   const valuesStartByte = line.firstByte + 4 + 2;  // content starts at +4; values at content offset 2
@@ -616,66 +646,153 @@ function applyBackPatchesToLine(
 
 // ── Phase 6b: bounded-region pre-filter ─────────────────────────────────────
 
-/** Check whether an annotation contains `[[` or `]]` as a top-level
- *  statement.  Walks chars directly so we correctly respect `'c` ASCII
- *  char literals (skip the next char after an unescaped `'`) and truncate
- *  at the first `*` end-of-annotation comment.  Statement separators
- *  are `:` or `;` (both accepted). */
-function annotationContainsMarker(annotation: string): boolean {
+/** Classify a trimmed statement as an open/close bounded-region marker,
+ *  a plain (non-marker) statement, or an error.  `[[` optionally takes
+ *  whitespace-separated parameter tokens controlling mode (see
+ *  {@link parseMarkerParams}).  `]]` takes no parameters.  Case-
+ *  insensitive for the marker itself and for any params.
+ *
+ *  Why dedicated parsing:  `[[` acts like a sticky settings directive
+ *  (the settings it installs persist past the matching `]]`), so we
+ *  need to distinguish structural markers from noise statements before
+ *  the assembler sees them, while also surfacing typos like
+ *  `[[ WROD` as errors rather than silently ignoring. */
+type ParsedMarker =
+  | { kind: 'open';  params: MarkerParams }
+  | { kind: 'close' }
+  | { kind: 'plain' }
+  | { kind: 'error'; message: string };
+
+interface MarkerParams {
+  /** undefined → preserve the prevailing mode. */
+  wordMode: boolean | undefined;
+}
+
+/** Parse a `[[`-open statement's parameter list.  Params are
+ *  whitespace-separated tokens after the `[[` marker, case-insensitive.
+ *  Currently only `WORDS` / `BYTES` are recognised; unknown tokens are
+ *  errors.  No params → `{wordMode: undefined}` (preserve prevailing). */
+function parseMarkerParams(rest: string): { params: MarkerParams } | { error: string } {
+  const toks = rest.trim().split(/\s+/).filter(t => t.length > 0);
+  let wordMode: boolean | undefined = undefined;
+  for (const t of toks) {
+    const u = t.toUpperCase();
+    if (u === 'WORDS')      wordMode = true;
+    else if (u === 'BYTES') wordMode = false;
+    else return { error: `unknown bounded-region parameter: ${t}` };
+  }
+  return { params: { wordMode } };
+}
+
+function classifyStatement(raw: string): ParsedMarker {
+  const t = raw.trim();
+  if (t === ']]') return { kind: 'close' };
+  // `]]` takes no params.  Anything after the `]]` (on the same
+  // statement) makes this not a close marker — fall through to `plain`
+  // so the assembler parses it and surfaces an error if it's garbage.
+  if (t.startsWith('[[')) {
+    // `[[`, `[[ WORDS`, `[[WORDS`, `[[  WORDS BYTES` — all parse as
+    // open markers with optional whitespace-separated params.  Any
+    // unrecognised param name surfaces as an error (not silently
+    // swallowed) so typos are caught.
+    const parsed = parseMarkerParams(t.slice(2));
+    if ('error' in parsed) return { kind: 'error', message: parsed.error };
+    return { kind: 'open', params: parsed.params };
+  }
+  return { kind: 'plain' };
+}
+
+/** Split an annotation into raw statement texts, `'c`-literal aware,
+ *  stopping at the first `*` end-of-annotation comment.  Shared between
+ *  {@link annotationContainsMarker} and {@link filterStatementsByState}. */
+function splitAnnotationStatements(annotation: string): string[] {
+  const out: string[] = [];
   let start = 0;
   let end   = annotation.length;
-  const isMarker = (part: string): boolean => {
-    const t = part.trim();
-    return t === '[[' || t === ']]';
-  };
   for (let i = 0; i < annotation.length; i++) {
     if (annotation[i] === "'") { i++; continue; }
     if (annotation[i] === '*') { end = i; break; }
     if (annotation[i] === ':' || annotation[i] === ';') {
-      if (isMarker(annotation.slice(start, i))) return true;
+      out.push(annotation.slice(start, i));
       start = i + 1;
     }
   }
-  return isMarker(annotation.slice(start, end));
+  out.push(annotation.slice(start, end));
+  return out;
+}
+
+/** Check whether an annotation contains a bounded-region marker (`[[`
+ *  with or without params, or `]]`) as a top-level statement.  Used to
+ *  decide the initial active state for the program walk — if any
+ *  marker exists anywhere, the program starts inactive; otherwise
+ *  fully-backward-compatible active.  Invalid `[[ PARAM` uses count as
+ *  markers here (so the program still starts inactive); the actual
+ *  parse error surfaces during the walk. */
+function annotationContainsMarker(annotation: string): boolean {
+  for (const raw of splitAnnotationStatements(annotation)) {
+    const c = classifyStatement(raw);
+    if (c.kind === 'open' || c.kind === 'close' || c.kind === 'error') return true;
+  }
+  return false;
 }
 
 /** Walk an annotation's statements (separated by `:` or `;`) and filter
- *  by the bounded-region active state.  `[[` sets active = true, `]]`
- *  sets active = false (both idempotent if the state is already that
- *  way).  Inactive and marker statements are dropped; active non-marker
- *  statements are kept in their original textual form.  Returns the
- *  filtered annotation (markers stripped, may be empty) and the
- *  post-walk active state for the next annotation to pick up.
+ *  by the bounded-region state.  Tracks two pieces of state:
  *
- *  Trailing `*` comments are dropped along the way — they're informative
- *  only and the assembler strips them too. */
+ *   - **active**: `[[` activates, `]]` deactivates.  Inactive and marker
+ *     statements are dropped; active non-marker statements are kept.
+ *   - **wordMode**: sticky — `[[ WORDS` / `[[ BYTES` set it; bare `[[`
+ *     or `]]` leave it alone.  Persists across annotations and past
+ *     `]]` closes.  Used by the DATA-line renderer, not by the
+ *     assembler's byte emission.
+ *
+ *  Returns the filtered annotation (markers stripped, may be empty),
+ *  the post-walk active and wordMode states for the next annotation,
+ *  any param-parse errors, and the wordMode **at the start of the
+ *  annotation** (for rendering bytes produced by this annotation's
+ *  statements).  Trailing `*` comments are dropped along the way. */
 function filterStatementsByState(
-  annotation:    string,
-  initialActive: boolean,
-): { filtered: string; active: boolean } {
-  // Split into statements, `'c`-literal aware, stopping at `*` comment.
-  const statements: string[] = [];
-  let start = 0;
-  let end   = annotation.length;
-  for (let i = 0; i < annotation.length; i++) {
-    if (annotation[i] === "'") { i++; continue; }
-    if (annotation[i] === '*') { end = i; break; }
-    if (annotation[i] === ':' || annotation[i] === ';') {
-      statements.push(annotation.slice(start, i));
-      start = i + 1;
+  annotation:       string,
+  initialActive:    boolean,
+  initialWordMode:  boolean,
+): {
+  filtered:   string;
+  active:     boolean;
+  wordMode:   boolean;
+  lineWordMode: boolean;
+  errors:     string[];
+} {
+  const statements = splitAnnotationStatements(annotation);
+
+  let active   = initialActive;
+  let wordMode = initialWordMode;
+  // The per-line render mode is the prevailing wordMode at the point
+  // the first active non-marker statement begins.  If the annotation
+  // has no such statement the value doesn't matter — use the incoming
+  // mode as the obvious default.
+  let lineWordMode         = initialWordMode;
+  let lineWordModeCaptured = false;
+
+  const kept: string[] = [];
+  const errors: string[] = [];
+  for (const raw of statements) {
+    const c = classifyStatement(raw);
+    if (c.kind === 'open') {
+      active = true;
+      if (c.params.wordMode !== undefined) wordMode = c.params.wordMode;
+      continue;
+    }
+    if (c.kind === 'close') { active = false; continue; }
+    if (c.kind === 'error') { errors.push(c.message); continue; }
+    // plain statement
+    if (active) {
+      if (!lineWordModeCaptured) {
+        lineWordMode = wordMode;
+        lineWordModeCaptured = true;
+      }
+      kept.push(raw);
     }
   }
-  statements.push(annotation.slice(start, end));
 
-  // Walk, flip state on markers, keep the active non-marker statements.
-  let active = initialActive;
-  const kept: string[] = [];
-  for (const raw of statements) {
-    const t = raw.trim();
-    if (t === '[[') { active = true;  continue; }
-    if (t === ']]') { active = false; continue; }
-    if (active) kept.push(raw);
-  }
-
-  return { filtered: kept.join(':'), active };
+  return { filtered: kept.join(':'), active, wordMode, lineWordMode, errors };
 }

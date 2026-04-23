@@ -38,6 +38,22 @@ Two annotation statements — `[[` and `]]` — bound the portion of the program
 
 **Where markers may appear.**  Anywhere an annotation is accepted — i.e. `REM`, `DATA`, or `CALL`/`POKE`/`DOKE`/`PEEK`/`DEEK` lines per the Host Line Eligibility rules.  Markers may be combined with other valid annotation statements on the same line (`' [[:LDX #0`, `' .LOOPA:]]`, etc.).
 
+### Parameters on `[[`
+
+`[[` optionally accepts whitespace-separated parameters that configure tool behaviour, e.g. `[[ WORDS` or `[[ BYTES`.  Parameters are case-insensitive (matching mnemonic and `ORG` case handling).  Unknown parameters are errors.
+
+- Parameters install **sticky settings** — they persist across annotations and across `]]` closes, changing only when another `[[ PARAM …` updates them.  A bare `[[` (no params) preserves the prevailing setting and only toggles the active region on.
+- `]]` does not carry parameters and does not reset settings; it only toggles the active region off.
+
+Currently defined parameters:
+
+| Parameter | Effect                                                                 |
+|-----------|------------------------------------------------------------------------|
+| `WORDS`   | 2-byte operands (ABS/ABX/ABY/IND) render as one 4-hex-digit word: `LDA $9800` → `DATA #AD,#9800`.  **This is the default.** |
+| `BYTES`   | 2-byte operands render as two separate bytes: `LDA $9800` → `DATA #AD,#00,#98`. |
+
+Per-line granularity: the render mode applied to a given DATA line is the mode prevailing at the start of its first active statement.  Mid-annotation mode changes (`' LDA $9800:[[ BYTES`) take effect at the next line, not within the current annotation's emission.  In practice, mode changes are best placed on a dedicated REM line.
+
 ## Numeric Literals
 
 | Form    | Syntax              | Example           |
