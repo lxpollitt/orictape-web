@@ -3256,6 +3256,11 @@ function runReassembler(): void {
   const nPatched = linesPatched.length;
   const nErrors  = errors.length;
 
+  // Render first: `renderAll()` calls `updateStatusBar()` which would
+  // overwrite our message, so the order matters — render, then set the
+  // feedback message last.
+  if (nPatched > 0) renderAll();
+
   // Status-bar feedback (always set — even if nothing changed, so the
   // user can see the action ran).  Uses the bottom statusBar, where
   // contextual messages live, rather than the top statusEl which carries
@@ -3269,6 +3274,5 @@ function runReassembler(): void {
     statusBar.innerHTML = `<span class="sb-dim">Re-assemble: ${parts.join(', ')}.</span>`;
   }
 
-  if (nPatched > 0) renderAll();
   if (nErrors  > 0) showAsmErrorModal(errors, linesPatched);
 }
