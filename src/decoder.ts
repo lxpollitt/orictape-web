@@ -652,6 +652,14 @@ export const TOKEN_POKE = 0x80 + KEYWORDS.indexOf('POKE');  // 0xB9
 export const TOKEN_DOKE = 0x80 + KEYWORDS.indexOf('DOKE');  // 0x8A
 export const TOKEN_PEEK = 0x80 + KEYWORDS.indexOf('PEEK');  // 0xE6
 export const TOKEN_DEEK = 0x80 + KEYWORDS.indexOf('DEEK');  // 0xE7
+// FOR / TO form a compound 2-patch-site (`FOR var=start TO end`).
+// Both tokens are listed so asmApply can locate the two literals.
+export const TOKEN_FOR  = 0x80 + KEYWORDS.indexOf('FOR');
+export const TOKEN_TO   = 0x80 + KEYWORDS.indexOf('TO');
+// Oric BASIC tokenises `=` into its own byte, so FOR's preamble walker
+// needs to recognise it as the marker between variable name and
+// start-address literal.  Exposed here so asmApply can consume it.
+export const TOKEN_EQ   = 0x80 + KEYWORDS.indexOf('=');
 
 // Literal byte values that are invalid in code mode — the Oric tokeniser would
 // have produced keyword tokens for these, so seeing them as literals indicates

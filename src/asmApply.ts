@@ -38,6 +38,7 @@ import type { Program } from './decoder';
 import {
   TOKEN_DATA, TOKEN_REM,
   TOKEN_CALL, TOKEN_POKE, TOKEN_DOKE, TOKEN_PEEK, TOKEN_DEEK,
+  TOKEN_FOR,  TOKEN_TO,  TOKEN_EQ,
   KEYWORDS,
 } from './decoder';
 import { applyLineEdit } from './editor';
@@ -110,6 +111,12 @@ export function applyAssembler(
    *  assembler region" (error) from "zero-emit DATA outside any
    *  assembler region" (silently skipped). */
   const lineInActiveRegion: boolean[] = [];
+  /** Per-line "did this annotation contain a `]]` close marker?"
+   *  flag.  Passed to the assembler as `blockEndAfterLine` so any
+   *  active named block (`ORG $xxxx .NAME`) closes at the user-
+   *  declared region end, setting `NAME_END` to the last byte
+   *  assembled before the `]]`. */
+  const blockEndAfterLine: boolean[] = [];
   /** Errors raised while parsing bounded-region params, tagged with
    *  line info at collection time below. */
   const filterErrors: AsmApplyError[] = [];
@@ -126,6 +133,7 @@ export function applyAssembler(
     // statement-level tracking — the strict-mode gate uses only the
     // coarse "was this line sitting inside an open region?" view.
     lineInActiveRegion.push(beforeActive);
+    blockEndAfterLine.push(res.sawCloseMarker);
     activeState   = res.active;
     wordModeState = res.wordMode;
     for (const msg of res.errors) filterErrors.push({ lineIdx: i, lineNum, message: msg });
@@ -143,7 +151,9 @@ export function applyAssembler(
   const isDataLine: boolean[] = prog.lines.map((_line, i) => hostKind(prog, i) === 'data');
 
   // 2. Assemble them together so symbols are shared program-wide.
-  const { perLine, symbols } = assembleProgram(asmAnnotations, startAddr, isDataLine);
+  const { perLine, symbols } = assembleProgram(
+    asmAnnotations, startAddr, isDataLine, blockEndAfterLine,
+  );
 
   // 3. Precompute patches (DATA lines with clean output) and errors.
   //    We separate planning from applying so `applyLineEdit`'s byte-stream
@@ -409,10 +419,13 @@ type BackPatchDirective =
   | { kind: 'label'; name: string }
   | { kind: 'skip' };
 
-/** True when `b` is one of the back-patch verb token bytes. */
+/** True when `b` is one of the back-patch verb token bytes.  A
+ *  `FOR` / `TO` pair on one line contributes two patch sites (start
+ *  address, end address); each token is counted separately. */
 function isBackPatchToken(b: number): boolean {
   return b === TOKEN_CALL || b === TOKEN_POKE || b === TOKEN_DOKE
-      || b === TOKEN_PEEK || b === TOKEN_DEEK;
+      || b === TOKEN_PEEK || b === TOKEN_DEEK
+      || b === TOKEN_FOR  || b === TOKEN_TO;
 }
 
 /** Test whether an annotation's prefix marks it as back-patch directives —
@@ -570,8 +583,27 @@ function rewriteLineForBackPatch(
 
     // Patch-site verb token.
     if (isBackPatchToken(b)) {
+      const verbToken = b;
       emitByte(KEYWORDS[b - 0x80]);
       i++;
+
+      // For `FOR var=<literal>` we need to pass through the variable
+      // name and `=` sign before we reach the literal.  Walk chars
+      // up to and including the first `=` (emitting each as-is).
+      // Oric BASIC tokenises `=` into `TOKEN_EQ`, so we break on
+      // that; a raw `0x3D` is also accepted in case some source form
+      // ever leaves it untokenised.  Bail out early on annotation
+      // markers or end-of-content to stay safe on malformed input.
+      if (verbToken === TOKEN_FOR) {
+        while (i <= line.lastByte) {
+          const bj = prog.bytes[i].v;
+          if (bj === 0) break;
+          if (bj === 0x27) break;                        // annotation marker
+          emitByte(renderByte(bj));
+          i++;
+          if (bj === 0x3D || bj === TOKEN_EQ) break;     // `=` (raw or tokenised)
+        }
+      }
 
       // Emit any whitespace and an optional opening paren before the literal.
       while (i <= line.lastByte) {
@@ -811,11 +843,12 @@ function filterStatementsByState(
   initialActive:    boolean,
   initialWordMode:  boolean,
 ): {
-  filtered:   string;
-  active:     boolean;
-  wordMode:   boolean;
-  lineWordMode: boolean;
-  errors:     string[];
+  filtered:       string;
+  active:         boolean;
+  wordMode:       boolean;
+  lineWordMode:   boolean;
+  sawCloseMarker: boolean;
+  errors:         string[];
 } {
   const statements = splitAnnotationStatements(annotation);
 
@@ -827,6 +860,12 @@ function filterStatementsByState(
   // mode as the obvious default.
   let lineWordMode         = initialWordMode;
   let lineWordModeCaptured = false;
+  // `sawCloseMarker` lets the caller know a `]]` appeared on this
+  // line.  asmApply uses it to close any active named assembler block
+  // (the user has explicitly said "this region ends here"), even
+  // though `]]` itself emits no bytes and is stripped before the
+  // assembler sees the annotation.
+  let sawCloseMarker = false;
 
   const kept: string[] = [];
   const errors: string[] = [];
@@ -837,7 +876,7 @@ function filterStatementsByState(
       if (c.params.wordMode !== undefined) wordMode = c.params.wordMode;
       continue;
     }
-    if (c.kind === 'close') { active = false; continue; }
+    if (c.kind === 'close') { active = false; sawCloseMarker = true; continue; }
     if (c.kind === 'error') { errors.push(c.message); continue; }
     // plain statement
     if (active) {
@@ -849,5 +888,5 @@ function filterStatementsByState(
     }
   }
 
-  return { filtered: kept.join(':'), active, wordMode, lineWordMode, errors };
+  return { filtered: kept.join(':'), active, wordMode, lineWordMode, sawCloseMarker, errors };
 }

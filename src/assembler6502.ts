@@ -500,7 +500,7 @@ type Statement =
   | { kind: 'empty' }
   | { kind: 'label';  name: string }
   | { kind: 'equate'; name: string; value: Resolved }
-  | { kind: 'org';    address: number }
+  | { kind: 'org';    address: number; blockName?: string }
   | { kind: 'instr';  mnemonic: string; op: ParsedOperand }
   | { kind: 'error';  message: string };
 
@@ -526,17 +526,30 @@ function parseStatement(raw: string): Statement {
     return { kind: 'error', message: `invalid declaration: ${t}` };
   }
 
-  // `ORG <literal>` — case-insensitive.
+  // `ORG <literal> [.BLOCKNAME]` — case-insensitive.  The optional
+  // trailing `.NAME` names the assembler block that begins at this
+  // ORG: the tool declares `NAME` = start address and `NAME_END` =
+  // inclusive last byte of the block (populated when the block ends,
+  // which happens at the next ORG, a zero-output DATA line, a `]]`
+  // close marker, or end of program).
   const orgM = t.match(/^[Oo][Rr][Gg](?:\s+(.*))?$/);
   if (orgM) {
-    const operand = (orgM[1] ?? '').trim();
-    if (operand.length === 0) return { kind: 'error', message: 'ORG requires an address' };
+    const rest = (orgM[1] ?? '').trim();
+    if (rest.length === 0) return { kind: 'error', message: 'ORG requires an address' };
+    // Split off optional trailing `.BLOCKNAME`.
+    let operand   = rest;
+    let blockName: string | undefined = undefined;
+    const nameM = rest.match(/^(.+?)\s+\.([A-Za-z][A-Za-z0-9_]*)\s*$/);
+    if (nameM) {
+      operand   = nameM[1].trim();
+      blockName = nameM[2];
+    }
     const lit = parseLiteralOnly(operand);
     if ('error' in lit) return { kind: 'error', message: lit.error };
     if (lit.value < 0 || lit.value > 0xFFFF) {
       return { kind: 'error', message: `ORG address out of 16-bit range: ${lit.value}` };
     }
-    return { kind: 'org', address: lit.value };
+    return { kind: 'org', address: lit.value, blockName };
   }
 
   // Instruction: `MNEM [operand]`.
@@ -664,9 +677,10 @@ function emitOperand(
  * only makes sense within a single PC-consistent stretch).
  */
 function pass1(
-  annotations: string[],
-  startAddr:   number | undefined,
-  isDataLine:  boolean[],
+  annotations:          string[],
+  startAddr:            number | undefined,
+  isDataLine:           boolean[],
+  blockEndAfterLine:    boolean[],
 ): {
   prepared:   Prepared[];
   symbols:    Symbols;
@@ -687,6 +701,41 @@ function pass1(
     symbols.set(name, value);
     void lineIdx;
     return null;
+  };
+
+  // Named-block state.  An `ORG $xxxx .NAME` opens a block; its end
+  // label (`NAME_END`) is declared when the block closes at the next
+  // ORG, PC-break, `]]` close marker, or end of program.  `lastByte`
+  // is the inclusive address of the most recent emitted instruction
+  // byte within this block — that's what `NAME_END` resolves to.
+  // If no instructions have been emitted yet, `lastByte` stays at
+  // `startPc - 1` and the closing declares an "empty block" error
+  // (users naming a block imply they'll reference its size).
+  type NamedBlock = { name: string; startPc: number; lastByte: number; lineIdx: number };
+  let activeBlock: NamedBlock | null = null;
+
+  const closeNamedBlock = (stateErrs: AsmError[] | null): void => {
+    if (!activeBlock) return;
+    const b = activeBlock;
+    activeBlock = null;
+    if (b.lastByte < b.startPc) {
+      // Empty block — no instructions emitted since the ORG.  Attach
+      // the error to the line that opened the block.
+      lineStates[b.lineIdx].errors.push({
+        message: `named block ${b.name} has no assembled bytes`,
+      });
+      void stateErrs;
+      return;
+    }
+    const err = declare(b.lineIdx, `${b.name}_END`, {
+      value:      b.lastByte,
+      forceWide:  true,
+      isLabel:    true,
+      dataFormat: 'hex',
+      anchored:   true,      // always anchored — block had an ORG
+      regionId,               // current region
+    });
+    if (err && stateErrs) stateErrs.push({ message: err });
   };
 
   for (let lineIdx = 0; lineIdx < annotations.length; lineIdx++) {
@@ -722,6 +771,10 @@ function pass1(
         }
 
         case 'org':
+          // Any ORG closes the active named block before repositioning
+          // PC.  If the new ORG itself is named, a fresh block opens
+          // after PC is set.
+          closeNamedBlock(stateErrs);
           // ORG re-anchors PC.  It starts a new region only when it
           // changes the anchored state (unanchored → anchored) — PC
           // arithmetic is then discontinuous across the boundary so
@@ -734,6 +787,21 @@ function pass1(
           pc       = stmt.address & 0xFFFF;
           anchored = true;
           sawOrgThisLine = true;
+          if (stmt.blockName !== undefined) {
+            // Declare the start-of-block label (same as a plain
+            // `.NAME` at post-ORG PC) and open a new named block.
+            const err = declare(lineIdx, stmt.blockName, {
+              value: pc, forceWide: true, isLabel: true, dataFormat: 'hex',
+              anchored: true, regionId,
+            });
+            if (err) stateErrs.push({ message: err });
+            activeBlock = {
+              name:     stmt.blockName,
+              startPc:  pc,
+              lastByte: pc - 1,   // sentinel for "no bytes yet"
+              lineIdx,
+            };
+          }
           break;
 
         case 'instr': {
@@ -757,6 +825,10 @@ function pass1(
             regionId,
           });
           pc = (pc + size) & 0xFFFF;
+          // Extend the active named block's span to include this
+          // instruction's bytes.  `pc` is now one past the last
+          // emitted byte; `pc - 1` is the inclusive last byte.
+          if (activeBlock) activeBlock.lastByte = (pc - 1) & 0xFFFF;
           break;
         }
       }
@@ -770,10 +842,24 @@ function pass1(
     // where PC is).
     const emittedInstructions = prepared.length > preparedBefore;
     if (isDataLine[lineIdx] && !emittedInstructions && !sawOrgThisLine) {
+      // A zero-output DATA line also ends any active named block —
+      // the block's bytes have stopped accumulating and the following
+      // data is at an unknown address.
+      closeNamedBlock(stateErrs);
       regionId = regionId + 1;
       anchored = false;
     }
+
+    // `]]` close marker on this line also ends the active named
+    // block (signalled from the filter via `blockEndAfterLine`).  The
+    // user has explicitly said "this assembler region stops here".
+    if (blockEndAfterLine[lineIdx]) {
+      closeNamedBlock(stateErrs);
+    }
   }
+
+  // End of program: close any still-active named block.
+  closeNamedBlock(null);
 
   return { prepared, symbols, lineStates, endAddr: pc };
 }
@@ -982,12 +1068,14 @@ export interface AssembledProgram {
  * disables PC-break detection and preserves the legacy behaviour.
  */
 export function assembleProgram(
-  annotations: string[],
-  startAddr?:  number,
-  isDataLine?: boolean[],
+  annotations:        string[],
+  startAddr?:         number,
+  isDataLine?:        boolean[],
+  blockEndAfterLine?: boolean[],
 ): AssembledProgram {
-  const dataFlags = isDataLine ?? annotations.map(() => false);
-  const { prepared, symbols, lineStates, endAddr } = pass1(annotations, startAddr, dataFlags);
+  const dataFlags  = isDataLine        ?? annotations.map(() => false);
+  const blockEnds  = blockEndAfterLine ?? annotations.map(() => false);
+  const { prepared, symbols, lineStates, endAddr } = pass1(annotations, startAddr, dataFlags, blockEnds);
   pass2(prepared, symbols, lineStates);
   return { perLine: lineStates, endAddr, symbols };
 }

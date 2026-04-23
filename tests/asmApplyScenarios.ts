@@ -1564,6 +1564,150 @@ test('back-patch to anchored label works after PC-break+ORG', () => {
   return null;
 });
 
+// ── Named assembler blocks (`ORG $xxxx .NAME`) ────────────────────────────
+
+test('named ORG declares NAME = start and NAME_END = last byte', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 DATA #EA ' NOP",                 // $9800 (1 byte)
+    "30 DATA #EA,#EA ' NOP:NOP",         // $9801-$9802 (2 bytes)
+    "40 DATA #60 ' RTS",                 // $9803
+    "50 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA_END",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^50 CALL #9800:CALL #9803/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
+  return null;
+});
+
+test('named block ends at next ORG', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 DATA #EA ' NOP",                 // $9800, block ends here (next ORG on line 30)
+    "30 REM ' ORG $9900 .BLOCKB",
+    "40 DATA #EA ' NOP",                 // $9900
+    "50 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA_END",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^50 CALL #9800:CALL #9800/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;  // 1 byte block
+  return null;
+});
+
+test('named block ends at zero-output DATA line (lenient)', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 DATA #EA ' NOP",                  // $9800
+    "30 DATA #EA ' *not code — PC-break", // ends BLOCKA, unanchors
+    "40 REM ' ORG $9900 .BLOCKB",
+    "50 DATA #60 ' RTS",
+    "60 CALL #0 ' .BLOCKA_END",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^60 CALL #9800/.test(p.lines[5].v)) return `line 5: ${p.lines[5].v}`;
+  return null;
+});
+
+test('named block ends at `]]` close marker', () => {
+  const p = mkProgram([
+    "10 REM ' [[:ORG $9800 .BLOCKA",
+    "20 DATA #EA ' NOP",                  // $9800
+    "30 DATA #EA ' NOP",                  // $9801
+    "40 REM ' ]]",                        // closes BLOCKA at $9801
+    "50 REM ' [[",                        // re-activate for the back-patch line
+    "60 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA_END",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^60 CALL #9800:CALL #9801/.test(p.lines[5].v)) return `line 5: ${p.lines[5].v}`;
+  return null;
+});
+
+test('named block ends at end of program', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 DATA #EA ' NOP",                  // $9800
+    "30 DATA #60 ' RTS",                  // $9801; end of program closes BLOCKA
+    "40 CALL #0 ' .BLOCKA_END",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^40 CALL #9801/.test(p.lines[3].v)) return `line 3: ${p.lines[3].v}`;
+  return null;
+});
+
+test('empty named block errors', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 REM ' ORG $9900 .BLOCKB",        // closes BLOCKA with zero bytes
+    "30 DATA #60 ' RTS",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error for empty named block';
+  if (!/named block BLOCKA has no assembled bytes/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('multiple named blocks, cross-referenced', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 DATA #60 ' RTS",                  // $9800
+    "30 REM ' ORG $9900 .BLOCKB",
+    "40 DATA #60 ' RTS",                  // $9900
+    "50 CALL #0:CALL #0 ' .BLOCKA_END:.BLOCKB_END",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^50 CALL #9800:CALL #9900/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
+  return null;
+});
+
+// ── FOR back-patching ─────────────────────────────────────────────────────
+
+test('FOR/TO two-site back-patch with named block', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 DATA #EA ' NOP",
+    "30 DATA #EA ' NOP",
+    "40 DATA #60 ' RTS",                   // $9800-$9802 assembled
+    "50 FOR I=#0 TO #0:READ X:POKE I,X:NEXT ' .BLOCKA:.BLOCKA_END:-",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^50 FOR I=#9800 TO #9802/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
+  return null;
+});
+
+test('FOR/TO directive count mismatch errors', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 DATA #60 ' RTS",
+    "30 FOR I=#0 TO #0:NEXT ' .BLOCKA",    // only 1 directive, need 2 for FOR+TO
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected directive count mismatch';
+  if (!/doesn't match 2 patch sites/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('FOR/TO decimal literal preserves decimal format', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800 .BLOCKA",
+    "20 DATA #60 ' RTS",                   // $9800
+    "30 FOR I=0 TO 0:NEXT ' .BLOCKA:.BLOCKA_END",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Decimal patch: $9800 = 38912, block is 1 byte so _END = $9800 = 38912.
+  if (!/^30 FOR I=38912 TO 38912/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
+  return null;
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;

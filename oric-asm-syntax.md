@@ -94,6 +94,7 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 ## Directives
 
 - `ORG $xxxx` — set assembly address. May appear multiple times for non-contiguous code.
+- `ORG $xxxx .NAME` — set assembly address **and** open a named assembler block.  Declares two labels: `NAME` (= start address = `$xxxx`) and `NAME_END` (= inclusive last byte emitted in the block).  The block closes — and `NAME_END` gets its value — when the next `ORG` (with or without a name), a zero-output DATA line, a `]]` close marker, or the end of the program is reached.  Useful for `FOR`-loop back-patching (`FOR I=NAME TO NAME_END`) so POKE/DOKE loops stay in sync with the assembled code.  The `.NAME` suffix is case-sensitive (labels are case-sensitive generally).
 - `ORG` is required if any label is referenced in an absolute addressing context (`JMP LABEL`, `JSR LABEL`, `LDA LABEL` in ABS form, etc.) or by a back-patch directive. Programs that use only equates, relative branches, and REL-only label references may omit `ORG`.
 
 ## Assembler Blocks
@@ -146,13 +147,26 @@ The tool accepts `:` on DATA-line annotations as input without complaint, and pr
 
 ## BASIC Back-Patch Directives
 
-On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, or `DEEK` tokens (as statements or as function calls inside expressions), the annotation carries back-patch directives: `.LABEL` replaces the address literal at a patch site with the resolved label address; `-` is a placeholder meaning "don't patch this site".
+On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, or `TO` tokens (as statements or as function calls inside expressions), the annotation carries back-patch directives: `.LABEL` replaces the address literal at a patch site with the resolved label address; `-` is a placeholder meaning "don't patch this site".
 
-- **Patch sites.**  Each occurrence of `CALL`, `POKE`, `DOKE`, `PEEK`, or `DEEK` on the line is a patch site, in BASIC-source order.  The site's literal is the first numeric constant immediately following the verb token (after an opening `(` in the function-call cases), terminated by the first `,`, `)`, `:`, BASIC operator, or end-of-line.
+- **Patch sites.**  Each occurrence of `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, or `TO` on the line is a patch site, in BASIC-source order.  The site's literal is the first numeric constant immediately following the verb token (after the opening `(` for `PEEK`/`DEEK`, or after the `=` for `FOR`), terminated by the first `,`, `)`, `:`, BASIC operator, or end-of-line.  A `FOR var=<start> TO <end>` loop therefore contributes **two** patch sites — one for the start address (paired with the FOR's literal) and one for the end address (paired with the TO's literal).
 - **Positional pairing.**  Directives pair 1:1 with patch sites, using `:` as the separator (mirroring BASIC's `:`).  A count mismatch is an error — use `-` to skip positions.
 - **Size.**  Every patch site holds a 16-bit address.
 - **Non-literal sites.**  If a patch site's argument is a variable or expression (not a numeric constant), only `-` is valid; `.LABEL` on such a site is an error.
 - **Format preservation.**  If the original literal was hex (e.g. `#04`, `#9800`), the patched value is written back as hex in `#XXXX` form (uppercase, 4 digits).  If the original literal was decimal, the patched value is written as decimal with no leading zeros.
+
+**Typical `FOR` pattern.**  POKE loops that transfer machine code from DATA into memory pair neatly with named assembler blocks (see `ORG $xxxx .NAME`):
+
+```basic
+ 10 REM ' ORG $9800 .BLOCKA
+ 20 DATA ... ' ...instructions...
+...
+ 90 REM ' ORG $9900 .BLOCKB       * closes BLOCKA
+ ...
+500 FOR I=#9800 TO #9821 : READ X : POKE I,X : NEXT ' .BLOCKA:.BLOCKA_END:-
+```
+
+On the FOR line, the two patch sites are the `#9800` (after `=`) and the `#9821` (after `TO`); the three directives (`.BLOCKA`, `.BLOCKA_END`, `-`) pair with FOR-start, TO-end, and the POKE's address (skipped because `I` is a variable, not a literal).
 
 ## Identifier Rules
 
