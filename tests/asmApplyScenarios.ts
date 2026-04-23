@@ -386,10 +386,10 @@ test("user's annotation edit stays 'explicit' after back-patch", () => {
     "10 REM ' .LOOP = $9800",
     "20 CALL #0000 ' .LOOP",
   ]);
-  // Simulate the user appending a ` ; note` comment to the back-patch
-  // directive's annotation.  The ` ; note` chars are new bytes and will
+  // Simulate the user appending a ` * note` comment to the back-patch
+  // directive's annotation.  The ` * note` chars are new bytes and will
   // be marked `'explicit'` by applyLineEdit.
-  applyLineEdit(p, 1, "20 CALL #0000 ' .LOOP ; note");
+  applyLineEdit(p, 1, "20 CALL #0000 ' .LOOP * note");
 
   const line = p.lines[1];
   // Walk to the last non-terminator byte; it should be the final 'e'

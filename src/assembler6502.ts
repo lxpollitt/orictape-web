@@ -456,25 +456,28 @@ function selectMode(
 
 // ── Annotation pre-processing ──────────────────────────────────────────────
 
-/** Strip an end-of-annotation `;` comment.  Skips over `'c` ASCII literals
- *  so `LDA #';` (were it ever to appear) doesn't mis-terminate. */
+/** Strip an end-of-annotation `*` comment.  Skips over `'c` ASCII literals
+ *  so `LDA #'*` (were it ever to appear) doesn't mis-terminate. */
 function stripComment(s: string): string {
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (c === "'") { i++; continue; }
-    if (c === ';') return s.slice(0, i);
+    if (c === '*') return s.slice(0, i);
   }
   return s;
 }
 
-/** Split an annotation into statements on `:`, skipping over `'c` literals. */
+/** Split an annotation into statements on `:` or `;` (both accepted
+ *  interchangeably — `;` is the common convention in existing hand-
+ *  assembled Oric programs, while `:` mirrors Oric BASIC's own
+ *  statement separator).  Skips over `'c` ASCII literals. */
 function splitStatements(s: string): string[] {
   const out: string[] = [];
   let start = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (c === "'") { i++; continue; }
-    if (c === ':') { out.push(s.slice(start, i)); start = i + 1; }
+    if (c === ':' || c === ';') { out.push(s.slice(start, i)); start = i + 1; }
   }
   out.push(s.slice(start));
   return out;

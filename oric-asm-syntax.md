@@ -92,13 +92,20 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 
 ## Comments
 
-- **End-of-line comment:** `;` — everything from `;` to end of annotation is ignored.
+- **End-of-annotation comment:** `*` — everything from `*` to end of annotation is ignored.  (Chosen to match the convention used by pre-existing Oric assembler tooling, and to leave `;` free as a statement separator alongside `:`.)
 
 ## Statement Separator
 
-- `:` separates multiple statements within a single annotation.
-- Whitespace around `:` is free.
+- `:` **or** `;` separates multiple statements within a single annotation; both are accepted interchangeably.  Historical Oric assembler programs commonly use `;`; `:` mirrors Oric BASIC's own statement separator.  Pick whichever reads best for the context.
+- Whitespace around the separator is free.
 - One space between mnemonic and operand is required.
+
+**Important runtime note for DATA-line annotations.**  Oric-1 BASIC interprets `:` inside a DATA-line annotation as a statement separator **at run time**, which generally produces `?SYNTAX ERROR` when the program is RUN (because the text after `'` then fails to parse as a valid BASIC statement).  `;` and `*` do not trigger this.  Two safe options for DATA-line annotations that need multiple statements or a comment:
+
+- Prefer `;` as the statement separator and `*` for the comment on DATA-line annotations.
+- Or structure the program so DATA statements aren't executed (e.g. `GOTO` past them from an entry point elsewhere).  DATA statements that are only read via `READ` from outside don't need to parse cleanly.
+
+The tool accepts `:` on DATA-line annotations as input without complaint, and preserves user annotations verbatim on output — it's up to the program's author to avoid runtime issues.
 
 ## BASIC Back-Patch Directives
 
@@ -128,11 +135,11 @@ On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, or `DEEK` token
 ## Worked Example
 
 ```basic
- 95 REM ' .LIVES = $04:.SCRN = $BB80
+ 95 REM ' .LIVES = $04;.SCRN = $BB80
  96 REM ' ORG $9800
-100 DATA #86,01,#84,02       ' STX 1:STY 2          ; save X, Y
-105 DATA #A0,00              ' .LOOPA:LDY #0
-110 DATA #B1,01              ' LDA (1),Y            ; read from SCRN
+100 DATA #86,01,#84,02       ' STX 1;STY 2          * save X, Y
+105 DATA #A0,00              ' .LOOPA;LDY #0
+110 DATA #B1,01              ' LDA (1),Y            * read from SCRN
 120 DATA #85,03              ' STA 3
 130 DATA #C6,04              ' DEC LIVES
 140 DATA #D0,249             ' BNE LOOPA
@@ -141,3 +148,5 @@ On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, or `DEEK` token
 210 CALL #9800:CALL #F421    ' .LOOPA:-
 220 POKE #04,3               ' .LIVES
 ```
+
+DATA-line annotations in the worked example above use `;` as the statement separator and `*` for the inline comment — both runtime-safe on a DATA line.  The CALL line at 210 uses `:` because the `:` convention matches BASIC's own statement separator on that (non-DATA) line, and at runtime a CALL line doesn't choke on `:` the way DATA lines do.  Either separator is accepted by the tool on any line.

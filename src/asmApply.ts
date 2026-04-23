@@ -358,26 +358,28 @@ function isBackPatchAnnotation(annotation: string): boolean {
   return false;
 }
 
-/** Strip a trailing `;` comment from a back-patch annotation.  Mirrors
+/** Strip a trailing `*` comment from a back-patch annotation.  Mirrors
  *  the assembler's `stripComment` — the back-patch directive syntax
  *  doesn't use `'c` literals, so tracking char-literal context is
  *  unnecessary here, but we keep the logic aligned for consistency. */
 function stripBackPatchComment(s: string): string {
   for (let i = 0; i < s.length; i++) {
-    if (s[i] === ';') return s.slice(0, i);
+    if (s[i] === '*') return s.slice(0, i);
   }
   return s;
 }
 
-/** Parse a back-patch annotation into a list of directives.  Empty
- *  slots (between `:`s) are tolerated and skipped; each non-empty slot
- *  must be either `-` or `.IDENT`.  Returns the directive list, or an
- *  `{error}` describing the first invalid slot. */
+/** Parse a back-patch annotation into a list of directives.  Slots may
+ *  be separated by `:` or `;` (both accepted interchangeably — see the
+ *  assembler's `splitStatements`).  Empty slots are tolerated and
+ *  skipped; each non-empty slot must be either `-` or `.IDENT`.  Returns
+ *  the directive list, or an `{error}` describing the first invalid
+ *  slot. */
 function parseBackPatchDirectives(
   annotation: string,
 ): { directives: BackPatchDirective[] } | { error: string } {
   const stripped = stripBackPatchComment(annotation);
-  const parts = stripped.split(':');
+  const parts = stripped.split(/[:;]/);
   const directives: BackPatchDirective[] = [];
   for (const raw of parts) {
     const t = raw.trim();
@@ -617,7 +619,8 @@ function applyBackPatchesToLine(
 /** Check whether an annotation contains `[[` or `]]` as a top-level
  *  statement.  Walks chars directly so we correctly respect `'c` ASCII
  *  char literals (skip the next char after an unescaped `'`) and truncate
- *  at the first `;` end-of-annotation comment. */
+ *  at the first `*` end-of-annotation comment.  Statement separators
+ *  are `:` or `;` (both accepted). */
 function annotationContainsMarker(annotation: string): boolean {
   let start = 0;
   let end   = annotation.length;
@@ -627,8 +630,8 @@ function annotationContainsMarker(annotation: string): boolean {
   };
   for (let i = 0; i < annotation.length; i++) {
     if (annotation[i] === "'") { i++; continue; }
-    if (annotation[i] === ';') { end = i; break; }
-    if (annotation[i] === ':') {
+    if (annotation[i] === '*') { end = i; break; }
+    if (annotation[i] === ':' || annotation[i] === ';') {
       if (isMarker(annotation.slice(start, i))) return true;
       start = i + 1;
     }
@@ -636,28 +639,28 @@ function annotationContainsMarker(annotation: string): boolean {
   return isMarker(annotation.slice(start, end));
 }
 
-/** Walk an annotation's `:`-separated statements and filter by the
- *  bounded-region active state.  `[[` sets active = true, `]]` sets
- *  active = false (both idempotent if the state is already that way).
- *  Inactive and marker statements are dropped; active non-marker
+/** Walk an annotation's statements (separated by `:` or `;`) and filter
+ *  by the bounded-region active state.  `[[` sets active = true, `]]`
+ *  sets active = false (both idempotent if the state is already that
+ *  way).  Inactive and marker statements are dropped; active non-marker
  *  statements are kept in their original textual form.  Returns the
  *  filtered annotation (markers stripped, may be empty) and the
  *  post-walk active state for the next annotation to pick up.
  *
- *  Trailing `;` comments are dropped along the way — they're informative
+ *  Trailing `*` comments are dropped along the way — they're informative
  *  only and the assembler strips them too. */
 function filterStatementsByState(
   annotation:    string,
   initialActive: boolean,
 ): { filtered: string; active: boolean } {
-  // Split into statements, `'c`-literal aware, stopping at `;`.
+  // Split into statements, `'c`-literal aware, stopping at `*` comment.
   const statements: string[] = [];
   let start = 0;
   let end   = annotation.length;
   for (let i = 0; i < annotation.length; i++) {
     if (annotation[i] === "'") { i++; continue; }
-    if (annotation[i] === ';') { end = i; break; }
-    if (annotation[i] === ':') {
+    if (annotation[i] === '*') { end = i; break; }
+    if (annotation[i] === ':' || annotation[i] === ';') {
       statements.push(annotation.slice(start, i));
       start = i + 1;
     }

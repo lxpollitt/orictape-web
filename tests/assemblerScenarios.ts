@@ -348,13 +348,13 @@ test('whitespace-only statement between `:` ignored',
 // ── Phase 3: `;` end-of-annotation comments ──────────────────────────────────
 
 test('trailing comment stripped',
-  () => compareBytes(asm('LDA #$BB ; load BB'), [0xA9, 0xBB]));
+  () => compareBytes(asm('LDA #$BB * load BB'), [0xA9, 0xBB]));
 test('comment on its own line → no bytes',
-  () => compareBytes(asm('; just a comment'), []));
+  () => compareBytes(asm('* just a comment'), []));
 test('comment eats subsequent `:` (no second statement)',
-  () => compareBytes(asm('LDA #$01 ; STA $04'), [0xA9, 0x01]));
+  () => compareBytes(asm('LDA #$01 * STA $04'), [0xA9, 0x01]));
 test('comment after multi-statement',
-  () => compareBytes(asm('STX 1 : STY 2 ; save regs'), [0x86, 0x01, 0x84, 0x02]));
+  () => compareBytes(asm('STX 1 : STY 2 * save regs'), [0x86, 0x01, 0x84, 0x02]));
 test('empty source',
   () => compareBytes(asm(''), []));
 test('whitespace-only source',
