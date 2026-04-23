@@ -889,6 +889,7 @@ function pass2(
   prepared:   Prepared[],
   symbols:    Symbols,
   lineStates: LineState[],
+  emissions:  Emission[],
 ): void {
   for (const p of prepared) {
     const lineState = lineStates[p.lineIdx];
@@ -899,6 +900,7 @@ function pass2(
       lineState.formats.push('hex');
       lineState.minDigits.push(2);
       lineState.chunks.push({ bytes: [p.opcode], formats: ['hex'], minDigits: [2] });
+      emissions.push({ pc: p.pc, lineIdx: p.lineIdx, bytes: [p.opcode] });
       continue;
     }
 
@@ -1020,6 +1022,7 @@ function pass2(
         minDigits: emit.bytes.map(() => operandMinDigits),
       });
     }
+    emissions.push({ pc: p.pc, lineIdx: p.lineIdx, bytes: [p.opcode, ...emit.bytes] });
     // Sanity: what we emit must match the size we committed in pass 1.
     if (1 + emit.bytes.length !== p.size) {
       lineState.errors.push({ message: `internal: size mismatch at $${p.pc.toString(16)}` });
@@ -1033,6 +1036,19 @@ export interface AsmError {
   message: string;
 }
 
+/** One instruction's emitted bytes, tagged with the PC it landed at
+ *  and the source annotation line it came from.  Produced by pass 2
+ *  in PC-sequential order within each region.  Used by output-sink
+ *  modes (e.g. type-2 `[[ DATA <line>`) that need to reconstruct a
+ *  contiguous byte buffer across multiple source lines — each
+ *  emission's `pc` + `bytes.length` gives its exact memory footprint
+ *  so gap-filling is straightforward. */
+export interface Emission {
+  pc:      number;
+  lineIdx: number;
+  bytes:   number[];
+}
+
 export interface AssembledProgram {
   /** Per-annotation result.  `perLine[i]` corresponds to `annotations[i]`. */
   perLine: LineState[];
@@ -1041,6 +1057,10 @@ export interface AssembledProgram {
   /** Resolved symbol table — exposed so Phase 5's back-patch directives
    *  can look labels up. */
   symbols: Symbols;
+  /** Every instruction's emitted bytes in pass-2 order.  Enables
+   *  callers to reconstruct contiguous byte buffers across source
+   *  lines (type-2 single-DATA output) without re-walking pass 1. */
+  emissions: Emission[];
 }
 
 /**
@@ -1076,8 +1096,9 @@ export function assembleProgram(
   const dataFlags  = isDataLine        ?? annotations.map(() => false);
   const blockEnds  = blockEndAfterLine ?? annotations.map(() => false);
   const { prepared, symbols, lineStates, endAddr } = pass1(annotations, startAddr, dataFlags, blockEnds);
-  pass2(prepared, symbols, lineStates);
-  return { perLine: lineStates, endAddr, symbols };
+  const emissions: Emission[] = [];
+  pass2(prepared, symbols, lineStates, emissions);
+  return { perLine: lineStates, endAddr, symbols, emissions };
 }
 
 /**

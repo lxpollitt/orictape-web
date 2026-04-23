@@ -15,9 +15,11 @@ Annotations are only interpreted as assembler input when they appear on a line w
 
 - `REM` — the line is recognised as an assembler host only when the body directly after the `REM` keyword starts with `'` (allowing any whitespace between), i.e. exactly the shape `<line number> REM ' …`.  REM lines whose body starts with anything else — including ordinary comments containing apostrophes like `REM UDG's` or `REM don't touch` — are plain BASIC comments and are left untouched.  When the line is a host, the annotation (everything after the opening `'`) must consist of valid assembly fragments only (declarations like `ORG`, labels, and equates, separated by `:`); human comments are permitted only at the very end via `;`.  Single statement per line.
 - `DATA` — single statement per line.  The annotation's assembled bytes overwrite the DATA's values in full — any pre-existing values on the DATA (in any count or format) are replaced by the assembled output.  Annotation must consist of valid assembly fragments only (instructions, and/or `:`-separated local label declarations); trailing `;` comments are permitted.
-- `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` — any line containing one or more of these tokens (as statements, or as function calls inside expressions).  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
+- `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` / `FOR` / `TO` — any line containing one or more of these tokens (as statements, or as function calls inside expressions).  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
 
 Annotations on lines of any other kind (e.g. `PRINT`, `LET`, `GOTO`) — and REM/DATA lines that violate the single-statement rule above — are treated as human comments and ignored outright.
+
+**Bare-line form (type-2 regions).**  For mostly-assembler programs — e.g. converting existing "type 2" sources where lots of lines are pure assembly — a more compact input form is available.  A line whose content begins with `[[` (at the start of the line, immediately after the line number) opens a **bare-line assembler region**; every subsequent line is treated as bare assembler source (no `REM ' ` prefix) until a line beginning with `]]` closes the region.  Inside such a region the line's entire content is passed to the assembler as if it were the annotation body.  Note: Oric BASIC tokenises some 6502 mnemonic substrings into keyword bytes (e.g. `OR` inside `ORG`, `AND` as an instruction), but the tool renders them back losslessly when joining keyword text with adjacent ASCII, so `ORG $9800`, `AND #$0F`, `EOR $04`, etc. all round-trip correctly.  Bare-line regions normally pair with a `[[ DATA <line>` output sink (see *Output Sinks* below).
 
 ## Bounded Regions
 
@@ -47,12 +49,22 @@ Two annotation statements — `[[` and `]]` — bound the portion of the program
 
 Currently defined parameters:
 
-| Parameter | Effect                                                                 |
-|-----------|------------------------------------------------------------------------|
-| `WORDS`   | 2-byte operands (ABS/ABX/ABY/IND) render as one 4-hex-digit word: `LDA $9800` → `DATA #AD,#9800`.  **This is the default.** |
-| `BYTES`   | 2-byte operands render as two separate bytes: `LDA $9800` → `DATA #AD,#00,#98`. |
+| Parameter        | Effect                                                                 |
+|------------------|------------------------------------------------------------------------|
+| `WORDS`          | 2-byte operands (ABS/ABX/ABY/IND) render as one 4-hex-digit word: `LDA $9800` → `DATA #AD,#9800`.  **This is the default.** |
+| `BYTES`          | 2-byte operands render as two separate bytes: `LDA $9800` → `DATA #AD,#00,#98`. |
+| `DATA <line>`    | **Output sink.** All assembled bytes from this `[[`-opened region are concatenated into a single BASIC `DATA` statement on the given line number, rendered byte-per-value as `#XX,#XX,…`.  Pairs with a pre-existing `DATA 0` (or similar placeholder) at the target line; the placeholder's value is overwritten in full, matching the `edited: 'automatic'` contract of the per-line DATA mode.  See *Output Sinks* below. |
 
 Per-line granularity: the render mode applied to a given DATA line is the mode prevailing at the start of its first active statement.  Mid-annotation mode changes (`' LDA $9800:[[ BYTES`) take effect at the next line, not within the current annotation's emission.  In practice, mode changes are best placed on a dedicated REM line.
+
+### Output Sinks
+
+By default, the re-assembler writes assembled bytes back into the originating DATA host lines (per-line DATA mode, one-to-one with the source annotations).  An **output sink** declared on a `[[` marker overrides this for the region it opens, routing every byte the region assembles into a single target location instead:
+
+- `[[ DATA <line>` — collect the region's bytes into a single DATA statement on the given BASIC line number.  Values are rendered as `#XX,#XX,…` (byte-per-value hex), irrespective of the region's WORDS/BYTES setting; a type-2 blob is typically read back by a `FOR I=NAME TO NAME_END : READ X : POKE I,X : NEXT` loop that requires one byte per `READ`.  Gaps between non-contiguous `ORG`s inside the region are zero-filled.  Error if the target line number is not found in the program, or if the target line falls inside the region itself.
+- (More sinks may be added later, e.g. for generating standalone TAP files.)
+
+The output-sink declaration scopes to the `[[` that carries it: the region's end is the matching `]]` (or end of program if unclosed).  Named assembler blocks (`ORG $xxxx .NAME`) and their `NAME` / `NAME_END` labels work normally inside an output-sink region, making it straightforward to back-patch a `FOR … TO …` loader loop that reads back from the generated DATA line.
 
 ## Numeric Literals
 

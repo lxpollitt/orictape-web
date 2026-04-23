@@ -1708,6 +1708,178 @@ test('FOR/TO decimal literal preserves decimal format', () => {
   return null;
 });
 
+// ── Type-2 input + `[[ DATA <line>` output ────────────────────────────────
+
+test('type-2 basic: bare assembler between [[ and ]] → DATA line', () => {
+  const p = mkProgram([
+    "10 DATA 0",                          // target DATA line
+    "100 [[ DATA 10",
+    "110 ORG $9800",
+    "120 LDA #$FF",                       // A9 FF
+    "130 RTS",                            // 60
+    "140 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #A9,#FF,#60/.test(p.lines[0].v)) return `line 10: ${p.lines[0].v}`;
+  return null;
+});
+
+test('type-2: zero-fill gaps between ORGs inside one region', () => {
+  const p = mkProgram([
+    "5 DATA 0",
+    "100 [[ DATA 5",
+    "110 ORG $9800",
+    "120 LDA #$FF",                       // $9800,$9801: A9 FF
+    "130 ORG $9804",                      // gap $9802,$9803 → zero-fill
+    "140 RTS",                            // $9804: 60
+    "150 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Expected: A9 FF 00 00 60 = 5 bytes.
+  if (!/^5 DATA #A9,#FF,#00,#00,#60/.test(p.lines[0].v)) return `line 5: ${p.lines[0].v}`;
+  return null;
+});
+
+test('type-2: missing target DATA line errors', () => {
+  const p = mkProgram([
+    "100 [[ DATA 999",                    // line 999 doesn't exist
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an error';
+  if (!/BASIC line 999 not found/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('type-2: Missing ORG statement before first emit', () => {
+  const p = mkProgram([
+    "10 DATA 0",
+    "100 [[ DATA 10",
+    "110 LDA #$FF",                       // emits bytes without prior ORG
+    "120 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected a missing-ORG error';
+  const msg = r.errors.map(e => e.message).join(' | ');
+  if (!/Missing ORG statement/.test(msg)) return `wrong message(s): ${msg}`;
+  return null;
+});
+
+test('type-2: ORG-only prologue then emit is OK', () => {
+  const p = mkProgram([
+    "10 DATA 0",
+    "100 [[ DATA 10",
+    "110 ORG $9800",                      // no emit, just ORG
+    "120 LDA #$00",                       // emits under the ORG
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #A9,#00/.test(p.lines[0].v)) return `line 10: ${p.lines[0].v}`;
+  return null;
+});
+
+test('type-2: stray BASIC line inside region surfaces assembler error', () => {
+  // A REM or other BASIC line inside a `[[ ... ]]` region isn't
+  // valid assembler.  The assembler parses its rendered text and
+  // rejects it — we don't need a bespoke "Unrecognised assembler
+  // fragment" error; the standard "unknown mnemonic" / "invalid
+  // instruction syntax" messages identify the offending line.
+  const p = mkProgram([
+    "10 DATA 0",
+    "100 [[ DATA 10",
+    "110 ORG $9800",
+    "120 REM stray basic",                // BASIC REM inside type-2 region
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an error';
+  const msg = r.errors.map(e => e.message).join(' | ');
+  if (!/unknown mnemonic|invalid instruction/i.test(msg)) return `wrong message(s): ${msg}`;
+  return null;
+});
+
+test('type-2: target line preserves existing annotation', () => {
+  const p = mkProgram([
+    "10 DATA 0 ' user note",
+    "100 [[ DATA 10",
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Annotation (from `'` onward) should be preserved.
+  if (!/user note/.test(p.lines[0].v)) return `annotation lost: ${p.lines[0].v}`;
+  if (!/^10 DATA #60 '/.test(p.lines[0].v)) return `line 10: ${p.lines[0].v}`;
+  return null;
+});
+
+test('type-2: named block inside region, back-patch from outside', () => {
+  // `[[` on line 1 activates from the program start so the CALL
+  // back-patch on line 10 (outside the type-2 data-output region)
+  // is active when assembled.  A program that starts with any
+  // marker has initial state off, so lines before the first `[[`
+  // need to be inside their own explicit active region.
+  const p = mkProgram([
+    "1 REM ' [[",
+    "5 DATA 0",
+    "10 CALL #0 ' .BLOCKA",                // back-patch CALL with block start
+    "100 [[ DATA 5",
+    "110 ORG $9800 .BLOCKA",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 CALL #9800/.test(p.lines[2].v)) return `line 10: ${p.lines[2].v}`;
+  if (!/^5 DATA #60/.test(p.lines[1].v))    return `line 5: ${p.lines[1].v}`;
+  return null;
+});
+
+test('type-2: ORG survives BASIC `OR` tokenisation round-trip', () => {
+  // Oric BASIC tokenises the `OR` substring inside `ORG`, so
+  // `110 ORG $9800` stores as [OR-token][G][space]...  The rendered
+  // text (via buildLineElements) joins keyword text + ASCII without
+  // separators, so `line.v` recovers "ORG $9800" exactly — which
+  // the assembler then parses normally.  This regression test
+  // verifies that the round-trip works end-to-end for bare-line
+  // type-2 input, which would otherwise be unusable.
+  const p = mkProgram([
+    "10 DATA 0",
+    "100 [[ DATA 10",
+    "110 ORG $9800",
+    "120 LDA #$FF",
+    "130 RTS",
+    "140 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^10 DATA #A9,#FF,#60/.test(p.lines[0].v)) return `line 10: ${p.lines[0].v}`;
+  return null;
+});
+
+test('type-2: target inside region is an error', () => {
+  const p = mkProgram([
+    "100 [[ DATA 120",                    // target a body line — nonsense
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an error';
+  if (!/target line is inside/.test(r.errors.map(e => e.message).join(' | '))) {
+    return `wrong message(s): ${r.errors.map(e => e.message).join(' | ')}`;
+  }
+  return null;
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;

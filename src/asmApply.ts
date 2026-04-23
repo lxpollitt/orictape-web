@@ -42,7 +42,7 @@ import {
   KEYWORDS,
 } from './decoder';
 import { applyLineEdit } from './editor';
-import { assembleProgram, type Symbols, type Chunk } from './assembler6502';
+import { assembleProgram, type Symbols, type Chunk, type Emission } from './assembler6502';
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -91,7 +91,22 @@ export function applyAssembler(
   //    non-empty annotation when the body starts with `'` (so
   //    `REM UDG's` is a plain comment, not a host); DATA/CALL-family
   //    use the first-`'` rule; other lines contribute nothing.
-  const hostKinds       = prog.lines.map((_, i) => annotationHostKind(prog, i));
+  // First pass: classify every line.  Lines between a type-2 open
+  // and its matching close get re-classified as 'type2-body'
+  // unconditionally — the user has declared the region is all
+  // assembler, so any BASIC (REM/DATA/CALL/etc.) inside is an error
+  // surfaced by the validation pass below (and by the assembler
+  // rejecting the annotation shape).
+  const hostKinds: AnnotationHostKind[] = prog.lines.map((_, i) => annotationHostKind(prog, i));
+  {
+    let insideType2 = false;
+    for (let i = 0; i < hostKinds.length; i++) {
+      const k = hostKinds[i];
+      if (k === 'type2-open')       { insideType2 = true;  continue; }
+      if (k === 'type2-close')      { insideType2 = false; continue; }
+      if (insideType2) hostKinds[i] = 'type2-body';
+    }
+  }
   const rawAnnotations  = prog.lines.map((l, i) => extractAnnotation(l.v, hostKinds[i]));
   const anyMarker       = rawAnnotations.some(a => annotationContainsMarker(a));
   let   activeState     = !anyMarker;
@@ -117,6 +132,19 @@ export function applyAssembler(
    *  declared region end, setting `NAME_END` to the last byte
    *  assembled before the `]]`. */
   const blockEndAfterLine: boolean[] = [];
+  /** Regions opened by `[[ DATA <line>` that need post-assembly
+   *  single-DATA output.  Captured during the filter walk: each
+   *  entry pairs the line where the `[[ DATA` appeared (inclusive
+   *  lower bound of the region) with the line where the matching
+   *  `]]` appeared (inclusive upper bound).  If no `]]` is found the
+   *  region extends to the end of the program. */
+  type DataOutputRegion = {
+    openLineIdx:  number;
+    closeLineIdx: number;    // inclusive; last index if no explicit close
+    targetLine:   number;    // BASIC line number to write DATA into
+  };
+  const dataOutputRegions: DataOutputRegion[] = [];
+  let   activeDataRegion: { openLineIdx: number; targetLine: number } | null = null;
   /** Errors raised while parsing bounded-region params, tagged with
    *  line info at collection time below. */
   const filterErrors: AsmApplyError[] = [];
@@ -136,7 +164,31 @@ export function applyAssembler(
     blockEndAfterLine.push(res.sawCloseMarker);
     activeState   = res.active;
     wordModeState = res.wordMode;
+    // Track DATA-output regions.  A `[[ DATA <line>` opens one; the
+    // next `]]` closes it.  The open line and close line are both
+    // considered part of the region (their emissions, if any, get
+    // included in the byte collection).
+    if (res.openedOutput && res.openedOutput.kind === 'data') {
+      activeDataRegion = { openLineIdx: i, targetLine: res.openedOutput.lineNum };
+    }
+    if (res.sawCloseMarker && activeDataRegion !== null) {
+      dataOutputRegions.push({
+        openLineIdx:  activeDataRegion.openLineIdx,
+        closeLineIdx: i,
+        targetLine:   activeDataRegion.targetLine,
+      });
+      activeDataRegion = null;
+    }
     for (const msg of res.errors) filterErrors.push({ lineIdx: i, lineNum, message: msg });
+  }
+  // If a `[[ DATA` region was never closed, extend it to the end
+  // of the program.
+  if (activeDataRegion !== null) {
+    dataOutputRegions.push({
+      openLineIdx:  activeDataRegion.openLineIdx,
+      closeLineIdx: prog.lines.length - 1,
+      targetLine:   activeDataRegion.targetLine,
+    });
   }
 
   // 1. Build the Phase-5 annotation list, gated by host-line eligibility
@@ -144,14 +196,27 @@ export function applyAssembler(
   //    `isDataLine[i]` tells the assembler which source lines are DATA
   //    lines (vs REM or non-host) so it can detect PC-breaks when a
   //    DATA line emits zero instruction-bytes — see the pass 1 docs.
+  //    Type-2 open/close/body lines also contribute their filtered
+  //    annotation text (marker statements are stripped by the filter;
+  //    body statements remain as bare assembler).  For type-2 body
+  //    lines, the rendered line text (`line.v`) is used — Oric BASIC
+  //    tokenises substrings like `OR` in `ORG` into keyword bytes,
+  //    but `buildLineElements` joins keyword text and ASCII without
+  //    separators, so rendered `line.v` recovers the original
+  //    assembler source exactly.  Invalid BASIC lines inside the
+  //    region (e.g. a stray `REM`) fall through to the assembler's
+  //    existing "unknown mnemonic" errors.
   const asmAnnotations: string[] = prog.lines.map((_line, i) => {
-    const kind = hostKind(prog, i);
-    return (kind === 'rem' || kind === 'data') ? filteredAnnots[i] : '';
+    const k = hostKinds[i];
+    const isAsmHost = k === 'rem' || k === 'data'
+                   || k === 'type2-open' || k === 'type2-close' || k === 'type2-body';
+    if (!isAsmHost) return '';
+    return filteredAnnots[i];
   });
   const isDataLine: boolean[] = prog.lines.map((_line, i) => hostKind(prog, i) === 'data');
 
   // 2. Assemble them together so symbols are shared program-wide.
-  const { perLine, symbols } = assembleProgram(
+  const { perLine, symbols, emissions } = assembleProgram(
     asmAnnotations, startAddr, isDataLine, blockEndAfterLine,
   );
 
@@ -162,6 +227,25 @@ export function applyAssembler(
   //    caller sees them alongside assembly errors.
   const patches: { lineIdx: number; newText: string; ownedByteIndices: number[] }[] = [];
   const errors:  AsmApplyError[] = [...filterErrors];
+
+  // Type-2 "Missing ORG statement" check.  Walk each DATA-output
+  // region (currently the only flavour of type-2 region with
+  // explicit bounds); verify the first line that emitted bytes was
+  // preceded by an `ORG` statement within the same region.  We can't
+  // do this before assembly because byte emission is what tells us
+  // "this was an instruction".
+  for (const region of dataOutputRegions) {
+    let sawOrg = false;
+    for (let i = region.openLineIdx; i <= region.closeLineIdx; i++) {
+      if (annotationHasOrg(filteredAnnots[i])) sawOrg = true;
+      if (perLine[i].bytes.length > 0 && !sawOrg) {
+        const line    = prog.lines[i];
+        const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
+        errors.push({ lineIdx: i, lineNum, message: 'Missing ORG statement' });
+        break;   // one error per region — user fixes and re-runs
+      }
+    }
+  }
 
   for (let i = 0; i < prog.lines.length; i++) {
     const line    = prog.lines[i];
@@ -184,10 +268,19 @@ export function applyAssembler(
     // (no markers anywhere) the same situation just triggers a silent
     // PC-break; downstream ABS uses of later labels will error if
     // affected.
+    // Target DATA lines for type-2 `[[ DATA <line>` output sinks
+    // are EXPECTED to be placeholder DATA (often just `DATA 0`)
+    // because their contents will be fully replaced by the
+    // assembled bytes from the region.  Exclude them from the
+    // strict-mode "must contain non-zero bytes" check.
+    const isDataOutputTarget = dataOutputRegions.some(
+      r => findLineIdxByLineNum(prog, r.targetLine) === i,
+    );
     if (anyMarker &&
         isDataLine[i] &&
         state.bytes.length === 0 &&
-        lineInActiveRegion[i]) {
+        lineInActiveRegion[i] &&
+        !isDataOutputTarget) {
       errors.push({
         lineIdx: i, lineNum,
         message: `DATA lines inside [[ regions must contain a non-zero number of assembled bytes`,
@@ -203,6 +296,50 @@ export function applyAssembler(
         buildNewDataLineText(prog, i, state.chunks, lineWordModes[i]);
       patches.push({ lineIdx: i, newText, ownedByteIndices });
     }
+  }
+
+  // Type-2 DATA-output patches.  For each `[[ DATA <line>` region
+  // that assembled cleanly, collect its bytes and rewrite the target
+  // BASIC line as a single `DATA #XX,#XX,…` statement.  Error if the
+  // target line doesn't exist, or if the target is inside the region
+  // itself (which would overwrite the `[[` marker or region code).
+  for (const region of dataOutputRegions) {
+    // If any line in the region has assembly errors, skip — we
+    // don't want to write partial/wrong bytes.
+    let regionHasErrors = false;
+    for (let i = region.openLineIdx; i <= region.closeLineIdx; i++) {
+      if (perLine[i].errors.length > 0) { regionHasErrors = true; break; }
+    }
+    if (regionHasErrors) continue;
+
+    // Find the target line.  Attach the error to the open line
+    // (that's where the user declared the output sink).
+    const targetIdx = findLineIdxByLineNum(prog, region.targetLine);
+    if (targetIdx === null) {
+      const openLine = prog.lines[region.openLineIdx];
+      const openLineNum = prog.bytes[openLine.firstByte + 2].v
+                        + prog.bytes[openLine.firstByte + 3].v * 256;
+      errors.push({
+        lineIdx: region.openLineIdx, lineNum: openLineNum,
+        message: `[[ DATA ${region.targetLine}: BASIC line ${region.targetLine} not found`,
+      });
+      continue;
+    }
+    if (targetIdx >= region.openLineIdx && targetIdx <= region.closeLineIdx) {
+      const openLine = prog.lines[region.openLineIdx];
+      const openLineNum = prog.bytes[openLine.firstByte + 2].v
+                        + prog.bytes[openLine.firstByte + 3].v * 256;
+      errors.push({
+        lineIdx: region.openLineIdx, lineNum: openLineNum,
+        message: `[[ DATA ${region.targetLine}: target line is inside the [[ ... ]] region`,
+      });
+      continue;
+    }
+
+    const buf = buildRegionByteBuffer(emissions, region.openLineIdx, region.closeLineIdx);
+    if (!buf) continue;        // nothing to emit (region had no instructions)
+    const { newText, ownedByteIndices } = buildType2DataLineText(prog, targetIdx, buf.bytes);
+    patches.push({ lineIdx: targetIdx, newText, ownedByteIndices });
   }
 
   // 4. Apply Phase 5 patches.  Line indices are stable across `applyLineEdit`
@@ -257,7 +394,44 @@ function hostKind(prog: Program, lineIdx: number): HostKind {
  *  whether a line is a CALL-family back-patch host (so its annotation
  *  can hold back-patch directives or `[[`/`]]` markers).  Lines with no
  *  annotation-host role are `'other'` and contribute nothing. */
-type AnnotationHostKind = 'rem' | 'data' | 'callfamily' | 'other';
+/**
+ * Line classification used for annotation extraction.
+ *
+ * - `rem`, `data` — traditional type-1 hosts: assembler source lives
+ *   inside the `'` annotation.
+ * - `callfamily` — lines carrying back-patch verbs (CALL/POKE/etc.);
+ *   the annotation is the directive list, not assembler source.
+ * - `type2-open`  — a line whose content begins with literal `[[` in
+ *   ASCII, opening a type-2 region.  Everything up to the matching
+ *   `]]` line is bare assembler (no `'` delimiter).
+ * - `type2-close` — a line whose content begins with literal `]]`.
+ * - `type2-body`  — any line between a type-2 open and its matching
+ *   close.  The entire line body (minus the line number) is treated
+ *   as the assembler annotation.
+ * - `other`       — no annotation-host role; contributes nothing to
+ *   the assembler input.
+ */
+type AnnotationHostKind =
+  | 'rem' | 'data' | 'callfamily'
+  | 'type2-open' | 'type2-body' | 'type2-close'
+  | 'other';
+
+/** Helper: does the line's content (skipping leading spaces) begin
+ *  with the given ASCII marker string?  Used to detect `[[` and `]]`
+ *  written at the start of a line (outside any REM or DATA host) —
+ *  the type-2 form.  BASIC keyword tokens are high-bit bytes so they
+ *  never collide with ASCII marker characters. */
+function lineContentStartsWithAscii(prog: Program, lineIdx: number, marker: string): boolean {
+  const line = prog.lines[lineIdx];
+  let i = line.firstByte + 4;
+  // Skip leading spaces.
+  while (i <= line.lastByte && prog.bytes[i].v === 0x20) i++;
+  for (let k = 0; k < marker.length; k++) {
+    if (i + k > line.lastByte) return false;
+    if (prog.bytes[i + k].v !== marker.charCodeAt(k)) return false;
+  }
+  return true;
+}
 
 /** Quick check: does a line contain any back-patch verb token in its
  *  BASIC code body (outside strings, stopping at the `'` annotation
@@ -278,6 +452,12 @@ function hasAnyBackPatchToken(prog: Program, lineIdx: number): boolean {
 }
 
 function annotationHostKind(prog: Program, lineIdx: number): AnnotationHostKind {
+  // Type-2 open/close markers are detected by ASCII prefix on the
+  // line content — these sit outside the token-based REM/DATA hosts.
+  // Body classification (lines *between* an open and close) requires
+  // cross-line state, so it's handled in the caller's walk, not here.
+  if (lineContentStartsWithAscii(prog, lineIdx, '[[')) return 'type2-open';
+  if (lineContentStartsWithAscii(prog, lineIdx, ']]')) return 'type2-close';
   const hk = hostKind(prog, lineIdx);
   if (hk === 'rem' || hk === 'data') return hk;
   if (hasAnyBackPatchToken(prog, lineIdx)) return 'callfamily';
@@ -312,6 +492,15 @@ function extractAnnotation(lineText: string, kind: AnnotationHostKind): string {
     const afterRem = lineText.slice(remIdx + 3).replace(/^\s+/, '');
     if (!afterRem.startsWith("'")) return '';
     return afterRem.slice(1);
+  }
+
+  // Type-2 open/close/body: the entire body (everything after the
+  // line number + space) is the annotation — there is no `'`
+  // delimiter in this form.  The filter will parse the `[[` and `]]`
+  // markers as usual (including any output-sink params).
+  if (kind === 'type2-open' || kind === 'type2-close' || kind === 'type2-body') {
+    const spaceIdx = lineText.indexOf(' ');
+    return spaceIdx < 0 ? '' : lineText.slice(spaceIdx + 1);
   }
 
   // DATA, CALL-family: first `'` in the line text is the annotation marker.
@@ -391,6 +580,92 @@ function buildNewDataLineText(
   const newText = `${lineNum} DATA ${values}${sep}${annot}`;
 
   const valuesStartByte = line.firstByte + 4 + 2;  // content starts at +4; values at content offset 2
+  const ownedByteIndices: number[] = [];
+  for (let k = 0; k < values.length; k++) ownedByteIndices.push(valuesStartByte + k);
+
+  return { newText, ownedByteIndices };
+}
+
+/** Locate a BASIC line by its user-visible line number.  Returns the
+ *  program-line index, or null if no line in the program carries
+ *  that number.  Used by type-2 DATA output to find the target line
+ *  the user named in `[[ DATA <line>`.  O(n) in program length;
+ *  fine for the handful of DATA-sink regions a typical program has. */
+function findLineIdxByLineNum(prog: Program, targetLineNum: number): number | null {
+  for (let i = 0; i < prog.lines.length; i++) {
+    const line = prog.lines[i];
+    const lNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
+    if (lNum === targetLineNum) return i;
+  }
+  return null;
+}
+
+/** Collect the bytes of a type-2 DATA-output region into a single
+ *  contiguous buffer, indexed by PC.  Pulls every emission whose
+ *  `lineIdx` falls inside the region's open/close range, computes
+ *  the min and max PCs covered, and zero-fills any gaps between
+ *  emissions (e.g. when the user uses multiple `ORG`s for alignment
+ *  without filling the space with NOPs).  Returns null when the
+ *  region produced no emissions at all — callers treat that as "no
+ *  output to write". */
+function buildRegionByteBuffer(
+  emissions:    Emission[],
+  openLineIdx:  number,
+  closeLineIdx: number,
+): { bytes: number[]; startPc: number } | null {
+  let startPc        = Infinity;
+  let endPcInclusive = -Infinity;
+  let any            = false;
+  for (const e of emissions) {
+    if (e.lineIdx < openLineIdx || e.lineIdx > closeLineIdx) continue;
+    any = true;
+    if (e.pc < startPc) startPc = e.pc;
+    const last = e.pc + e.bytes.length - 1;
+    if (last > endPcInclusive) endPcInclusive = last;
+  }
+  if (!any) return null;
+  const size = endPcInclusive - startPc + 1;
+  const buffer = new Array<number>(size).fill(0);
+  for (const e of emissions) {
+    if (e.lineIdx < openLineIdx || e.lineIdx > closeLineIdx) continue;
+    for (let k = 0; k < e.bytes.length; k++) {
+      buffer[e.pc - startPc + k] = e.bytes[k];
+    }
+  }
+  return { bytes: buffer, startPc };
+}
+
+/** Build replacement text for a target DATA line that receives a
+ *  type-2 region's assembled bytes in a single flat DATA statement.
+ *  Format is forced to byte-per-value hex (`#XX,#XX,…`) regardless
+ *  of the region's WORDS/BYTES setting — type-2 DATA is a large
+ *  opaque blob loaded by a POKE loop; WORDS chunking would break
+ *  the one-POKE-per-value contract the BASIC loop relies on.
+ *
+ *  Any pre-existing annotation on the target line (`'` and
+ *  everything after) is preserved verbatim so the user's hand
+ *  comments survive.  Returns `ownedByteIndices` identifying which
+ *  `prog.bytes` positions the assembler produced, for precise
+ *  `'automatic'` tagging later. */
+function buildType2DataLineText(
+  prog:     Program,
+  lineIdx:  number,
+  bytes:    number[],
+): { newText: string; ownedByteIndices: number[] } {
+  const line    = prog.lines[lineIdx];
+  const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
+
+  const v     = line.v;
+  const apost = v.indexOf("'");
+  const annot = apost >= 0 ? v.slice(apost) : '';
+  const sep   = annot ? ' ' : '';
+
+  const values = bytes
+    .map(b => '#' + b.toString(16).toUpperCase().padStart(2, '0'))
+    .join(',');
+  const newText = `${lineNum} DATA ${values}${sep}${annot}`;
+
+  const valuesStartByte = line.firstByte + 4 + 2;  // content +2 past "DATA "
   const ownedByteIndices: number[] = [];
   for (let k = 0; k < values.length; k++) ownedByteIndices.push(valuesStartByte + k);
 
@@ -750,25 +1025,61 @@ type ParsedMarker =
   | { kind: 'plain' }
   | { kind: 'error'; message: string };
 
+/** Output-sink spec attached to a `[[` marker.  `kind: 'data'` routes
+ *  the region's assembled bytes into a single BASIC DATA statement on
+ *  an existing line (`lineNum`); intended for type-2 style sources
+ *  where assembler lives bare between `[[` and `]]` and the program's
+ *  POKE loop reads back the bytes.  Future: `kind: 'tap'` for TAP
+ *  output.  `undefined` means "no output sink declared" — type-1
+ *  per-line DATA behaviour applies. */
+type OutputSink =
+  | { kind: 'data'; lineNum: number };
+
 interface MarkerParams {
   /** undefined → preserve the prevailing mode. */
   wordMode: boolean | undefined;
+  /** undefined → no output sink declared on this `[[`. */
+  output?:  OutputSink;
 }
 
 /** Parse a `[[`-open statement's parameter list.  Params are
- *  whitespace-separated tokens after the `[[` marker, case-insensitive.
- *  Currently only `WORDS` / `BYTES` are recognised; unknown tokens are
- *  errors.  No params → `{wordMode: undefined}` (preserve prevailing). */
+ *  whitespace-separated tokens after the `[[` marker, case-insensitive
+ *  where the user's preferences admit it (mnemonic/ORG-style).  Order
+ *  within the list doesn't matter.  Currently recognised:
+ *
+ *    - `WORDS` / `BYTES` — per-line DATA render mode (sticky setting).
+ *    - `DATA <line>`     — type-2 output sink: emit the region's
+ *      bytes into a single DATA statement on the given BASIC line
+ *      number.  The `<line>` token must immediately follow `DATA`.
+ *
+ *  Unknown tokens (or `DATA` without a numeric operand) are errors.
+ *  No params → `{wordMode: undefined}` (preserve prevailing). */
 function parseMarkerParams(rest: string): { params: MarkerParams } | { error: string } {
   const toks = rest.trim().split(/\s+/).filter(t => t.length > 0);
   let wordMode: boolean | undefined = undefined;
-  for (const t of toks) {
+  let output:   OutputSink | undefined = undefined;
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
     const u = t.toUpperCase();
-    if (u === 'WORDS')      wordMode = true;
-    else if (u === 'BYTES') wordMode = false;
-    else return { error: `unknown bounded-region parameter: ${t}` };
+    if (u === 'WORDS')      { wordMode = true;  continue; }
+    if (u === 'BYTES')      { wordMode = false; continue; }
+    if (u === 'DATA') {
+      // Consume the next token as the target line number.
+      const arg = toks[i + 1];
+      if (arg === undefined || !/^\d+$/.test(arg)) {
+        return { error: `DATA requires a BASIC line number: [[ DATA <line>` };
+      }
+      const lineNum = parseInt(arg, 10);
+      if (lineNum < 0 || lineNum > 0xFFFF) {
+        return { error: `DATA target line number out of range: ${arg}` };
+      }
+      output = { kind: 'data', lineNum };
+      i++;                 // skip the consumed argument
+      continue;
+    }
+    return { error: `unknown bounded-region parameter: ${t}` };
   }
-  return { params: { wordMode } };
+  return { params: { wordMode, output } };
 }
 
 function classifyStatement(raw: string): ParsedMarker {
@@ -787,6 +1098,20 @@ function classifyStatement(raw: string): ParsedMarker {
     return { kind: 'open', params: parsed.params };
   }
   return { kind: 'plain' };
+}
+
+/** Helper: does a filtered annotation contain at least one `ORG`
+ *  statement?  Used by the type-2 validation pass to flag regions
+ *  that emit bytes without having declared an origin.  Statement-
+ *  aware (so `ORG` inside a string literal or after `*` comment
+ *  won't false-match) — reuses `splitAnnotationStatements` and
+ *  matches case-insensitively on the leading token of each
+ *  statement. */
+function annotationHasOrg(annotation: string): boolean {
+  for (const raw of splitAnnotationStatements(annotation)) {
+    if (/^\s*[Oo][Rr][Gg]\b/.test(raw)) return true;
+  }
+  return false;
 }
 
 /** Split an annotation into raw statement texts, `'c`-literal aware,
@@ -843,12 +1168,13 @@ function filterStatementsByState(
   initialActive:    boolean,
   initialWordMode:  boolean,
 ): {
-  filtered:       string;
-  active:         boolean;
-  wordMode:       boolean;
-  lineWordMode:   boolean;
-  sawCloseMarker: boolean;
-  errors:         string[];
+  filtered:        string;
+  active:          boolean;
+  wordMode:        boolean;
+  lineWordMode:    boolean;
+  sawCloseMarker:  boolean;
+  openedOutput:    OutputSink | undefined;
+  errors:          string[];
 } {
   const statements = splitAnnotationStatements(annotation);
 
@@ -866,6 +1192,12 @@ function filterStatementsByState(
   // though `]]` itself emits no bytes and is stripped before the
   // assembler sees the annotation.
   let sawCloseMarker = false;
+  // Output sink declared on this line's `[[` marker, if any.  Scoped
+  // per-marker (not sticky across lines) so the caller can identify
+  // the specific region opened by this `[[`.  If multiple `[[` on
+  // the same line declare sinks, the last one wins (caller can warn
+  // if desired).
+  let openedOutput: OutputSink | undefined = undefined;
 
   const kept: string[] = [];
   const errors: string[] = [];
@@ -874,6 +1206,7 @@ function filterStatementsByState(
     if (c.kind === 'open') {
       active = true;
       if (c.params.wordMode !== undefined) wordMode = c.params.wordMode;
+      if (c.params.output   !== undefined) openedOutput = c.params.output;
       continue;
     }
     if (c.kind === 'close') { active = false; sawCloseMarker = true; continue; }
@@ -888,5 +1221,8 @@ function filterStatementsByState(
     }
   }
 
-  return { filtered: kept.join(':'), active, wordMode, lineWordMode, sawCloseMarker, errors };
+  return {
+    filtered: kept.join(':'),
+    active, wordMode, lineWordMode, sawCloseMarker, openedOutput, errors,
+  };
 }
