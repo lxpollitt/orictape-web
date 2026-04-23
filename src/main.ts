@@ -2898,35 +2898,61 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
  * Address = start_address_from_header + (byteIdx - firstContentByte).
  */
 function progByteAddr(prog: Program, byteIdx: number): string | null {
-  const lines = prog.lines;
-  if (!lines.length) return null;
-  if (byteIdx < lines[0].firstByte) return null; // preamble — no address
+  const hex4 = (n: number) =>
+    '$' + (n & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
 
-  // Find the line that contains this byte, or fall back to the last line for
-  // bytes beyond the last parsed line (e.g. orphaned post-program bytes).
-  // Use lineFirstAddr (derived from the chain of next-line pointers) so the
-  // address stays correct even when the byte stream has gained or lost bytes
-  // due to corruption.
-  let lineIdx = lines.findIndex(l => byteIdx >= l.firstByte && byteIdx <= l.lastByte);
-  if (lineIdx === -1) lineIdx = lines.length - 1;
-  const line = lines[lineIdx];
-  const addr = lineFirstAddr(prog, lineIdx) + (byteIdx - line.firstByte);
-  return '$' + (addr & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  if (prog.lines.length > 0) {
+    const lines = prog.lines;
+    if (byteIdx < lines[0].firstByte) return null; // preamble — no address
+
+    // Find the line that contains this byte, or fall back to the last line
+    // for bytes beyond the last parsed line (e.g. orphaned post-program
+    // bytes).  Use lineFirstAddr (derived from the chain of next-line
+    // pointers) so the address stays correct even when the byte stream
+    // has gained or lost bytes due to corruption.
+    let lineIdx = lines.findIndex(l => byteIdx >= l.firstByte && byteIdx <= l.lastByte);
+    if (lineIdx === -1) lineIdx = lines.length - 1;
+    const line = lines[lineIdx];
+    return hex4(lineFirstAddr(prog, lineIdx) + (byteIdx - line.firstByte));
+  }
+
+  // Machine-code program: address = startAddr + offset-into-data.
+  // Data begins immediately after the name's null terminator
+  // (`byteIndex + 9 + name.length + 1`).  Bytes inside the sync /
+  // header / name have no mapped memory address — return null so the
+  // caller keeps the "byte index" display without a spurious address.
+  const firstDataByte = prog.header.byteIndex + 9 + prog.name.length + 1;
+  if (byteIdx < firstDataByte) return null;
+  return hex4(prog.header.startAddr + (byteIdx - firstDataByte));
 }
 
 function describeProgRegion(prog: Program, byteIdx: number): string {
   const lines     = prog.lines;
   const lastLine  = lines[lines.length - 1];
 
-  // After the last parsed BASIC line.
+  // Derive the "first content byte" anchor.  For BASIC this is the
+  // first line's byte; for machine code (no lines) it's implied by
+  // the header: 9 header bytes + null-terminated name after
+  // `header.byteIndex`.  Both values equal `byteIndex + 9 + nameLen
+  // + 1` in well-formed programs, so we use that universally and
+  // keep a single code path for both kinds.
+  const firstByte = prog.header.byteIndex + 9 + prog.name.length + 1;
+
+  // After the program's data area.
   if (lastLine && byteIdx > lastLine.lastByte) {
     const extra = byteIdx - lastLine.lastByte;
     return `After program data · byte +${extra}`;
   }
-
-  // Preamble — need firstByte to locate fields.
-  const firstByte = lines[0]?.firstByte;
-  if (firstByte === undefined) return 'Preamble';
+  if (!lines.length) {
+    const dataLen = prog.header.endAddr - prog.header.startAddr;
+    const lastDataByte = firstByte + dataLen - 1;
+    if (byteIdx > lastDataByte) {
+      const extra = byteIdx - lastDataByte;
+      return `After program data · byte +${extra}`;
+    }
+    // Fallthrough: byteIdx <= lastDataByte handled after the
+    // header/name/sync branch below, with an address-aware label.
+  }
 
   const nameLen     = prog.name.length;
   const nameTermIdx = firstByte - 1;
@@ -2973,7 +2999,13 @@ function describeProgRegion(prog: Program, byteIdx: number): string {
   }
 
   if (byteIdx === syncMarker) return 'Sync marker (0x24)';
-  return 'Sync preamble (0x16)';
+  if (byteIdx < syncMarker)   return 'Sync preamble (0x16)';
+
+  // Inside the program body.  For BASIC, the caller normally
+  // reports "Line N" instead of invoking this function — so this
+  // branch is only hit for machine-code programs (no parsed lines),
+  // where every body byte has a mapped memory address.
+  return 'Machine code body';
 }
 
 function updateStatusBar(): void {
@@ -3038,6 +3070,10 @@ function updateStatusBar(): void {
       }
     }
     sections.push(lineSegs.join(dot));
+  } else {
+    // Machine-code program — no parsed lines, but still has a
+    // sync / header / name / body / post-body layout we can label.
+    sections.push(describeProgRegion(prog, selByte!));
   }
 
   statusBar.innerHTML = sections.join(pipe);
