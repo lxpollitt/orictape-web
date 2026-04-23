@@ -357,8 +357,17 @@ export function applyAssembler(
 
   // 5. Phase 6: walk every line and apply back-patch directives.  Uses the
   //    filtered annotation so lines outside the active region are ignored
-  //    and markers embedded in the annotation are transparent.
+  //    and markers embedded in the annotation are transparent.  Type-2
+  //    body / open / close lines are skipped entirely: inside a
+  //    `[[ ... ]]` bare-assembler region, the whole line is assembler
+  //    source, not BASIC with a back-patch annotation.  The byte-wise
+  //    token scan in `countBackPatchTokens` would otherwise get fooled
+  //    by BASIC keyword tokens embedded in label names (e.g. `.SFORWT`
+  //    stores as [`.`][`S`][FOR-token][`W`][`T`], which would make the
+  //    scanner mistake the FOR token for a patch site).
   for (let i = 0; i < prog.lines.length; i++) {
+    const k = hostKinds[i];
+    if (k === 'type2-open' || k === 'type2-close' || k === 'type2-body') continue;
     const res = applyBackPatchesToLine(prog, i, symbols, filteredAnnots[i]);
     errors.push(...res.errors);
     if (res.patched) linesPatched.push(i);

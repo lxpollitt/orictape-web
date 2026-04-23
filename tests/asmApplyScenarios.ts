@@ -1843,6 +1843,31 @@ test('type-2: named block inside region, back-patch from outside', () => {
   return null;
 });
 
+test('type-2: label names containing BASIC keywords (.SFORWT, .NEXTRC) work', () => {
+  // `.SFORWT` stores as [.][S][FOR-token][W][T] and `.NEXTRC` as
+  // [.][NEXT-token][R][C].  The assembler sees the rendered text
+  // from `line.v` which joins keyword text + ASCII losslessly, so
+  // both labels parse correctly.  The back-patch byte-scan would
+  // otherwise see the embedded FOR/NEXT tokens as patch sites —
+  // we skip back-patch processing on type-2 lines to avoid that.
+  const p = mkProgram([
+    "10 DATA 0",
+    "100 [[ DATA 10",
+    "110 ORG $9800",
+    "120 .SFORWT",
+    "130 LDA #$FF",
+    "140 .NEXTRC",
+    "150 STA $300",
+    "160 RTS",
+    "170 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // LDA #$FF (2) + STA $300 (3) + RTS (1) = 6 bytes starting at $9800.
+  if (!/^10 DATA #A9,#FF,#8D,#00,#03,#60/.test(p.lines[0].v)) return `line 10: ${p.lines[0].v}`;
+  return null;
+});
+
 test('type-2: ORG survives BASIC `OR` tokenisation round-trip', () => {
   // Oric BASIC tokenises the `OR` substring inside `ORG`, so
   // `110 ORG $9800` stores as [OR-token][G][space]...  The rendered
