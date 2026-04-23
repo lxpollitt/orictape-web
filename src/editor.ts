@@ -34,7 +34,7 @@
  *   - Oric Advanced User Guide ROM Disassembly (Defence-Force)
  */
 
-import { KEYWORDS, TOKEN_REM, TOKEN_BANG, TOKEN_DATA, INVALID_CODE_LITERALS } from './decoder';
+import { KEYWORDS, TOKEN_REM, TOKEN_DATA, INVALID_CODE_LITERALS } from './decoder';
 import type { Program, ByteInfo, LineInfo } from './decoder';
 import {
   flagNonMonotonicLines, flagElementErrors, flagLenErrors, flagEarlyEnd,
@@ -160,7 +160,7 @@ export function byteSequenceSyntaxChecker(byte: number, reset?: boolean): ByteSy
 
   // Keyword token.
   if (byte >= 0x80) {
-    if (byte === TOKEN_REM || byte === TOKEN_BANG) {
+    if (byte === TOKEN_REM) {
       _syntaxState = 'rem';
       return { severity: 'ok', expectNext: 'literals' };
     }
@@ -168,6 +168,17 @@ export function byteSequenceSyntaxChecker(byte: number, reset?: boolean): ByteSy
       _syntaxState = 'data';
       return { severity: 'ok', expectNext: 'literals' };
     }
+    // `!` (TOKEN_BANG) is a user-redefinable command hook (JMP via
+    // $02F4/$02F5 vector, defaulting to ILLEGAL QUANTITY ERROR at
+    // $D336 — commonly redefined by DOS / extension ROMs).  It is
+    // NOT a REM alias: the Oric tokeniser stays in code mode after
+    // `!`, so subsequent keywords are tokenised and their
+    // arguments execute normally.  Empirically verified: `! PRINT`
+    // stores as [BANG][space][PRINT-token], not as literal ASCII.
+    // Treating `!` like REM would mis-render any line that uses
+    // the bang hook, and inside a type-2 `[[` region would cause
+    // the assembler to see `«0xXX»` escape placeholders instead
+    // of the real mnemonic / label text.
     if ((byte - 0x80) < KEYWORDS.length) return { severity: 'ok', expectNext: 'code' };
     return { severity: 'error', expectNext: 'code', reason: 'unknownKeyword' };
   }
