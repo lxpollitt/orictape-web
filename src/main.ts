@@ -1047,9 +1047,21 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   };
   ta.addEventListener('input', autoSize);
 
-  // ta.addEventListener('blur', () => {
-  //   if (editingLine !== null) exitEditMode(true);
-  // });
+  // Commit-on-blur: when the textarea loses focus (user clicks
+  // another line, a button, a hex byte, the toolbar, etc.), treat
+  // it as "finished editing" and save — same as pressing Enter.
+  // Without this, clicking away silently leaves the edit in
+  // limbo: the textarea stays alive off-screen or the user
+  // thinks they've saved when they haven't.  The `editingLine
+  // !== null` guard protects against spurious blur during the
+  // normal exit flows (Enter/Esc/Shift+Enter/etc.) which null
+  // out `editingLine` BEFORE calling renderBasic — the
+  // synchronous DOM removal then fires blur, but the guard sees
+  // null state and no-ops.  Users who want to discard changes
+  // can still do so with Esc or Shift+Esc.
+  ta.addEventListener('blur', () => {
+    if (editingLine !== null) exitEditMode(true);
+  });
 
   ta.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'Enter' && e.shiftKey) {
