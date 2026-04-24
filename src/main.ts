@@ -1064,6 +1064,16 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
   });
 
   ta.addEventListener('keydown', (e: KeyboardEvent) => {
+    // Cmd/Ctrl+S: suppress the browser's native "save page"
+    // dialog and let the event bubble up to the document handler,
+    // which does all the real work (commit current edit + emit
+    // TAP).  The early `return` skips the catch-all
+    // `stopPropagation()` at the bottom of this listener, so
+    // bubbling is preserved.
+    if (e.key === 's' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Enter' && e.shiftKey) {
       // Shift+Enter: split line at cursor.
       e.preventDefault();
@@ -2591,7 +2601,49 @@ function navigateBasic(key: string, shift: boolean, prog: Program): void {
 
 const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 
+/**
+ * Quick-save: download the currently-active program as a single-
+ * entry TAP file, preserving the program's own autorun flag.  Used
+ * by the Cmd/Ctrl+S shortcut and any future explicit "save" UI.
+ * Works in both tape view (active program) and merged view (merged
+ * output).  Respects the `tapMetaToggle` setting for metadata
+ * inclusion so quick-saves and Build-TAP downloads of the same
+ * program produce identical output.
+ */
+function quickSaveActiveProgram(): void {
+  const includeMeta = tapMetaToggle.checked;
+  let prog: Program | undefined;
+  if (viewMode === 'merged') {
+    prog = userMerges[activeProgIdx]?.result.output;
+  } else {
+    prog = programs[activeProgIdx];
+  }
+  if (!prog) return;
+  const entry: TapEntry = {
+    prog,
+    autorun:         prog.header.autorun,
+    includeMetadata: includeMeta,
+  };
+  const bytes    = encodeTapFile([entry]);
+  const filename = `${prog.name || 'program'}.tap`;
+  downloadTap(bytes, filename);
+}
+
 document.addEventListener('keydown', (e: KeyboardEvent) => {
+  // Cmd/Ctrl+S: quick-save the active program as a TAP.  Handled
+  // before the edit-input guard below so an in-progress edit gets
+  // committed first — `exitEditMode(true)` commits and re-renders
+  // synchronously, after which the quick-save picks up the updated
+  // program bytes.  Always preventDefault so the browser's "save
+  // page" dialog doesn't show up.  Shift+S is left free for any
+  // future "save-as" variant.
+  if (e.key === 's' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    if (editingLine !== null) exitEditMode(true);
+    quickSaveActiveProgram();
+    return;
+  }
+
   // Don't let any keys fire while the edit input or search input has focus — they handle their own keys.
   if (editInput && document.activeElement === editInput) return;
   if (document.activeElement === searchInput) return;
