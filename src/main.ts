@@ -560,7 +560,7 @@ function renderAll(): void {
   const prog = programs[activeProgIdx];
   const isMachineCode = !!prog && prog.header.fileType !== 0;
   basicTypeEl.textContent = prog
-    ? (isMachineCode ? 'Machine code program' : 'BASIC program')
+    ? (isMachineCode ? 'Machine code program or memory block' : 'BASIC program')
     : '';
   // Wrap toggle and fix-pointers toggle only apply to BASIC programs —
   // hide them for machine code where they'd be meaningless.
@@ -868,7 +868,7 @@ function renderBasic(prog: Program): void {
     }
 
     const headline = isMachineCode
-      ? `Machine code program · starts at $${prog.header.startAddr.toString(16).toUpperCase().padStart(4, '0')} · `
+      ? `Machine code program or memory block · starts at $${prog.header.startAddr.toString(16).toUpperCase().padStart(4, '0')} · `
         + `${prog.header.endAddr - prog.header.startAddr} bytes`
       : 'No BASIC content decoded.';
     basicPanel.innerHTML =
@@ -2988,7 +2988,7 @@ function describeProgRegion(prog: Program, byteIdx: number): string {
       case 0: case 1: case 8: return 'Header · reserved';
       case 2: {
         const v = b[byteIdx]?.v ?? 0;
-        const s = v === 0x00 ? 'BASIC' : v === 0x80 ? 'machine code'
+        const s = v === 0x00 ? 'BASIC' : v === 0x80 ? 'machine code or memory block'
                 : `0x${v.toString(16).toUpperCase().padStart(2, '0')}`;
         return `Header · type: ${s}`;
       }
@@ -3010,9 +3010,13 @@ function describeProgRegion(prog: Program, byteIdx: number): string {
 
   // Inside the program body.  For BASIC, the caller normally
   // reports "Line N" instead of invoking this function — so this
-  // branch is only hit for machine-code programs (no parsed lines),
-  // where every body byte has a mapped memory address.
-  return 'Machine code body';
+  // branch is only hit for non-BASIC programs (fileType 0x80: no
+  // parsed lines, every body byte has a mapped memory address).
+  // These are conventionally called "machine code" on the Oric, but
+  // the same file type is also used for arbitrary memory blocks
+  // (screen dumps, tokenised BASIC saved as a memory region, etc.),
+  // so the label reflects both possibilities.
+  return 'Machine code or memory block body';
 }
 
 function updateStatusBar(): void {
@@ -3300,35 +3304,35 @@ function runReassembler(): void {
   const nErrors  = errors.length;
 
   // Any `[[ CSAVE "<name>" [AUTO] ... ]]` regions in the source
-  // produce virtual tapes — one per region.  We round-trip through
-  // `parseTapFile` so the Program structure is built via the same
-  // path as user-loaded TAPs (catches any encoding edge-cases and
-  // gives consistent metadata).  Each generated tape is APPENDED —
-  // we don't overwrite prior tapes with the same name (matches the
-  // load-a-file-twice UX and avoids silently destroying tabs the
-  // user may want to compare).  The global error gate inside
-  // `applyAssembler` guarantees `generatedTaps` is empty when the
-  // program has any error, so we never produce broken TAPs.
+  // produce virtual programs appended to the SAME tape as the
+  // source program — logical grouping: the generated binaries belong
+  // to the source they came from, and tape tabs stay tidy across
+  // repeat runs.  We round-trip through `parseTapFile` so each
+  // Program is built via the same path as user-loaded TAPs (catches
+  // any encoding edge-cases and gives consistent metadata).
+  // Programs are APPENDED — prior generated entries are never
+  // overwritten, so the user can compare successive runs or close
+  // stale ones (closing tabs is a planned future feature).  The
+  // global error gate inside `applyAssembler` guarantees
+  // `generatedTaps` is empty when the program has any error, so we
+  // never produce broken TAPs.
+  const hostTape = tapes[activeTapeIdx];
   let nTapsAdded = 0;
-  for (const tap of generatedTaps) {
-    let tapPrograms: Program[];
-    try { tapPrograms = parseTapFile(tap.bytes.buffer as ArrayBuffer); }
-    catch (err) {
-      errors.push({
-        lineIdx: 0, lineNum: 0,
-        message: `[[ CSAVE "${tap.name}": internal error building TAP: ${err}`,
-      });
-      continue;
+  if (hostTape) {
+    for (const tap of generatedTaps) {
+      let tapPrograms: Program[];
+      try { tapPrograms = parseTapFile(tap.bytes.buffer as ArrayBuffer); }
+      catch (err) {
+        errors.push({
+          lineIdx: 0, lineNum: 0,
+          message: `[[ CSAVE "${tap.name}": internal error building TAP: ${err}`,
+        });
+        continue;
+      }
+      assignProgNumbers(tapPrograms);
+      hostTape.programs.push(...tapPrograms);
+      nTapsAdded++;
     }
-    assignProgNumbers(tapPrograms);
-    tapes.push({
-      filename:   `${tap.name}.tap`,
-      samples:    new Int16Array(0),
-      sampleRate: 48000,
-      programs:   tapPrograms,
-      fromTap:    true,
-    });
-    nTapsAdded++;
   }
 
   // Render first: `renderAll()` calls `updateStatusBar()` which would
