@@ -1186,25 +1186,17 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
           eta.selectionStart = eta.selectionEnd = joinPoint;
         }
       }
-    } else if (e.key === 'ArrowLeft' && ta.selectionStart === 0 && ta.selectionEnd === 0 && editingLine !== null && editingLine > 0) {
-      // Cursor-left at start of line: save and select last element of previous line.
-      e.preventDefault();
-      const targetLine = editingLine - 1;
-      exitEditMode(true);
-      const prog = programs[activeProgIdx];
-      if (prog && targetLine < prog.lines.length) {
-        const line = prog.lines[targetLine];
-        selectByte(byteForElem(line, line.elements.length - 1));
-      }
-    } else if (e.key === 'ArrowRight' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length && editingLine !== null && editingLine < (programs[activeProgIdx]?.lines.length ?? 0) - 1) {
-      // Cursor-right at end of line: save and select first element of next line.
-      e.preventDefault();
-      const targetLine = editingLine + 1;
-      exitEditMode(true);
-      const prog = programs[activeProgIdx];
-      if (prog && targetLine < prog.lines.length) {
-        selectByte(byteForElem(prog.lines[targetLine], 0));
-      }
+    // ArrowLeft / ArrowRight at the line boundaries intentionally
+    // fall through to the textarea's default behaviour — i.e. no-op
+    // at the ends, normal cursor movement elsewhere.  We previously
+    // committed the edit and moved to the adjacent line on these,
+    // but trailing whitespace is invisible in the rendered line so
+    // users couldn't tell whether pressing ArrowRight would move
+    // within the line or jump to the next one; it caused accidental
+    // commits in real-world use.  ArrowUp / ArrowDown keep the
+    // "commit-and-navigate at boundary" behaviour below because
+    // vertical motion past the first/last visual row of a wrapped
+    // textarea is unambiguous.
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       // Capture cursor position before the browser moves it.
       // After a minimal timeout, check if the cursor hit a boundary
