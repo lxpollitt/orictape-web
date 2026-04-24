@@ -1888,7 +1888,8 @@ test('CSAVE: basic region → one generated TAP', () => {
   const b = t.bytes;
   for (let i = 0; i < 8; i++) if (b[i] !== 0x16) return `sync[${i}]: ${b[i]}`;
   if (b[8] !== 0x24)  return `sync release: ${b[8]}`;
-  if (b[11] !== 0x01) return `fileType: ${b[11]}`;           // machine code
+  if (b[11] !== 0x80) return `fileType: ${b[11].toString(16)}`;  // machine code
+
   if (b[12] !== 0x00) return `autorun byte: ${b[12]}`;
   // startAddr = $9800, endAddr = $9803 (exclusive: 3 bytes emitted).
   const endAddr   = (b[13] << 8) | b[14];
@@ -1910,7 +1911,11 @@ test('CSAVE: basic region → one generated TAP', () => {
   return null;
 });
 
-test('CSAVE: AUTO flag sets autorun byte', () => {
+test('CSAVE: AUTO flag sets machine-code autorun byte to 0xC7', () => {
+  // The Oric ROM's autorun dispatch is type-specific: 0x80 = autorun
+  // as BASIC, 0xC7 = autorun as machine code.  Using 0x80 for a
+  // machine-code TAP causes the ROM to parse raw 6502 bytes as
+  // tokenised BASIC after CLOAD, which locks the system up.
   const p = mkProgram([
     "100 [[ CSAVE \"GAME\" AUTO",
     "110 ORG $9800",
@@ -1920,7 +1925,7 @@ test('CSAVE: AUTO flag sets autorun byte', () => {
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
   if (r.generatedTaps[0].autorun !== true) return 'autorun should be true';
-  if (r.generatedTaps[0].bytes[12] !== 0x80) return `autorun byte: ${r.generatedTaps[0].bytes[12]}`;
+  if (r.generatedTaps[0].bytes[12] !== 0xC7) return `autorun byte: ${r.generatedTaps[0].bytes[12].toString(16)}`;
   return null;
 });
 

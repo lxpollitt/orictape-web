@@ -835,7 +835,9 @@ function buildType2DataLineText(
  *  `tapDecoder.parseTapFile`):
  *    [00][00][fileType][autorun][endHi][endLo][startHi][startLo][00]
  *
- *  `fileType` is `0x01` for machine code.  `endAddr` is exclusive
+ *  `fileType` is `0x80` for machine code (empirically observed in
+ *  professional TAPs; matches our `describeProgRegion` inspector).
+ *  `endAddr` is exclusive
  *  (first byte past program data).  `autorun` is `0x80` when the
  *  caller asks for it. */
 function buildMachineCodeTap(
@@ -852,8 +854,17 @@ function buildMachineCodeTap(
   // Header.
   out.push(0x00);
   out.push(0x00);
-  out.push(0x01);                                  // fileType = machine code
-  out.push(autorun ? 0x80 : 0x00);
+  out.push(0x80);                                  // fileType = machine code
+  // Autorun byte: type-specific values interpreted by the Oric ROM.
+  // `0x80` is the BASIC-autorun flag and makes CLOAD jump into the
+  // BASIC interpreter after load — if we use it for a machine-code
+  // TAP the ROM tries to parse raw 6502 bytes as tokenised BASIC
+  // and typically locks up.  `0xC7` is the machine-code-autorun
+  // flag (name from `describeProgRegion`'s inspector), causing the
+  // ROM to JMP to the program's startAddr after load.  Both values
+  // have the high bit set, which is what the autorun check looks
+  // for; the other bits distinguish BASIC vs MC dispatch.
+  out.push(autorun ? 0xC7 : 0x00);
   out.push((endAddr   >> 8) & 0xFF);
   out.push( endAddr         & 0xFF);
   out.push((startAddr >> 8) & 0xFF);

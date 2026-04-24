@@ -573,9 +573,16 @@ export interface ProgramHeader {
   /** Byte index of the first header byte (after the 0x24 sync marker)
    *  within the bytes[] array. */
   byteIndex:  number;
-  /** 0x00 = BASIC, 0x01 = machine code. */
+  /** 0x00 = BASIC, 0x80 = machine code (as observed in real Oric
+   *  TAPs; matches the `describeProgRegion` inspector labels).
+   *  Other values appear occasionally in the wild and are passed
+   *  through verbatim; downstream code treats any non-zero value
+   *  as machine code. */
   fileType:   number;
-  /** True if the program should auto-run on load (header byte 3 = 0x80). */
+  /** True if the program should auto-run on load.  The ROM checks
+   *  bit 7 of header byte 3; specific values observed in real TAPs
+   *  are `0x80` (autorun as BASIC) and `0xC7` (autorun as machine
+   *  code — ROM JMPs to startAddr).  `0x00` means no autorun. */
   autorun:    boolean;
   /** First byte of program data in Oric memory (big-endian from header). */
   startAddr:  number;
@@ -1456,7 +1463,10 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     prog.header = {
       byteIndex:  headerByteIndex,
       fileType:   headerBytes[2],
-      autorun:    headerBytes[3] === 0x80,
+      // High-bit set on byte 3 = autorun (0x80 for BASIC, 0xC7 for
+      // machine code — the specific bits distinguish the ROM's
+      // dispatch path but both count as "autorun on" semantically).
+      autorun:    (headerBytes[3] & 0x80) !== 0,
       startAddr,
       endAddr,
     };

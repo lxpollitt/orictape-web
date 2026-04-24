@@ -1698,7 +1698,14 @@ tapAvailEl.addEventListener('click', (e) => {
   const progIdx = +(btn.dataset.addPi ?? '0');
   // Don't add duplicates.
   if (tapQueue.some(q => q.kind === kind && q.tapeIdx === tapeIdx && q.progIdx === progIdx)) return;
-  tapQueue.push({ kind, tapeIdx, progIdx, autorun: false });
+  // Default the autorun checkbox to match the source program's
+  // header — the common intent when adding a program to a TAP is
+  // to preserve its loading behaviour.  Users can still toggle it
+  // off in the queue's checkbox before downloading.
+  const srcProg = kind === 'tape'
+    ? tapes[tapeIdx]?.programs[progIdx]
+    : userMerges[progIdx]?.result.output;
+  tapQueue.push({ kind, tapeIdx, progIdx, autorun: srcProg?.header.autorun ?? false });
   renderTapBuilder();
 });
 
