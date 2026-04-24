@@ -51,8 +51,8 @@ Currently defined parameters:
 
 | Parameter        | Effect                                                                 |
 |------------------|------------------------------------------------------------------------|
-| `WORDS`          | 2-byte operands (ABS/ABX/ABY/IND) render as one 4-hex-digit word: `LDA $9800` → `DATA #AD,#9800`.  **This is the default.** |
-| `BYTES`          | 2-byte operands render as two separate bytes: `LDA $9800` → `DATA #AD,#00,#98`. |
+| `WORDS`          | 2-byte operands (ABS/ABX/ABY/IND) render as one 4-hex-digit word: `LDA $9800` → `DATA #AD,#9800`. |
+| `BYTES`          | 2-byte operands render as two separate bytes: `LDA $9800` → `DATA #AD,#00,#98`.  **This is the default.** |
 | `DATA <line>`    | **Output sink** (type-2 only). All assembled bytes from this `[[`-opened region are concatenated into a single BASIC `DATA` statement on the given line number, rendered byte-per-value as `#XX,#XX,…`.  Pairs with a pre-existing `DATA 0` (or similar placeholder) at the target line; the placeholder's value is overwritten in full.  See *Output Sinks* below. |
 | `CSAVE "<name>" [AUTO]` | **Output sink** (type-2 only). Packages the region's assembled bytes as a standalone machine-code TAP block named `<name>`, surfaced in the UI as a new virtual tape (same treatment as a loaded `.tap`).  `AUTO` sets the TAP header's autorun flag.  Name is any non-empty byte string that doesn't contain a NUL (spaces and symbols like `&` are fine).  See *Output Sinks* below. |
 

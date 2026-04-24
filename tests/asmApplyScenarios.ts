@@ -1035,31 +1035,42 @@ test('ASCII char literal → DATA emitted as decimal byte (char → decimal)', (
   return null;
 });
 
-test('2-byte hex operand (ABS) → emitted as one word (default WORDS)', () => {
+test('2-byte hex operand (ABS) → split into two bytes by default (BYTES)', () => {
   const p = mkProgram([
     "10 REM ' ORG $1000",
     "20 DATA 0,0,0 ' LDA $9800",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  // LDA $9800 → AD 00 98.  WORDS mode (default): operand one word #9800.
+  // LDA $9800 → AD 00 98.  BYTES mode (default): low then high byte.
+  if (!/^20 DATA #AD,#00,#98/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('[[ WORDS opts in to word-collapsed hex output', () => {
+  const p = mkProgram([
+    "10 REM ' [[ WORDS:ORG $1000",
+    "20 DATA 0,0,0 ' LDA $9800",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
   if (!/^20 DATA #AD,#9800/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
   return null;
 });
 
-test('2-byte decimal operand (ABS) → emitted as one decimal word (default WORDS)', () => {
+test('2-byte decimal operand (ABS) → split into two decimal bytes by default', () => {
   const p = mkProgram([
     "10 REM ' ORG 4096",
     "20 DATA 0,0,0 ' LDA 38912",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  // LDA 38912 → AD 00 98.  WORDS mode: operand one decimal word 38912.
-  if (!/^20 DATA #AD,38912/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  // LDA 38912 → AD 00 98.  BYTES mode: low then high, format preserved.
+  if (!/^20 DATA #AD,0,152/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
   return null;
 });
 
-test('code label reference → DATA emitted as one hex word (default WORDS)', () => {
+test('code label reference → DATA emitted as two bytes by default', () => {
   const p = mkProgram([
     "10 REM ' ORG $9800",
     "20 DATA 0,0,0 ' JMP TARGET",
@@ -1069,12 +1080,14 @@ test('code label reference → DATA emitted as one hex word (default WORDS)', ()
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
   // TARGET resolves at $9804 (after JMP's 3 bytes + RTS's 1 byte).
-  // JMP ABS → 4C 04 98.  WORDS mode: operand one word #9804 (label default).
-  if (!/^20 DATA #4C,#9804/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  // JMP ABS → 4C 04 98.  BYTES mode: low then high byte.
+  if (!/^20 DATA #4C,#04,#98/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
   return null;
 });
 
-test('[[ BYTES opts out of default WORDS → operand split into two bytes', () => {
+test('explicit [[ BYTES matches the default BYTES output', () => {
+  // Redundant with the default but kept to verify the explicit
+  // opt-in parses without error and produces identical bytes.
   const p = mkProgram([
     "10 REM ' [[ BYTES:ORG $1000",
     "20 DATA 0,0,0 ' LDA $9800",
@@ -1098,6 +1111,45 @@ test('[[ BYTES sticky across lines (no re-assertion needed)', () => {
   return null;
 });
 
+test('[[ WORDS sticky across lines (no re-assertion needed)', () => {
+  const p = mkProgram([
+    "10 REM ' [[ WORDS:ORG $1000",
+    "20 DATA 0,0,0 ' LDA $9800",
+    "30 DATA 0,0,0 ' JMP $4242",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DATA #AD,#9800/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  if (!/^30 DATA #4C,#4242/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
+  return null;
+});
+
+test('WORDS mode: 2-byte decimal operand → one decimal word', () => {
+  const p = mkProgram([
+    "10 REM ' [[ WORDS:ORG 4096",
+    "20 DATA 0,0,0 ' LDA 38912",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Decimal format preserved in WORDS — single 38912 value, not two bytes.
+  if (!/^20 DATA #AD,38912/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('WORDS mode: code label reference → one hex word', () => {
+  const p = mkProgram([
+    "10 REM ' [[ WORDS:ORG $9800",
+    "20 DATA 0,0,0 ' JMP TARGET",
+    "30 DATA 0 ' RTS",
+    "40 REM ' .TARGET",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // TARGET resolves at $9804 (after JMP's 3 + RTS's 1 bytes).
+  if (!/^20 DATA #4C,#9804/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
 test('[[ WORDS after [[ BYTES switches back', () => {
   const p = mkProgram([
     "10 REM ' [[ BYTES:ORG $1000",
@@ -1112,7 +1164,7 @@ test('[[ WORDS after [[ BYTES switches back', () => {
   return null;
 });
 
-test('bare [[ preserves prevailing mode', () => {
+test('bare [[ preserves prevailing mode (BYTES case)', () => {
   const p = mkProgram([
     "10 REM ' [[ BYTES:ORG $1000",
     "20 DATA 0,0,0 ' LDA $9800",
@@ -1128,7 +1180,23 @@ test('bare [[ preserves prevailing mode', () => {
   return null;
 });
 
-test('[[ params case-insensitive', () => {
+test('bare [[ preserves prevailing mode (WORDS case)', () => {
+  const p = mkProgram([
+    "10 REM ' [[ WORDS:ORG $1000",
+    "20 DATA 0,0,0 ' LDA $9800",
+    "30 REM ' ]]",
+    "40 REM ' [[",
+    "50 DATA 0,0,0 ' LDA $9800",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Mode stayed WORDS across `]]` … `[[` (no param on re-open).
+  if (!/^20 DATA #AD,#9800/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  if (!/^50 DATA #AD,#9800/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
+  return null;
+});
+
+test('[[ params case-insensitive (bytes)', () => {
   const p = mkProgram([
     "10 REM ' [[ bytes:ORG $1000",
     "20 DATA 0,0,0 ' LDA $9800",
@@ -1136,6 +1204,17 @@ test('[[ params case-insensitive', () => {
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
   if (!/^20 DATA #AD,#00,#98/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  return null;
+});
+
+test('[[ params case-insensitive (words)', () => {
+  const p = mkProgram([
+    "10 REM ' [[ words:ORG $1000",
+    "20 DATA 0,0,0 ' LDA $9800",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DATA #AD,#9800/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
   return null;
 });
 
@@ -1307,12 +1386,12 @@ test('Equate with 1-digit decimal → 1-digit emission', () => {
 
 test('Word operand in WORDS mode → #XXXX (4 hex digits)', () => {
   const p = mkProgram([
-    "10 REM ' ORG $1000",
+    "10 REM ' [[ WORDS:ORG $1000",
     "20 DATA 0,0,0 ' LDA $9800",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  // WORDS mode (default): operand rendered as one 4-digit hex word.
+  // Explicit WORDS mode: operand rendered as one 4-digit hex word.
   if (!/^20 DATA #AD,#9800/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
   return null;
 });
@@ -1441,7 +1520,7 @@ test('lenient: ORG after PC-break re-anchors subsequent labels', () => {
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (!/^50 DATA #4C,#9820/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
+  if (!/^50 DATA #4C,#20,#98/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
   return null;
 });
 
@@ -1489,7 +1568,7 @@ test('lenient: labels declared after a PC-break + ORG live in fresh anchored reg
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (!/^70 DATA #20,#9868/.test(p.lines[6].v)) return `line 6: ${p.lines[6].v}`;
+  if (!/^70 DATA #20,#68,#98/.test(p.lines[6].v)) return `line 6: ${p.lines[6].v}`;
   return null;
 });
 
@@ -1531,7 +1610,7 @@ test('strict ([[): wrapping un-annotated DATA with ]]/[[ avoids error', () => {
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (!/^70 DATA #20,#9820/.test(p.lines[6].v)) return `line 6: ${p.lines[6].v}`;
+  if (!/^70 DATA #20,#20,#98/.test(p.lines[6].v)) return `line 6: ${p.lines[6].v}`;
   return null;
 });
 

@@ -130,10 +130,12 @@ export function applyAssembler(
   const rawAnnotations  = prog.lines.map((l, i) => extractAnnotation(l.v, hostKinds[i]));
   const anyMarker       = rawAnnotations.some(a => annotationContainsMarker(a));
   let   activeState     = !anyMarker;
-  // Sticky settings from `[[ PARAM ...`.  Default WORDS — unchanged
-  // programs that never opt in still get the new representation for
-  // 2-byte operands.  `[[ BYTES` opts out.
-  let   wordModeState   = true;
+  // Sticky settings from `[[ PARAM ...`.  Default BYTES — every
+  // byte of each 2-byte operand gets its own `#XX` entry in the
+  // DATA line, one-to-one with memory layout.  `[[ WORDS` opts
+  // into compacted `#XXXX` word output for 2-byte operands (more
+  // readable for hand-audit, but harder to edit individual bytes).
+  let   wordModeState   = false;
   const filteredAnnots: string[] = [];
   /** Per-line render mode — the wordMode prevailing at the start of
    *  this annotation's first active statement.  Used by
