@@ -2208,6 +2208,57 @@ test('type-2: target inside region is an error', () => {
   return null;
 });
 
+test('regression: owned-byte-index resolution survives mid-loop byte shifts', () => {
+  // Bug: patches[] are computed up-front but applied sequentially.
+  // Earlier patches that grow their lines shift later lines forward
+  // in `prog.bytes`.  If owned indices are computed at collection
+  // time (pre-shift), the later patch's `markAssemblerBytesAutomatic`
+  // call hits OLD positions — which now contain bytes from earlier
+  // (already-grown) lines.  This test forces several growing
+  // patches before a final patch and checks the final patch's bytes
+  // ended up correctly tagged 'automatic' while its annotation
+  // bytes (notably the "DONE" of "MDONE") stayed 'explicit'.
+  const p = mkProgram([
+    "10 REM ' ORG $9900",
+    "20 DATA 0,0,0 ' LDA $9999",        // grows
+    "30 DATA 0,0,0 ' LDA $8888",        // grows
+    "40 DATA 0,0,0 ' LDA $7777",        // grows
+    "50 DATA #EA ' .MDONE:NOP",
+    "40135 DATA 'JMP MDONE",            // also grows; bug victim
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  const line = p.lines[5];
+
+  // Find the bytes positions of the DATA values vs the annotation
+  // text.  The DATA values land at content offset 2 ("DATA "+space).
+  const valueStart = line.firstByte + 4 + 2;
+  // The annotation begins at the apostrophe; everything from there
+  // onward (including 'JMP MDONE') must remain 'explicit'.
+  let apostIdx = -1;
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    if (p.bytes[i].v === 0x27) { apostIdx = i; break; }
+  }
+  if (apostIdx < 0) return `no apostrophe found in line: ${line.v}`;
+
+  // The DATA values (between valueStart and the byte before the
+  // separator-space-then-apostrophe) must all be 'automatic'.
+  for (let i = valueStart; i < apostIdx - 1; i++) {
+    if (p.bytes[i].edited !== 'automatic') {
+      return `byte ${i} (DATA value '${String.fromCharCode(p.bytes[i].v)}') ` +
+             `should be 'automatic' but is '${p.bytes[i].edited}'`;
+    }
+  }
+  // The annotation bytes (apostrophe onward) must NOT be 'automatic'.
+  for (let i = apostIdx; i <= line.lastByte; i++) {
+    if (p.bytes[i].edited === 'automatic') {
+      return `byte ${i} (annotation '${String.fromCharCode(p.bytes[i].v)}') ` +
+             `was wrongly flipped to 'automatic'`;
+    }
+  }
+  return null;
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;

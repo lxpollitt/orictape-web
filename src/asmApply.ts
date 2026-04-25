@@ -317,7 +317,16 @@ export function applyAssembler(
   //    side-effects don't disturb later lookups.  Filter-stage errors
   //    (from unknown bounded-region params) are surfaced here too so the
   //    caller sees them alongside assembly errors.
-  const patches: { lineIdx: number; newText: string; ownedByteIndices: number[] }[] = [];
+  // Patches are content-relative: `ownedContentOffsets` are offsets
+  // within the line's content area (relative to `firstByte + 4`),
+  // which we resolve to absolute `prog.bytes` indices at apply
+  // time using the line's then-current `firstByte`.  This is
+  // critical because patches are computed up-front but applied
+  // sequentially — earlier `applyLineEdit` calls can shift later
+  // lines' positions, so storing absolute indices at compute time
+  // would point to stale (earlier-line) positions by the time the
+  // patch runs, accidentally flipping unrelated bytes' edit state.
+  const patches: { lineIdx: number; newText: string; ownedContentOffsets: number[] }[] = [];
   const errors:  AsmApplyError[] = [...filterErrors];
 
   // Type-2 "Missing ORG statement" check.  Walk each DATA-output
@@ -384,9 +393,9 @@ export function applyAssembler(
       state.bytes.length  >  0  &&
       hostKind(prog, i)   === 'data';
     if (patchable) {
-      const { newText, ownedByteIndices } =
+      const { newText, ownedContentOffsets } =
         buildNewDataLineText(prog, i, state.chunks, lineWordModes[i]);
-      patches.push({ lineIdx: i, newText, ownedByteIndices });
+      patches.push({ lineIdx: i, newText, ownedContentOffsets });
     }
   }
 
@@ -439,8 +448,8 @@ export function applyAssembler(
       });
       continue;
     }
-    const { newText, ownedByteIndices } = buildType2DataLineText(prog, targetIdx, buf.bytes);
-    patches.push({ lineIdx: targetIdx, newText, ownedByteIndices });
+    const { newText, ownedContentOffsets } = buildType2DataLineText(prog, targetIdx, buf.bytes);
+    patches.push({ lineIdx: targetIdx, newText, ownedContentOffsets });
   }
 
   // Type-2 TAP-output blocks.  For each `[[ CSAVE "<name>" [AUTO]`
@@ -483,11 +492,19 @@ export function applyAssembler(
   //    iteration order doesn't matter.  `markAssemblerBytesAutomatic`
   //    precisely flips only the bytes the assembler produced; any user
   //    `'explicit'` edits on other parts of the line (line number,
-  //    annotation, etc.) survive unchanged.
+  //    annotation, etc.) survive unchanged.  We resolve each patch's
+  //    content offsets to absolute `prog.bytes` indices *here*, after
+  //    `applyLineEdit` has run for the current patch — at this point
+  //    the line's `firstByte` reflects any shifts caused by earlier
+  //    patches in the same loop.  Resolving up-front (when the
+  //    patches were collected) would yield stale indices for any
+  //    patch whose line moved due to an earlier sibling.
   const linesPatched: number[] = [];
   for (const p of patches) {
     applyLineEdit(prog, p.lineIdx, p.newText);
-    markAssemblerBytesAutomatic(prog, p.ownedByteIndices);
+    const fb = prog.lines[p.lineIdx].firstByte;
+    const indices = p.ownedContentOffsets.map(off => fb + 4 + off);
+    markAssemblerBytesAutomatic(prog, indices);
     linesPatched.push(p.lineIdx);
   }
 
@@ -721,7 +738,7 @@ function buildNewDataLineText(
   lineIdx:   number,
   chunks:    Chunk[],
   wordMode:  boolean,
-): { newText: string; ownedByteIndices: number[] } {
+): { newText: string; ownedContentOffsets: number[] } {
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
 
@@ -733,11 +750,20 @@ function buildNewDataLineText(
   const values = formatDataValues(chunks, wordMode);
   const newText = `${lineNum} DATA ${values}${sep}${annot}`;
 
-  const valuesStartByte = line.firstByte + 4 + 2;  // content starts at +4; values at content offset 2
-  const ownedByteIndices: number[] = [];
-  for (let k = 0; k < values.length; k++) ownedByteIndices.push(valuesStartByte + k);
+  // Content offsets are relative to `firstByte + 4` (the first
+  // content byte after the line's pointer + line-number header).
+  // Returning offsets rather than absolute byte indices is essential:
+  // patches are computed up-front but applied sequentially, and each
+  // earlier `applyLineEdit` can shift later lines forward in
+  // `prog.bytes`.  Resolving content offsets to absolute indices
+  // *at apply time* (using the line's then-current `firstByte`)
+  // gives the right positions for every patch, regardless of how
+  // much earlier patches grew or shrunk the byte stream.  The DATA
+  // values land at content offset 2 (after TOKEN_DATA + space).
+  const ownedContentOffsets: number[] = [];
+  for (let k = 0; k < values.length; k++) ownedContentOffsets.push(2 + k);
 
-  return { newText, ownedByteIndices };
+  return { newText, ownedContentOffsets };
 }
 
 /** Locate a BASIC line by its user-visible line number.  Returns the
@@ -798,14 +824,16 @@ function buildRegionByteBuffer(
  *
  *  Any pre-existing annotation on the target line (`'` and
  *  everything after) is preserved verbatim so the user's hand
- *  comments survive.  Returns `ownedByteIndices` identifying which
- *  `prog.bytes` positions the assembler produced, for precise
- *  `'automatic'` tagging later. */
+ *  comments survive.  Returns `ownedContentOffsets` (offsets into
+ *  the line's content area, i.e. relative to `firstByte + 4`)
+ *  identifying which positions the assembler produced — see the
+ *  matching comment in `buildNewDataLineText` for why content
+ *  offsets are essential here rather than absolute indices. */
 function buildType2DataLineText(
   prog:     Program,
   lineIdx:  number,
   bytes:    number[],
-): { newText: string; ownedByteIndices: number[] } {
+): { newText: string; ownedContentOffsets: number[] } {
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
 
@@ -819,11 +847,11 @@ function buildType2DataLineText(
     .join(',');
   const newText = `${lineNum} DATA ${values}${sep}${annot}`;
 
-  const valuesStartByte = line.firstByte + 4 + 2;  // content +2 past "DATA "
-  const ownedByteIndices: number[] = [];
-  for (let k = 0; k < values.length; k++) ownedByteIndices.push(valuesStartByte + k);
+  // DATA values start at content offset 2 (after TOKEN_DATA + space).
+  const ownedContentOffsets: number[] = [];
+  for (let k = 0; k < values.length; k++) ownedContentOffsets.push(2 + k);
 
-  return { newText, ownedByteIndices };
+  return { newText, ownedContentOffsets };
 }
 
 /** Assemble a raw TAP block for a machine-code region.  Produces
