@@ -2208,6 +2208,110 @@ test('type-2: target inside region is an error', () => {
   return null;
 });
 
+// ── Overlapping ORG ranges ─────────────────────────────────────────────────
+
+test('overlapping ORG: later block starts inside earlier block → error', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",                  // block 1 starts at $9800
+    "20 DATA #EA,#EA,#EA,#EA ' NOP:NOP:NOP:NOP",   // → ends $9803
+    "30 REM ' ORG $9802",                  // block 2 starts inside block 1
+    "40 DATA #EA ' NOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an overlap error';
+  const msg = r.errors.map(e => e.message).join(' | ');
+  if (!/ORG address range overlaps with ORG defined at line 10/.test(msg)) {
+    return `wrong message(s): ${msg}`;
+  }
+  // Error should be on the LATER block's line (line 30).
+  if (r.errors[0].lineNum !== 30) return `error on wrong line: ${r.errors[0].lineNum}`;
+  return null;
+});
+
+test('overlapping ORG: later block ends inside earlier block → error', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9810",                  // block 1: $9810..$9813
+    "20 DATA #EA,#EA,#EA,#EA ' NOP:NOP:NOP:NOP",
+    "30 REM ' ORG $980E",                  // block 2: $980E..$9811 (overlaps low end)
+    "40 DATA #EA,#EA,#EA,#EA ' NOP:NOP:NOP:NOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error';
+  if (r.errors[0].lineNum !== 30) return `error on wrong line: ${r.errors[0].lineNum}`;
+  return null;
+});
+
+test('overlapping ORG: later block fully contains earlier block → error', () => {
+  // Block 1: $9810..$9810 (1 NOP).  Block 2: $9800..$9820 (33 NOPs);
+  // block 2's range strictly contains block 1's — error fires on
+  // block 2's ORG line (30).
+  const p = mkProgram([
+    "10 REM ' ORG $9810",
+    "20 DATA #EA ' NOP",                   // block 1: $9810
+    "30 REM ' ORG $9800",                  // block 2 starts at $9800
+    "40 DATA " + Array(33).fill("#EA").join(",") + " ' "
+      + Array(33).fill("NOP").join(":"),  // 33 bytes: $9800..$9820
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected error';
+  if (r.errors[0].lineNum !== 30) return `error on wrong line: ${r.errors[0].lineNum}`;
+  return null;
+});
+
+test('non-overlapping ORG: adjacent blocks (no gap) → OK', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #EA,#EA,#EA,#EA ' NOP:NOP:NOP:NOP",   // ends $9803
+    "30 REM ' ORG $9804",                          // starts where block 1 ends + 1
+    "40 DATA #EA ' NOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  return null;
+});
+
+test('non-overlapping ORG: blocks with a gap → OK', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #EA,#EA ' NOP:NOP",
+    "30 REM ' ORG $9900",
+    "40 DATA #EA ' NOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  return null;
+});
+
+test('overlapping ORG: empty earlier block (no emissions) is ignored', () => {
+  // ORG without subsequent emissions has no real range; can't clash.
+  const p = mkProgram([
+    "10 REM ' ORG $9800",                   // empty (no instructions before next ORG)
+    "20 REM ' ORG $9800",                   // would overlap if first counted
+    "30 DATA #EA ' NOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  return null;
+});
+
+test('overlapping ORG: three blocks, only the third overlaps the first', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #EA,#EA ' NOP:NOP",            // block 1: $9800..$9801
+    "30 REM ' ORG $9900",
+    "40 DATA #EA ' NOP",                    // block 2: $9900 (no clash)
+    "50 REM ' ORG $9801",                   // block 3: clashes with block 1
+    "60 DATA #EA ' NOP",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  if (r.errors[0].lineNum !== 50) return `error on wrong line: ${r.errors[0].lineNum}`;
+  if (!/overlaps with ORG defined at line 10/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
 // ── DB (data bytes) directive — DATA-line round-trip ───────────────────────
 
 test('DB string emits one hex byte per char in DATA', () => {

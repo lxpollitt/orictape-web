@@ -869,6 +869,7 @@ function pass1(
   symbols:    Symbols;
   lineStates: LineState[];
   endAddr:    number;
+  orgRuns:    OrgRun[];
 } {
   const symbols: Symbols = new Map();
   const lineStates: LineState[] = annotations.map(() => ({
@@ -896,6 +897,25 @@ function pass1(
   // (users naming a block imply they'll reference its size).
   type NamedBlock = { name: string; startPc: number; lastByte: number; lineIdx: number };
   let activeBlock: NamedBlock | null = null;
+
+  // ORG-run tracking.  Each `ORG $xxxx` (or implicit anchor from a
+  // caller-provided `startAddr`) starts a fresh run.  Subsequent
+  // emissions extend its `endAddr`.  The run closes (and is pushed
+  // to `orgRuns` if it emitted at least one byte) when the next
+  // ORG fires, when a PC-break unanchors, or at end-of-program.
+  // Tracked at the per-ORG level rather than per-region/block
+  // because multiple ORGs in one region still occupy distinct
+  // memory ranges that can clash with each other.
+  const orgRuns: OrgRun[] = [];
+  let currentOrgRun: OrgRun | null = startAddr !== undefined
+    ? { lineIdx: 0, startAddr: pc, endAddr: pc - 1 }
+    : null;
+  const closeOrgRun = (): void => {
+    if (currentOrgRun && currentOrgRun.endAddr >= currentOrgRun.startAddr) {
+      orgRuns.push(currentOrgRun);
+    }
+    currentOrgRun = null;
+  };
 
   const closeNamedBlock = (stateErrs: AsmError[] | null): void => {
     if (!activeBlock) return;
@@ -958,6 +978,10 @@ function pass1(
           // PC.  If the new ORG itself is named, a fresh block opens
           // after PC is set.
           closeNamedBlock(stateErrs);
+          // Close the current ORG-run too — its memory range is
+          // sealed, and the new ORG starts a fresh run with its own
+          // start address.  Empty runs are dropped inside closeOrgRun.
+          closeOrgRun();
           // ORG re-anchors PC.  It starts a new region only when it
           // changes the anchored state (unanchored → anchored) — PC
           // arithmetic is then discontinuous across the boundary so
@@ -970,6 +994,7 @@ function pass1(
           pc       = stmt.address & 0xFFFF;
           anchored = true;
           sawOrgThisLine = true;
+          currentOrgRun = { lineIdx, startAddr: pc, endAddr: pc - 1 };
           if (stmt.blockName !== undefined) {
             // Declare the start-of-block label (same as a plain
             // `.NAME` at post-ORG PC) and open a new named block.
@@ -1012,7 +1037,8 @@ function pass1(
           // Extend the active named block's span to include this
           // instruction's bytes.  `pc` is now one past the last
           // emitted byte; `pc - 1` is the inclusive last byte.
-          if (activeBlock) activeBlock.lastByte = (pc - 1) & 0xFFFF;
+          if (activeBlock)   activeBlock.lastByte = (pc - 1) & 0xFFFF;
+          if (currentOrgRun) currentOrgRun.endAddr = (pc - 1) & 0xFFFF;
           break;
         }
 
@@ -1039,7 +1065,8 @@ function pass1(
             regionId,
           });
           pc = (pc + size) & 0xFFFF;
-          if (activeBlock) activeBlock.lastByte = (pc - 1) & 0xFFFF;
+          if (activeBlock)   activeBlock.lastByte = (pc - 1) & 0xFFFF;
+          if (currentOrgRun) currentOrgRun.endAddr = (pc - 1) & 0xFFFF;
           break;
         }
       }
@@ -1057,6 +1084,10 @@ function pass1(
       // the block's bytes have stopped accumulating and the following
       // data is at an unknown address.
       closeNamedBlock(stateErrs);
+      // Same logic for ORG-runs: PC arithmetic is now broken, so the
+      // current run is sealed and any subsequent code (until the
+      // next ORG re-anchors) doesn't extend it.
+      closeOrgRun();
       regionId = regionId + 1;
       anchored = false;
     }
@@ -1069,10 +1100,11 @@ function pass1(
     }
   }
 
-  // End of program: close any still-active named block.
+  // End of program: close any still-active named block and ORG run.
   closeNamedBlock(null);
+  closeOrgRun();
 
-  return { prepared, symbols, lineStates, endAddr: pc };
+  return { prepared, symbols, lineStates, endAddr: pc, orgRuns };
 }
 
 /**
@@ -1304,6 +1336,22 @@ export interface AsmError {
   message: string;
 }
 
+/** A contiguous run of code emitted under a single `ORG` directive
+ *  (or the implicit anchor from an explicit `startAddr`).  `lineIdx`
+ *  identifies where the ORG was declared (or `0` for the implicit
+ *  startAddr run); `startAddr` is the run's first byte's address;
+ *  `endAddr` is the run's last byte's address (inclusive).  Runs
+ *  with no emitted bytes are excluded — they aren't reported and
+ *  can't overlap.  Used by the asmApply layer to flag pairs of ORG
+ *  ranges that occupy overlapping memory, since at runtime one
+ *  block's code would clobber the other when CLOAD'd or POKE'd
+ *  into RAM. */
+export interface OrgRun {
+  lineIdx:   number;
+  startAddr: number;
+  endAddr:   number;
+}
+
 /** One instruction's emitted bytes, tagged with the PC it landed at
  *  and the source annotation line it came from.  Produced by pass 2
  *  in PC-sequential order within each region.  Used by output-sink
@@ -1329,6 +1377,11 @@ export interface AssembledProgram {
    *  callers to reconstruct contiguous byte buffers across source
    *  lines (type-2 single-DATA output) without re-walking pass 1. */
   emissions: Emission[];
+  /** Address ranges occupied by each `ORG`-anchored run, in source
+   *  order.  Empty runs (no emissions after the ORG) are excluded.
+   *  asmApply uses this to detect ORG ranges that overlap each
+   *  other's memory, which would silently clobber code at runtime. */
+  orgRuns:   OrgRun[];
 }
 
 /**
@@ -1363,10 +1416,10 @@ export function assembleProgram(
 ): AssembledProgram {
   const dataFlags  = isDataLine        ?? annotations.map(() => false);
   const blockEnds  = blockEndAfterLine ?? annotations.map(() => false);
-  const { prepared, symbols, lineStates, endAddr } = pass1(annotations, startAddr, dataFlags, blockEnds);
+  const { prepared, symbols, lineStates, endAddr, orgRuns } = pass1(annotations, startAddr, dataFlags, blockEnds);
   const emissions: Emission[] = [];
   pass2(prepared, symbols, lineStates, emissions);
-  return { perLine: lineStates, endAddr, symbols, emissions };
+  return { perLine: lineStates, endAddr, symbols, emissions, orgRuns };
 }
 
 /**

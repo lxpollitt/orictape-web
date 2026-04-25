@@ -308,7 +308,7 @@ export function applyAssembler(
   }
 
   // 2. Assemble them together so symbols are shared program-wide.
-  const { perLine, symbols, emissions } = assembleProgram(
+  const { perLine, symbols, emissions, orgRuns } = assembleProgram(
     asmAnnotations, startAddr, isDataLine, blockEndAfterLine,
   );
 
@@ -396,6 +396,35 @@ export function applyAssembler(
       const { newText, ownedContentOffsets } =
         buildNewDataLineText(prog, i, state.chunks, lineWordModes[i]);
       patches.push({ lineIdx: i, newText, ownedContentOffsets });
+    }
+  }
+
+  // ORG range overlap check.  Each ORG starts a memory range; if two
+  // ranges occupy overlapping bytes, one block's code would clobber
+  // the other when CLOAD'd / POKE'd into RAM.  We compare every pair
+  // of ORG runs (in source order) and flag the LATER one whenever it
+  // intersects an earlier one — the user fixes by adjusting the
+  // colliding ORG's start address or by giving the earlier block a
+  // tighter end (e.g. inserting an `]]` to terminate it).  Empty
+  // runs (ORG with no subsequent emission) are excluded by the
+  // assembler before reaching us.
+  for (let i = 1; i < orgRuns.length; i++) {
+    const cur = orgRuns[i];
+    for (let j = 0; j < i; j++) {
+      const prev = orgRuns[j];
+      if (cur.startAddr <= prev.endAddr && prev.startAddr <= cur.endAddr) {
+        const prevLine    = prog.lines[prev.lineIdx];
+        const prevLineNum = prog.bytes[prevLine.firstByte + 2].v
+                          + prog.bytes[prevLine.firstByte + 3].v * 256;
+        const curLine     = prog.lines[cur.lineIdx];
+        const curLineNum  = prog.bytes[curLine.firstByte + 2].v
+                          + prog.bytes[curLine.firstByte + 3].v * 256;
+        errors.push({
+          lineIdx: cur.lineIdx, lineNum: curLineNum,
+          message: `ORG address range overlaps with ORG defined at line ${prevLineNum}`,
+        });
+        break;   // one error per overlapping range — keep the message list short
+      }
     }
   }
 

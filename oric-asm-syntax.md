@@ -114,7 +114,7 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 
 ## Directives
 
-- `ORG $xxxx` — set assembly address. May appear multiple times for non-contiguous code.
+- `ORG $xxxx` — set assembly address. May appear multiple times for non-contiguous code.  Two ORG-anchored ranges that occupy overlapping memory bytes are an error (the later ORG's bytes would clobber the earlier block's at runtime); the tool reports the clash on the later of the two ORG lines.
 - `ORG $xxxx .NAME` — set assembly address **and** open a named assembler block.  Declares two labels: `NAME` (= start address = `$xxxx`) and `NAME_END` (= inclusive last byte emitted in the block).  The block closes — and `NAME_END` gets its value — when the next `ORG` (with or without a name), a zero-output DATA line, a `]]` close marker, or the end of the program is reached.  Useful for `FOR`-loop back-patching (`FOR I=NAME TO NAME_END`) so POKE/DOKE loops stay in sync with the assembled code.  The `.NAME` suffix is case-sensitive (labels are case-sensitive generally).
 - `ORG` is required if any label is referenced in an absolute addressing context (`JMP LABEL`, `JSR LABEL`, `LDA LABEL` in ABS form, etc.) or by a back-patch directive. Programs that use only equates, relative branches, and REL-only label references may omit `ORG`.
 - `DB <value>[,<value>...]` — define data bytes.  Emits one or more bytes inline at the current PC, advancing PC past them like an instruction would.  Useful for tables, strings, and pointer arrays alongside instruction code.  Value forms (mixable in one `DB`):
