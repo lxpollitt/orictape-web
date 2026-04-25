@@ -2208,6 +2208,70 @@ test('type-2: target inside region is an error', () => {
   return null;
 });
 
+// ── DB (data bytes) directive — DATA-line round-trip ───────────────────────
+
+test('DB string emits one hex byte per char in DATA', () => {
+  const p = mkProgram([
+    "10 DATA 0,0,0,0,0 ' DB \"hello\"",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // h=68, e=65, l=6C, l=6C, o=6F.
+  if (!/^10 DATA #68,#65,#6C,#6C,#6F/.test(p.lines[0].v)) return `line 1: ${p.lines[0].v}`;
+  return null;
+});
+
+test('DB hex word renders as bytes regardless of WORDS mode', () => {
+  // Even with explicit WORDS mode active, DB chunks always emit one
+  // byte per #XX so the DATA stays one-POKE-per-value compatible.
+  const p = mkProgram([
+    "10 REM ' [[ WORDS",
+    "20 DATA 0,0 ' DB $1234",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // $1234 → low,high = #34,#12
+  if (!/^20 DATA #34,#12/.test(p.lines[1].v)) return `line 2: ${p.lines[1].v}`;
+  return null;
+});
+
+test('DB mixed values', () => {
+  const p = mkProgram([
+    "10 DATA 0,0,0,0,0,0,0,0,0,0,0 ' DB 0,0,%101110,%011111,%101110,0,0,0,\"hi\",0",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Expected bytes: 00 00 2E 1F 2E 00 00 00 68 69 00 — all hex form.
+  if (!/^10 DATA #00,#00,#2E,#1F,#2E,#00,#00,#00,#68,#69,#00/.test(p.lines[0].v)) {
+    return `line 1: ${p.lines[0].v}`;
+  }
+  return null;
+});
+
+test('DB label reference resolves to address', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #60 ' .TGT:RTS",
+    "30 DATA 0,0 ' DB TGT",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // TGT at $9800, little-endian → #00,#98.
+  if (!/^30 DATA #00,#98/.test(p.lines[2].v)) return `line 3: ${p.lines[2].v}`;
+  return null;
+});
+
+test('DB string can contain statement separators', () => {
+  const p = mkProgram([
+    "10 DATA 0,0,0,0,0 ' DB \"a:b;c\"",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // a=61, :=3A, b=62, ;=3B, c=63
+  if (!/^10 DATA #61,#3A,#62,#3B,#63/.test(p.lines[0].v)) return `line 1: ${p.lines[0].v}`;
+  return null;
+});
+
 test('regression: owned-byte-index resolution survives mid-loop byte shifts', () => {
   // Bug: patches[] are computed up-front but applied sequentially.
   // Earlier patches that grow their lines shift later lines forward

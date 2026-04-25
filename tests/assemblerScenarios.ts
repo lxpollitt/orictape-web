@@ -997,6 +997,113 @@ test('round-trip spot: BEQ REL negative (F0 FE) at $1000 → "BEQ $1000" → F0 
   return compareBytes(r.bytes, [0xF0, 0xFE]);
 });
 
+// ── DB (data bytes) directive ───────────────────────────────────────────────
+
+test('DB single hex byte', () =>
+  compareBytes(asm('DB $42'), [0x42]));
+
+test('DB hex word emits little-endian', () =>
+  compareBytes(asm('DB $1234'), [0x34, 0x12]));
+
+test('DB unsigned decimal byte (≤255)', () =>
+  compareBytes(asm('DB 120'), [120]));
+
+test('DB unsigned decimal word (>255)', () =>
+  compareBytes(asm('DB 256'), [0x00, 0x01]));
+
+test('DB unsigned decimal forces word via leading zero', () =>
+  compareBytes(asm('DB 0120'), [120, 0]));
+
+test('DB signed decimal byte (-1 → 0xFF)', () =>
+  compareBytes(asm('DB -1'), [0xFF]));
+
+test('DB signed decimal byte (+5)', () =>
+  compareBytes(asm('DB +5'), [5]));
+
+test('DB signed +255 forces word (out of signed-byte range)', () =>
+  compareBytes(asm('DB +255'), [0xFF, 0x00]));
+
+test('DB signed -129 forces word', () =>
+  compareBytes(asm('DB -129'), [0x7F, 0xFF]));
+
+test('DB binary byte', () =>
+  compareBytes(asm('DB %10110001'), [0xB1]));
+
+test('DB binary short bit-count OK', () =>
+  compareBytes(asm('DB %101'), [0x05]));
+
+test('DB binary >8 bits errors',
+  () => /max 8 bits/i.test(asmErr('DB %101101011') ?? '') ? null : 'wrong/no error');
+
+test('DB string of printable ASCII', () =>
+  compareBytes(asm('DB "hi"'), [0x68, 0x69]));
+
+test('DB string with embedded comma and colon', () =>
+  compareBytes(asm('DB "a,b:c"'), [0x61, 0x2C, 0x62, 0x3A, 0x63]));
+
+test('DB string non-printable errors',
+  () => /non-printable/i.test(asmErr('DB "\u0001"') ?? '') ? null : 'wrong/no error');
+
+test('DB mixed types', () =>
+  compareBytes(asm('DB 0,0,%101110,%011111,%101110,0,0,0,"hi",0'),
+               [0, 0, 0x2E, 0x1F, 0x2E, 0, 0, 0, 0x68, 0x69, 0]));
+
+test('DB identifier resolves to little-endian word', () => {
+  const r = assembleProgram(['ORG $9800:.TGT:RTS:DB TGT']);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  // .TGT at $9800; RTS = 60; DB TGT → 00,98 (little-endian).
+  return compareBytes(r.perLine[0].bytes, [0x60, 0x00, 0x98]);
+});
+
+test('DB identifier without ORG errors', () => {
+  const r = assembleProgram(['.TGT:DB TGT']);
+  const errs = r.perLine[0].errors;
+  if (errs.length !== 1) return `expected 1 error, got ${errs.length}`;
+  if (!/no ORG was declared/i.test(errs[0].message)) return `wrong: ${errs[0].message}`;
+  return null;
+});
+
+test('DB undefined symbol errors',
+  () => /undefined symbol.*FOO/i.test(asmErr('DB FOO') ?? '') ? null : 'wrong/no error');
+
+test('DB no values errors',
+  () => /at least one value/i.test(asmErr('DB') ?? '') ? null : 'wrong/no error');
+
+test('DB trailing comma errors',
+  () => /empty value/i.test(asmErrMulti('DB 1,2,') ?? '') ? null : 'wrong/no error');
+
+test('DB hex word too wide errors',
+  () => /too wide/i.test(asmErr('DB $12345') ?? '') ? null : 'wrong/no error');
+
+test('DB unsigned decimal out of range errors',
+  () => /out of word range/i.test(asmErr('DB 70000') ?? '') ? null : 'wrong/no error');
+
+test('DB signed decimal out of word range errors',
+  () => /out of word range/i.test(asmErr('DB +99999') ?? '') ? null : 'wrong/no error');
+
+test('DB combined with label declaration', () => {
+  // The label declaration sits at the start of the data block.
+  const r = assembleProgram(['ORG $9800:.TABLE:DB $01,$02,$03,$04']);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  if (r.symbols.get('TABLE')?.value !== 0x9800) return `TABLE addr: ${r.symbols.get('TABLE')?.value?.toString(16)}`;
+  return compareBytes(r.perLine[0].bytes, [0x01, 0x02, 0x03, 0x04]);
+});
+
+test('DB lowercase keyword case-insensitive', () =>
+  compareBytes(asm('db $42'), [0x42]));
+
+test('DB statements separated by colon', () => {
+  const r = assembleProgram(['DB $01,$02:DB $03,$04']);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  return compareBytes(r.perLine[0].bytes, [0x01, 0x02, 0x03, 0x04]);
+});
+
+test('DB followed by instruction on same line', () => {
+  const r = assembleProgram(['DB $42:NOP']);
+  if (r.perLine[0].errors.length !== 0) return `unexpected error: ${r.perLine[0].errors[0].message}`;
+  return compareBytes(r.perLine[0].bytes, [0x42, 0xEA]);
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;

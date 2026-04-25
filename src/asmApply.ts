@@ -1417,17 +1417,28 @@ function annotationHasOrg(annotation: string): boolean {
   return false;
 }
 
-/** Split an annotation into raw statement texts, `'c`-literal aware,
- *  stopping at the first `*` end-of-annotation comment.  Shared between
- *  {@link annotationContainsMarker} and {@link filterStatementsByState}. */
+/** Split an annotation into raw statement texts, `'c`-literal aware
+ *  AND `"..."`-string aware (the latter for `DB` data values),
+ *  stopping at the first `*` end-of-annotation comment.  Shared
+ *  between {@link annotationContainsMarker} and
+ *  {@link filterStatementsByState}.  String-aware splitting matters
+ *  because a `DB "abc:def"` value legitimately contains `:` as a
+ *  string char, not a statement separator; same for `;` and `*`. */
 function splitAnnotationStatements(annotation: string): string[] {
   const out: string[] = [];
   let start = 0;
   let end   = annotation.length;
+  let inString = false;
   for (let i = 0; i < annotation.length; i++) {
-    if (annotation[i] === "'") { i++; continue; }
-    if (annotation[i] === '*') { end = i; break; }
-    if (annotation[i] === ':' || annotation[i] === ';') {
+    const c = annotation[i];
+    if (inString) {
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === "'") { i++; continue; }
+    if (c === '*') { end = i; break; }
+    if (c === ':' || c === ';') {
       out.push(annotation.slice(start, i));
       start = i + 1;
     }

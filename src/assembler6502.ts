@@ -468,10 +468,18 @@ function selectMode(
 // ── Annotation pre-processing ──────────────────────────────────────────────
 
 /** Strip an end-of-annotation `*` comment.  Skips over `'c` ASCII literals
- *  so `LDA #'*` (were it ever to appear) doesn't mis-terminate. */
+ *  so `LDA #'*` (were it ever to appear) doesn't mis-terminate.  Also
+ *  skips over `"..."` string literals (introduced for `DB`) so an
+ *  embedded `*` inside a string is treated as data, not a comment. */
 function stripComment(s: string): string {
+  let inString = false;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
+    if (inString) {
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
     if (c === "'") { i++; continue; }
     if (c === '*') return s.slice(0, i);
   }
@@ -481,12 +489,20 @@ function stripComment(s: string): string {
 /** Split an annotation into statements on `:` or `;` (both accepted
  *  interchangeably — `;` is the common convention in existing hand-
  *  assembled Oric programs, while `:` mirrors Oric BASIC's own
- *  statement separator).  Skips over `'c` ASCII literals. */
+ *  statement separator).  Skips over `'c` ASCII literals and over
+ *  `"..."` string literals (used by `DB`) so embedded separators
+ *  inside strings stay as part of the string, not as splitters. */
 function splitStatements(s: string): string[] {
   const out: string[] = [];
   let start = 0;
+  let inString = false;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
+    if (inString) {
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
     if (c === "'") { i++; continue; }
     if (c === ':' || c === ';') { out.push(s.slice(start, i)); start = i + 1; }
   }
@@ -496,12 +512,34 @@ function splitStatements(s: string): string[] {
 
 // ── Statement parsing ──────────────────────────────────────────────────────
 
+/** One value within a `DB` statement's comma-separated list.
+ *
+ *  - `byte`   — a single byte, value `0..255` (literal) or `-128..127`
+ *               (signed literal stored 2's-complement).
+ *  - `word`   — a 16-bit value emitted little-endian (low,high).  Comes
+ *               from hex with 3+ digits, decimal with 4+ digits, decimal
+ *               value > 255, signed decimal whose magnitude doesn't
+ *               fit a signed byte, or any identifier reference.
+ *  - `string` — printable-ASCII characters (`0x20..0x7E`), one byte each,
+ *               no terminator.  Strings can contain `:`, `;`, `,`, `'`,
+ *               `*` as ordinary chars; the splitters are string-aware.
+ *  - `sym`    — an identifier reference resolved at pass 2 to a 16-bit
+ *               little-endian word.  Same anchoring rules as ABS
+ *               instruction operands (label must live in an
+ *               ORG-declared block). */
+type DbValue =
+  | { kind: 'byte';   value: number }
+  | { kind: 'word';   value: number }
+  | { kind: 'string'; bytes: number[] }
+  | { kind: 'sym';    name: string };
+
 type Statement =
   | { kind: 'empty' }
   | { kind: 'label';  name: string }
   | { kind: 'equate'; name: string; value: Resolved }
   | { kind: 'org';    address: number; blockName?: string }
   | { kind: 'instr';  mnemonic: string; op: ParsedOperand }
+  | { kind: 'db';     values: DbValue[] }
   | { kind: 'error';  message: string };
 
 /** Parse a single trimmed statement into its Statement form.  Doesn't
@@ -552,6 +590,20 @@ function parseStatement(raw: string): Statement {
     return { kind: 'org', address: lit.value, blockName };
   }
 
+  // `DB <value>[,<value>...]` — define data bytes.  Case-insensitive.
+  // Values can be hex, decimal (signed or unsigned), binary, ASCII
+  // string literals, or identifiers (resolved later as 16-bit
+  // little-endian words).  See {@link parseDbValues} for the full
+  // value-form grammar and width rules.
+  const dbM = t.match(/^[Dd][Bb](?:\s+(.*))?$/);
+  if (dbM) {
+    const rest = (dbM[1] ?? '').trim();
+    if (rest.length === 0) return { kind: 'error', message: 'DB requires at least one value' };
+    const parsed = parseDbValues(rest);
+    if ('error' in parsed) return { kind: 'error', message: parsed.error };
+    return { kind: 'db', values: parsed.values };
+  }
+
   // Instruction: `MNEM [operand]`.
   const instrM = t.match(/^([A-Za-z]{3})(?:\s+(.*))?$/);
   if (!instrM) return { kind: 'error', message: `invalid instruction syntax: ${t}` };
@@ -563,22 +615,153 @@ function parseStatement(raw: string): Statement {
   return { kind: 'instr', mnemonic, op };
 }
 
+/** Split a `DB` value list on commas, respecting `"..."` string
+ *  literals (commas inside strings are part of the string, not
+ *  separators).  Char literals `'c` only ever consume the next
+ *  single character, so we don't need special handling for them
+ *  here at the splitter level — they can't contain commas. */
+function splitDbValueList(text: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === ',') { out.push(text.slice(start, i)); start = i + 1; }
+  }
+  out.push(text.slice(start));
+  return out;
+}
+
+/** Parse the comma-separated value list following a `DB` directive
+ *  into a sequence of {@link DbValue} items.  Width rules:
+ *
+ *  - **Hex** `$XX` (1-2 digits) → byte; `$XXX[X]` (3-4 digits) → word.
+ *    Word emits little-endian.  Value range checked against width.
+ *  - **Decimal** unsigned `123`: byte if value ≤ 255 AND digit count
+ *    ≤ 3, else word.  `0120` (4+ digits) forces word.  Value > 65535
+ *    is an error.
+ *  - **Decimal** signed `+123` / `-7`: byte if value in `-128..127`
+ *    AND digit count (excluding sign) ≤ 3, else word with range
+ *    `-32768..32767`.  Out of word range → error.  Lets the user
+ *    opt into "this is signed and must be a word" via `+255`.
+ *  - **Binary** `%01011` → byte.  1..8 bits OK; > 8 bits → error.
+ *  - **String** `"..."` → one byte per char.  Each char must be in
+ *    printable ASCII range `0x20..0x7E`; anything else is an error.
+ *    No escape sequences.  No null terminator appended.
+ *  - **Identifier** `LABEL` → word, resolved at pass 2 against the
+ *    symbol table.  Same anchoring rule as ABS instruction operands.
+ *
+ *  Empty list (after trim), trailing comma, or a value that doesn't
+ *  match any of the above grammars → error. */
+function parseDbValues(text: string): { values: DbValue[] } | { error: string } {
+  const parts = splitDbValueList(text);
+  const values: DbValue[] = [];
+  for (let pi = 0; pi < parts.length; pi++) {
+    const raw = parts[pi].trim();
+    if (raw.length === 0) {
+      return { error: 'DB has empty value (trailing or duplicate comma?)' };
+    }
+    const v = parseDbValue(raw);
+    if ('error' in v) return { error: `DB value '${raw}': ${v.error}` };
+    values.push(v.value);
+  }
+  return { values };
+}
+
+/** Parse a single trimmed `DB` value into its {@link DbValue} form. */
+function parseDbValue(t: string): { value: DbValue } | { error: string } {
+  // String literal.
+  if (t.startsWith('"')) {
+    if (!t.endsWith('"') || t.length < 2) return { error: `unterminated string literal` };
+    const body = t.slice(1, -1);
+    const bytes: number[] = [];
+    for (let i = 0; i < body.length; i++) {
+      const code = body.charCodeAt(i);
+      if (code < 0x20 || code > 0x7E) {
+        return { error: `non-printable ASCII in string at position ${i} (code 0x${code.toString(16)})` };
+      }
+      bytes.push(code);
+    }
+    return { value: { kind: 'string', bytes } };
+  }
+  // Hex.
+  if (t.startsWith('$')) {
+    const hex = t.slice(1);
+    if (!/^[0-9A-Fa-f]+$/.test(hex)) return { error: `invalid hex literal` };
+    if (hex.length > 4) return { error: `hex literal too wide (max 4 digits, got ${hex.length})` };
+    const value = parseInt(hex, 16);
+    if (hex.length <= 2) return { value: { kind: 'byte', value } };
+    return { value: { kind: 'word', value } };
+  }
+  // Binary.
+  if (t.startsWith('%')) {
+    const bin = t.slice(1);
+    if (!/^[01]+$/.test(bin)) return { error: `invalid binary literal` };
+    if (bin.length > 8) return { error: `binary literal too wide (max 8 bits, got ${bin.length})` };
+    return { value: { kind: 'byte', value: parseInt(bin, 2) } };
+  }
+  // Decimal (signed or unsigned).
+  if (/^[+-]?\d+$/.test(t)) {
+    const signed = t.startsWith('+') || t.startsWith('-');
+    const digits = signed ? t.slice(1) : t;
+    const value  = parseInt(t, 10);
+    if (signed) {
+      if (value >= -128 && value <= 127 && digits.length <= 3) {
+        return { value: { kind: 'byte', value: value & 0xFF } };
+      }
+      if (value < -32768 || value > 32767) {
+        return { error: `signed decimal out of word range (-32768..32767): ${value}` };
+      }
+      return { value: { kind: 'word', value: value & 0xFFFF } };
+    }
+    // Unsigned.
+    if (value > 0xFFFF) return { error: `decimal out of word range (0..65535): ${value}` };
+    if (value <= 255 && digits.length <= 3) {
+      return { value: { kind: 'byte', value } };
+    }
+    return { value: { kind: 'word', value } };
+  }
+  // Identifier (resolved later as a word).
+  if (IDENT_RE.test(t)) {
+    return { value: { kind: 'sym', name: t } };
+  }
+  return { error: `unrecognised value` };
+}
+
 // ── Two-pass assembly ──────────────────────────────────────────────────────
 
-/** A per-instruction record produced by pass 1 and consumed by pass 2.
- *  `regionId` is the PC-consistent region this instruction lives in —
- *  REL branches require their target label's `regionId` to match, or
- *  the computed offset spans a PC-break and is meaningless. */
-interface Prepared {
-  mnemonic: string;
-  op:       ParsedOperand;
-  pc:       number;   // address of this instruction
-  mode:     Mode;     // mode chosen at pass 1 — committed
-  opcode:   number;
-  size:     number;
-  lineIdx:  number;   // which annotation this came from
-  regionId: number;
-}
+/** A per-emission record produced by pass 1 and consumed by pass 2.
+ *  Two flavours: a 6502 instruction (`kind: 'instr'`) or a raw data
+ *  block from a `DB` directive (`kind: 'db'`).  Both carry the
+ *  starting `pc`, the line they came from, and the
+ *  PC-consistent region — REL branches require their target label's
+ *  `regionId` to match the branch's, or the computed offset spans a
+ *  PC-break and is meaningless. */
+type Prepared =
+  | {
+      kind:     'instr';
+      mnemonic: string;
+      op:       ParsedOperand;
+      pc:       number;   // address of this instruction
+      mode:     Mode;     // mode chosen at pass 1 — committed
+      opcode:   number;
+      size:     number;
+      lineIdx:  number;   // which annotation this came from
+      regionId: number;
+    }
+  | {
+      kind:     'db';
+      values:   DbValue[];
+      pc:       number;   // address of the first byte
+      size:     number;   // total bytes the DB block contributes
+      lineIdx:  number;
+      regionId: number;
+    };
 
 /** One emit unit from the assembler — either an opcode byte, or an
  *  operand of 1 or 2 bytes.  `chunks` lets the DATA-line renderer
@@ -815,6 +998,7 @@ function pass1(
           }
           const size = 1 + operandBytes(sel.mode);
           prepared.push({
+            kind:     'instr',
             mnemonic: stmt.mnemonic,
             op:       stmt.op,
             pc,
@@ -828,6 +1012,33 @@ function pass1(
           // Extend the active named block's span to include this
           // instruction's bytes.  `pc` is now one past the last
           // emitted byte; `pc - 1` is the inclusive last byte.
+          if (activeBlock) activeBlock.lastByte = (pc - 1) & 0xFFFF;
+          break;
+        }
+
+        case 'db': {
+          // Compute the total byte size from the value list.  Each
+          // value contributes 1 (byte), 2 (word, sym), or N (string
+          // chars).  We don't resolve `sym` references here — that
+          // happens in pass 2 with the full symbol table available.
+          let size = 0;
+          for (const v of stmt.values) {
+            switch (v.kind) {
+              case 'byte':   size += 1; break;
+              case 'word':   size += 2; break;
+              case 'sym':    size += 2; break;
+              case 'string': size += v.bytes.length; break;
+            }
+          }
+          prepared.push({
+            kind:    'db',
+            values:  stmt.values,
+            pc,
+            size,
+            lineIdx,
+            regionId,
+          });
+          pc = (pc + size) & 0xFFFF;
           if (activeBlock) activeBlock.lastByte = (pc - 1) & 0xFFFF;
           break;
         }
@@ -893,6 +1104,63 @@ function pass2(
 ): void {
   for (const p of prepared) {
     const lineState = lineStates[p.lineIdx];
+
+    // `DB` blocks emit one or more bytes from comma-separated values.
+    // Each emitted byte is recorded as its own 1-byte hex chunk so
+    // the DATA-line renderer always splits DB output into individual
+    // `#XX` values regardless of the region's WORDS/BYTES setting —
+    // DB is conventionally byte-oriented and word-collapsing words
+    // back together would obscure the structure the user wrote.
+    if (p.kind === 'db') {
+      const dbBytes: number[] = [];
+      let dbHadError = false;
+      for (const v of p.values) {
+        switch (v.kind) {
+          case 'byte':   dbBytes.push(v.value & 0xFF); break;
+          case 'word':   dbBytes.push(v.value & 0xFF, (v.value >> 8) & 0xFF); break;
+          case 'string': for (const b of v.bytes) dbBytes.push(b & 0xFF); break;
+          case 'sym': {
+            const sym = symbols.get(v.name);
+            if (!sym) {
+              lineState.errors.push({ message: `undefined symbol: ${v.name}` });
+              // Pad with zeros so subsequent DB values keep their
+              // intended PC offsets (the user can fix the symbol
+              // and re-run; the size committed in pass 1 is sealed).
+              dbBytes.push(0, 0);
+              dbHadError = true;
+              break;
+            }
+            if (sym.isLabel && !sym.anchored) {
+              lineState.errors.push({
+                message: `label ${v.name} used in DB but no ORG was declared `
+                       + `for this block of assembler`,
+              });
+              dbBytes.push(0, 0);
+              dbHadError = true;
+              break;
+            }
+            dbBytes.push(sym.value & 0xFF, (sym.value >> 8) & 0xFF);
+            break;
+          }
+        }
+      }
+      // Sanity: bytes emitted match the size pass 1 committed.
+      if (dbBytes.length !== p.size) {
+        lineState.errors.push({ message: `internal: DB size mismatch at $${p.pc.toString(16)}` });
+      }
+      // On error, skip the chunk/emission writes so the output line
+      // doesn't pretend the DB succeeded — the global error gate in
+      // asmApply will suppress patches anyway.
+      if (dbHadError) continue;
+      for (const b of dbBytes) {
+        lineState.bytes.push(b);
+        lineState.formats.push('hex');
+        lineState.minDigits.push(2);
+        lineState.chunks.push({ bytes: [b], formats: ['hex'], minDigits: [2] });
+      }
+      emissions.push({ pc: p.pc, lineIdx: p.lineIdx, bytes: dbBytes });
+      continue;
+    }
 
     // IMP/ACC have no expression; emit just the opcode.
     if (p.op.expr === null) {

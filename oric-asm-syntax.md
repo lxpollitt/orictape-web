@@ -117,6 +117,15 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 - `ORG $xxxx` — set assembly address. May appear multiple times for non-contiguous code.
 - `ORG $xxxx .NAME` — set assembly address **and** open a named assembler block.  Declares two labels: `NAME` (= start address = `$xxxx`) and `NAME_END` (= inclusive last byte emitted in the block).  The block closes — and `NAME_END` gets its value — when the next `ORG` (with or without a name), a zero-output DATA line, a `]]` close marker, or the end of the program is reached.  Useful for `FOR`-loop back-patching (`FOR I=NAME TO NAME_END`) so POKE/DOKE loops stay in sync with the assembled code.  The `.NAME` suffix is case-sensitive (labels are case-sensitive generally).
 - `ORG` is required if any label is referenced in an absolute addressing context (`JMP LABEL`, `JSR LABEL`, `LDA LABEL` in ABS form, etc.) or by a back-patch directive. Programs that use only equates, relative branches, and REL-only label references may omit `ORG`.
+- `DB <value>[,<value>...]` — define data bytes.  Emits one or more bytes inline at the current PC, advancing PC past them like an instruction would.  Useful for tables, strings, and pointer arrays alongside instruction code.  Value forms (mixable in one `DB`):
+  - **Hex** `$XX` (1–2 digits) → 1 byte; `$XXX[X]` (3–4 digits) → 2 bytes little-endian.
+  - **Decimal** unsigned (`123`): 1 byte if value ≤ 255 AND ≤ 3 digits; otherwise 2 bytes little-endian.  Leading zero (`0120`, `0001`) forces 2 bytes — matches the hex digit-count convention.
+  - **Decimal** signed (`+5`, `-1`): 1 byte if value in `-128..127` AND ≤ 3 digits (excluding sign), encoded 2's-complement; otherwise 2 bytes little-endian, range `-32768..32767`.  Use `+255` to opt into "signed and therefore must be a word".
+  - **Binary** `%01011` → 1 byte.  1–8 bits accepted (shorter just zero-pads); more than 8 bits is an error.
+  - **String** `"hello"` → one byte per char.  Printable ASCII only (`0x20..0x7E`); non-printable characters are an error.  No escape sequences, no terminator.  Strings can contain `:`, `;`, `,`, `'`, `*` as ordinary chars (the splitter is string-aware).
+  - **Identifier** `LABEL` → 2 bytes little-endian word, resolved at the second pass.  Same anchoring rule as ABS instruction operands — the label's block must have an `ORG`.
+
+  The DATA-line renderer always emits each `DB` byte as its own `#XX` value regardless of the region's WORDS/BYTES setting (DB output is byte-oriented and one-POKE-per-value compatible).
 
 ## Assembler Blocks
 
