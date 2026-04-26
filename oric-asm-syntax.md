@@ -111,6 +111,7 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 
 - **Declaration:** `.LABEL = value`, where `value` is any numeric literal.
 - **Reference** (in assembler code): bare `LABEL`.
+- **Forward references work as expected** for both ZP and ABS sizing: equate values are PC-independent, so the assembler resolves all `.NAME = <literal>` declarations in a quick prescan before instruction sizing runs.  `LDA LIVES` followed later by `.LIVES = $04` correctly emits the 2-byte ZP form.
 
 ## Directives
 

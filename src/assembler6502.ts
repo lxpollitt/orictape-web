@@ -887,6 +887,31 @@ function pass1(
     return null;
   };
 
+  // Equate prescan.  Equate values (`.NAME = <literal>`) don't
+  // depend on PC, so we can resolve them all in a quick first sweep
+  // before instruction sizing runs.  This lets the main pass below
+  // pick the ZP form for `LDA LIVES` even when `.LIVES = $04` is
+  // declared *after* the instruction in source — the dominant
+  // forward-reference case in real Oric code (ZP variables defined
+  // in a header equate block, used throughout the body).
+  // The set of pre-declared names is consumed during the main
+  // pass's `equate` case so a genuine duplicate declaration in
+  // source still raises the usual "symbol already declared" error.
+  // Errors from malformed equates are left for the main pass to
+  // report — prescan only consumes successful parses.
+  const prescannedEquates = new Set<string>();
+  for (let lineIdx = 0; lineIdx < annotations.length; lineIdx++) {
+    const stripped = stripComment(annotations[lineIdx]);
+    const rawStatements = splitStatements(stripped);
+    for (const raw of rawStatements) {
+      const stmt = parseStatement(raw);
+      if (stmt.kind !== 'equate') continue;
+      if (symbols.has(stmt.name)) continue;   // duplicate handled in main pass
+      symbols.set(stmt.name, stmt.value);
+      prescannedEquates.add(stmt.name);
+    }
+  }
+
   // Named-block state.  An `ORG $xxxx .NAME` opens a block; its end
   // label (`NAME_END`) is declared when the block closes at the next
   // ORG, PC-break, `]]` close marker, or end of program.  `lastByte`
@@ -968,6 +993,14 @@ function pass1(
         }
 
         case 'equate': {
+          // First occurrence of an equate already handled by the
+          // prescan above — silently consume the prescanned name
+          // so a later duplicate of the same equate triggers the
+          // normal redeclaration error path below.
+          if (prescannedEquates.has(stmt.name)) {
+            prescannedEquates.delete(stmt.name);
+            break;
+          }
           const err = declare(lineIdx, stmt.name, stmt.value);
           if (err) stateErrs.push({ message: err });
           break;

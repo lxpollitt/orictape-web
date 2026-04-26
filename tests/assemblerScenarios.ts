@@ -527,10 +527,30 @@ test('equate with underscore in name',
 test('equate in indexed X (LDA ARR,X)',
   () => compareBytes(asm('.ARR = $BB80 : LDA ARR,X'), [0xBD, 0x80, 0xBB]));
 
-// Forward reference to an equate: pass 1 doesn't know the value, commits ABS.
-// Pass 2 resolves LIVES=$04 but the committed mode is ABS, so we get 3 bytes.
-test('forward ref to ZP-valued equate still emits ABS',
-  () => compareBytes(asm('DEC LIVES : .LIVES = $04'), [0xCE, 0x04, 0x00]));
+// Forward reference to an equate: an equate-prescan runs before
+// instruction sizing (equate values are PC-independent, so they can
+// be resolved up-front), so pass 1 *does* know LIVES = $04 in time
+// to pick the ZP form.  This handles the dominant Oric-1 idiom of
+// declaring all ZP variables in a header equate block at the top
+// of the program but referencing them throughout the body above.
+test('forward ref to ZP-valued equate sizes as ZP via equate prescan',
+  () => compareBytes(asm('DEC LIVES : .LIVES = $04'), [0xC6, 0x04]));
+
+// Forward reference to a ZP-valued equate from an indexed
+// addressing form — same prescan logic resolves it.
+test('forward ref to ZP-valued equate works for indexed forms',
+  () => compareBytes(asm('LDA SCRATCH,X : .SCRATCH = $80'), [0xB5, 0x80]));
+
+// Forward reference to a non-ZP-valued equate still emits ABS
+// (the prescan picks the right size — 3 bytes for the wide value).
+test('forward ref to wide-valued equate emits ABS',
+  () => compareBytes(asm('LDA TARGET : .TARGET = $9800'), [0xAD, 0x00, 0x98]));
+
+// Duplicate equate declaration is still an error after prescan
+// (prescan keeps only the first occurrence; the main pass detects
+// the second as a redeclaration).
+test('duplicate equate declaration errors after prescan',
+  () => /already declared/i.test(asmErrMulti('.A = 1 : .A = 2') ?? '') ? null : 'wrong/no error');
 
 // ── Phase 4: labels and branches ─────────────────────────────────────────────
 
