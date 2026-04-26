@@ -1074,6 +1074,20 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
       e.preventDefault();
       return;
     }
+    // Cmd/Ctrl+Shift+A: same pattern — suppress the browser's
+    // native chord (Chrome/Safari open various menu / search
+    // popups for this combination) and let the event bubble up
+    // to the document handler, which commits the in-progress
+    // edit and runs the re-assembler.  Detect by `code === 'KeyA'`
+    // because `e.key` for Shift+A is uppercase 'A' on most
+    // keyboards but other combinations (e.g. caps-lock) are
+    // possible; matching the physical key is more robust.
+    if ((e.code === 'KeyA' || e.key === 'a' || e.key === 'A')
+        && (e.metaKey || e.ctrlKey)
+        && e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Enter' && e.shiftKey) {
       // Shift+Enter: split line at cursor.
       e.preventDefault();
@@ -2644,6 +2658,27 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     return;
   }
 
+  // Cmd/Ctrl+Shift+A: re-assemble inline-asm annotations (tape view only).
+  // Same "before the edit-input guard" pattern as Cmd+S — without
+  // this, the textarea's own keydown listener would block bubbling
+  // (its catch-all `stopPropagation()`) and Chrome / Safari would
+  // open their native chord popups instead.  The textarea handler
+  // additionally calls `preventDefault` for this combo so the
+  // browser default never fires whichever path the event takes.
+  // Match the physical key (`code === 'KeyA'`) as well as the
+  // logical key (`'a'`/`'A'`) for keyboards where Shift+A produces
+  // a different `key` value.
+  if ((e.code === 'KeyA' || e.key.toLowerCase() === 'a')
+      && (e.metaKey || e.ctrlKey)
+      && e.shiftKey && !e.altKey) {
+    if (viewMode === 'tape' && programs[activeProgIdx]) {
+      e.preventDefault();
+      if (editingLine !== null) exitEditMode(true);
+      runReassembler();
+    }
+    return;
+  }
+
   // Don't let any keys fire while the edit input or search input has focus — they handle their own keys.
   if (editInput && document.activeElement === editInput) return;
   if (document.activeElement === searchInput) return;
@@ -2653,17 +2688,6 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     if (viewMode === 'tape' && programs[activeProgIdx]) {
       e.preventDefault();
       openSearch();
-    }
-    return;
-  }
-
-  // Cmd/Ctrl+Shift+A: re-assemble inline-asm annotations (tape view only).
-  // Shift avoids the clash with the browser's Select-All.  `e.key` is
-  // 'A' when Shift is held; compare case-insensitively for safety.
-  if (e.shiftKey && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
-    if (viewMode === 'tape' && programs[activeProgIdx]) {
-      e.preventDefault();
-      runReassembler();
     }
     return;
   }
