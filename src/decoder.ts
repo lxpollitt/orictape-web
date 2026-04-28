@@ -45,6 +45,13 @@ export interface LineInfo {
   /** Set when re-tokenising the line's text produces different bytes than
    *  the original — indicates the stored bytes aren't valid tokenised BASIC. */
   tokenisationMismatch?: boolean;
+  /** Set when the line's total stored size (next-line pointer through
+   *  null terminator inclusive) exceeds 255 bytes.  Above this limit
+   *  Oric BASIC's editor can't load the line into its 255-byte line
+   *  buffer — neither 1.0 nor 1.1 cope: 1.0 won't let you edit other
+   *  lines in such a program either, and 1.1 hangs as soon as the
+   *  program is loaded.  Computed as `lastByte - firstByte + 1 > 255`. */
+  tooLong?: boolean;
   /** Per-element error severity. Null/undefined = no element-level issues.
    *  When present, one entry per element: 'error', 'warning', or null (clean). */
   elementErrors?: ('error' | 'warning' | null)[];
@@ -84,7 +91,7 @@ export function lineHealth(prog: Program, lineIdx: number): LineSeverity {
   let health: LineSeverity = 'clean';
 
   // Line-level flags.
-  if (line.lenErr || line.earlyEnd || line.nonMonotonic || line.tokenisationMismatch) {
+  if (line.lenErr || line.earlyEnd || line.nonMonotonic || line.tokenisationMismatch || line.tooLong) {
     health = 'error';
   }
 
@@ -171,6 +178,9 @@ export function lineStatuses(prog: Program, lineIdx: number): LineStatus[] {
   }
   if (line.tokenisationMismatch) {
     statuses.push({ message: 'Tokenisation mismatch', severity: 'error' });
+  }
+  if (line.tooLong) {
+    statuses.push({ message: 'Line exceeds 255-byte maximum', severity: 'error' });
   }
 
   // Element-level syntax issues (counts populated by buildLineElements).
@@ -284,7 +294,7 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
   elements.push(`${lineNum} `);
   errors.push(null);  // line number element — syntax checker doesn't cover this
 
-  // Content bytes: firstByte+4 to lastByte. (The lastByte should be the 0x00 terminator, 
+  // Content bytes: firstByte+4 to lastByte. (The lastByte should be the 0x00 terminator,
   // but corrupt lines may have it earlier or missing in rare cases. Known example is from
   // the last line of the program, but this code is more defensive and copes with all lines.)
   byteSequenceSyntaxChecker(0x00, true);  // reset
@@ -317,6 +327,12 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
   line.v = elements.join('');
   line.elements = elements;
   line.elementErrors = hasAnyError ? errors : undefined;
+  // Stored line size = (lastByte - firstByte + 1), counting the
+  // 2-byte next-line pointer, 2 line-number bytes, content bytes,
+  // and the trailing 0x00 terminator.  Oric BASIC's line buffer
+  // tops out at 255 bytes — anything bigger is unloadable on 1.1
+  // and uneditable on 1.0.
+  line.tooLong = (line.lastByte - line.firstByte + 1) > 255;
   line.unknownKeywordCount = unknownKeywordCount || undefined;
   line.keywordInLiteralCount = keywordInLiteralCount || undefined;
   line.invalidReservedCharCount = invalidReservedCharCount || undefined;

@@ -25,7 +25,7 @@
  */
 
 import type { ByteInfo, LineInfo, Program } from '../src/decoder';
-import { emptyBitStream, buildLineElements } from '../src/decoder';
+import { emptyBitStream, buildLineElements, lineStatuses } from '../src/decoder';
 import { parseLine, applyLineEdit } from '../src/editor';
 import { applyAssembler } from '../src/asmApply';
 
@@ -2423,6 +2423,76 @@ test('regression: owned-byte-index resolution survives mid-loop byte shifts', ()
       return `byte ${i} (annotation '${String.fromCharCode(p.bytes[i].v)}') ` +
              `was wrongly flipped to 'automatic'`;
     }
+  }
+  return null;
+});
+
+// ── Line-length error (Oric 255-byte stored-line limit) ───────────────────
+
+test('line at exactly 255 bytes: not flagged', () => {
+  // Stored line layout: 2 (ptr) + 2 (line num) + content + 1 (terminator).
+  // For total = 255: content = 250 bytes.  Each ASCII 'A' is 1 byte.
+  const content = 'A'.repeat(250);
+  const p = mkProgram([`100 ${content}`]);
+  const line = p.lines[0];
+  const size = line.lastByte - line.firstByte + 1;
+  if (size !== 255) return `precondition: expected size 255, got ${size}`;
+  if (line.tooLong) return 'should not be flagged at exactly 255';
+  return null;
+});
+
+test('line at 256 bytes: flagged', () => {
+  // 251 content bytes → 256 total.
+  const content = 'A'.repeat(251);
+  const p = mkProgram([`100 ${content}`]);
+  const line = p.lines[0];
+  const size = line.lastByte - line.firstByte + 1;
+  if (size !== 256) return `precondition: expected size 256, got ${size}`;
+  if (!line.tooLong) return 'should be flagged at 256';
+  const statuses = lineStatuses(p, 0);
+  if (!statuses.some(s => s.message === 'Line exceeds 255-byte maximum' && s.severity === 'error')) {
+    return `expected error status, got: ${JSON.stringify(statuses)}`;
+  }
+  return null;
+});
+
+test('keyword tokens are 1 stored byte each (not their string length)', () => {
+  // `PRINT` is 5 chars rendered but 1 stored byte.  Use enough
+  // PRINTs that rendered length > 255 but stored content is small.
+  // 60 PRINTs separated by spaces: rendered = 60*5 + 59 = 359 chars.
+  // Stored = 60 keyword tokens + 59 space bytes = 119 content bytes.
+  // Total stored = 4 + 119 + 1 = 124 bytes.  Well under 255.
+  const lots = Array(60).fill('PRINT').join(' ');
+  const p = mkProgram([`100 ${lots}`]);
+  const line = p.lines[0];
+  if (line.v.length <= 255) return `precondition: rendered length should exceed 255, got ${line.v.length}`;
+  if (line.tooLong) return 'should NOT be flagged — keyword tokens are 1 byte each in storage';
+  return null;
+});
+
+test('flag clears after shrinking via applyLineEdit', () => {
+  const p = mkProgram([`100 ${'A'.repeat(260)}`]);   // 265 stored bytes → flagged
+  if (!p.lines[0].tooLong) return 'precondition: line should start as too-long';
+  applyLineEdit(p, 0, '100 SHORT');
+  if (p.lines[0].tooLong) return 'flag should clear after edit shrinks the line';
+  return null;
+});
+
+test('applyAssembler producing a >255-byte line flags it', () => {
+  // A DATA line whose annotation produces enough bytes to push the
+  // stored line past 255 bytes.  `DB ...` with many values is the
+  // easiest way.  Each `#XX` rendered value tokenises to 4 bytes
+  // (`#`, two hex chars, comma) — about 4 stored bytes per value.
+  // 70 DB values ⇒ ~280 content bytes ⇒ ~285 stored bytes.
+  const p = mkProgram([
+    "10 DATA 0 ' DB " + Array(70).fill('$01').join(','),
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!p.lines[0].tooLong) return `expected too-long after assembly: size=${p.lines[0].lastByte - p.lines[0].firstByte + 1}`;
+  const statuses = lineStatuses(p, 0);
+  if (!statuses.some(s => s.message === 'Line exceeds 255-byte maximum')) {
+    return `expected status, got: ${JSON.stringify(statuses)}`;
   }
   return null;
 });
