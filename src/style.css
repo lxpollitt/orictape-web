@@ -465,10 +465,43 @@ header h1 {
    selection/error background shading extends uniformly across all lines
    regardless of their individual length, even when scrolled right.
    The :not(.merge-active) guard keeps this out of the merged view, which
-   manages its own column layout via applyMergeColumnWidths(). */
+   manages its own column layout via applyMergeColumnWidths().
+
+   Soft vertical guide at character 78 — marks Oric BASIC's editable-line
+   input limit.  Lines extending past the guide can't be edited on real
+   Oric hardware (the line editor caps user input at 78 chars), though
+   they still load and run.  Implemented as a 1-px vertical stripe in
+   the element's background gradient.  `background-attachment: local`
+   is the key bit: it makes the background extend with the SCROLLABLE
+   content area rather than being clipped to the visible padding box,
+   so the guide spans every line top-to-bottom even after the user
+   scrolls down a long program.  The `10px` offset cancels
+   #basic-view's left padding so the stripe aligns with character
+   position 78 of the line content; the `1ch` unit takes its width
+   from the current monospace font's `0`-glyph (#basic-view inherits
+   monospace from `body`).  Colour deliberately darker than
+   `var(--border)` so it doesn't read as another panel edge. */
 #app:not(.basic-wrap) #basic-view:not(.merge-active) {
   display: grid;
   grid-template-columns: max-content;
+  /* The "image" is a tiny 1×8 vertical gradient: top 4px coloured,
+   * bottom 4px transparent — when tiled vertically (`repeat-y`) it
+   * draws a dashed line.  `background-position` places the start of
+   * the first tile at character column 78 (with the 10px padding
+   * compensation); `background-attachment: local` makes the tile
+   * stream extend through the SCROLLABLE content height rather than
+   * being clipped to the visible padding box.  Tweak `1px 8px` for
+   * dash density (e.g. `1px 6px` for tighter dashes), and the
+   * `rgba()` alpha for boldness. */
+  background-image: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.07) 50%,
+    transparent 50%
+  );
+  background-size: 1px 8px;
+  background-position: calc(11px + 78ch) 0;
+  background-repeat: repeat-y;
+  background-attachment: local;
 }
 .merge-col .basic-line          { cursor: default; }
 .merge-col .basic-line:hover    { background: transparent; }
