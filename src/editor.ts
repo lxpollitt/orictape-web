@@ -374,6 +374,7 @@ export function deleteLineEdit(prog: Program, lineIdx: number): void {
 
   // Re-run all post-processing flags.
   flagAll(prog);
+  prog.unsaved = true;
 }
 
 /**
@@ -455,6 +456,7 @@ export function restoreLineToOriginalBytes(prog: Program, lineIdx: number): void
 
   // Re-run all post-processing flags.
   flagAll(prog);
+  prog.unsaved = true;
 }
 
 /**
@@ -766,6 +768,10 @@ export function applyLineEdit(prog: Program, lineIdx: number, text: string): voi
 
   // Re-run all post-processing flags.
   flagAll(prog);
+  // The program has been modified.  The save paths (Cmd/Ctrl+S and
+  // Build TAP) clear this back to false.  Used by the
+  // `beforeunload` warning to protect against accidental loss.
+  prog.unsaved = true;
 }
 
 /**
@@ -922,6 +928,7 @@ export function splitLineWithEdits(
 
   // Re-run all post-processing flags.
   flagAll(prog);
+  prog.unsaved = true;
 
   return lineIdx + 1;
 }
@@ -1024,6 +1031,7 @@ export function joinLinesWithEdit(
 
   // Re-run all post-processing flags.
   flagAll(prog);
+  prog.unsaved = true;
 
   return joinPoint;
 }

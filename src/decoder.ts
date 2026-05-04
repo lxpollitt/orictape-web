@@ -645,6 +645,15 @@ export interface Program {
    *  terminator, missing end-of-program marker, or a next-line pointer
    *  inconsistent with a line's actual extent. */
   pointerAndTerminatorIssues?: boolean;
+  /** True when the program has been modified since it was last
+   *  saved (or loaded — fresh loads count as saved).  Set by the
+   *  user-facing edit functions in editor.ts (`applyLineEdit`,
+   *  `deleteLineEdit`, `splitLineWithEdits`, `joinLinesWithEdit`,
+   *  `restoreLineToOriginalBytes`); cleared by the save paths in
+   *  main.ts (Cmd/Ctrl+S quick-save and Build TAP).  Used to drive
+   *  the `beforeunload` warning so users don't lose work to an
+   *  accidental refresh, tab close, or dev-server reload. */
+  unsaved?: boolean;
 }
 
 export const KEYWORDS: string[] = [

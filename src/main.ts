@@ -1794,6 +1794,11 @@ function doDownloadTap(): void {
   const filename = `${entries[0].prog.name || 'tape'}.tap`;
   const bytes    = encodeTapFile(entries);
   downloadTap(bytes, filename);
+  // Every program written into this TAP is now persisted on disk
+  // — clear its dirty flag so the beforeunload warning doesn't
+  // trip on this run's contents until the user makes another edit.
+  // (Programs not included in this build remain dirty.)
+  for (const entry of entries) entry.prog.unsaved = false;
   closeTapBuilder();
 }
 
@@ -2641,7 +2646,36 @@ function quickSaveActiveProgram(): void {
   const bytes    = encodeTapFile([entry]);
   const filename = `${prog.name || 'program'}.tap`;
   downloadTap(bytes, filename);
+  // Saved — clear the dirty flag so beforeunload won't warn about
+  // this program until the user makes another change.
+  prog.unsaved = false;
 }
+
+/** True when ANY loaded program (across all tapes, plus any merge
+ *  outputs) has unsaved edits.  Drives the beforeunload warning. */
+function hasAnyUnsavedChanges(): boolean {
+  for (const tape of tapes) {
+    for (const prog of tape.programs) {
+      if (prog.unsaved) return true;
+    }
+  }
+  for (const um of userMerges) {
+    if (um?.result?.output?.unsaved) return true;
+  }
+  return false;
+}
+
+// `beforeunload` warning when there are unsaved edits.  Catches the
+// usual culprits — accidental tab close, Cmd/Ctrl+R, and (in dev)
+// Vite's auto-reload-on-HMR-reconnect when the laptop wakes from
+// sleep.  The browser shows its own confirmation dialog whose text
+// we can't customise; setting `returnValue` (legacy) and calling
+// `preventDefault()` is what triggers it on every modern engine.
+window.addEventListener('beforeunload', (e: BeforeUnloadEvent) => {
+  if (!hasAnyUnsavedChanges()) return;
+  e.preventDefault();
+  e.returnValue = '';   // legacy Chrome/Edge requirement; ignored elsewhere
+});
 
 document.addEventListener('keydown', (e: KeyboardEvent) => {
   // Cmd/Ctrl+S: quick-save the active program as a TAP.  Handled
