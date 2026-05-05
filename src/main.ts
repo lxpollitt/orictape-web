@@ -335,19 +335,12 @@ fileInput.addEventListener('change', async () => {
   // a file after closing all its tabs.
   fileInput.value = '';
 
-  // Reset all state.
-  waveform.resetZoom();
-  tapes           = [];
-  userMerges      = [];
-  selByte         = null;
-  selMergeLine    = null;
-  selMergeCol     = null;
-  resetSearch();
-  selMergeElem    = null;
-  viewMode        = 'tape';
-  mergeBtnEl.hidden = true;
-  clearPanels();
-  updateStatusBar();
+  // Additive load: don't wipe existing tapes / merges / search / view
+  // mode / zoom.  Snapshot where the new tapes will start in the array
+  // so we can land focus on the first newly-loaded program at the end.
+  // Empty-session case: firstNewTapeIdx === 0, behaviour matches the
+  // previous "fresh load" flow.
+  const firstNewTapeIdx = tapes.length;
 
   for (let fi = 0; fi < files.length; fi++) {
     const file = files[fi];
@@ -405,7 +398,7 @@ fileInput.addEventListener('change', async () => {
     : null;
 
   if (tapes.length > 1) {
-    const parts = [`Loaded ${tapes.length} sources · ${totalProgs} programs`];
+    const parts = [`Loaded ${tapes.length} files · ${totalProgs} programs`];
     if (dur !== null) parts.push(`${dur}s max audio`);
     statusEl.textContent = parts.join(' · ');
   } else if (tapTapes.length === 1) {
@@ -414,8 +407,20 @@ fileInput.addEventListener('change', async () => {
     statusEl.textContent = `Decoded ${totalProgs} program${totalProgs !== 1 ? 's' : ''} from ${dur}s of audio.`;
   }
 
-  activateTape(0, 0);
-  selByte = null;
+  // Land focus on the first newly-loaded program.  Switch back to tape
+  // view (the user might have been on a merged tab when they hit Load)
+  // and clear stale selection state — byte/line indices belong to the
+  // previously-active program and would mis-index the new one.
+  viewMode     = 'tape';
+  selByte      = null;
+  selMergeLine = null;
+  selMergeCol  = null;
+  selMergeElem = null;
+  // Reset search alongside the focus jump.  Existing matches reference
+  // the previously-active program; rather than try to translate them,
+  // start fresh.  (Reconsider if the user wants search to span loads.)
+  resetSearch();
+  activateTape(firstNewTapeIdx, 0);
   renderAll();
   // Same policy as tab clicks: when the user lands on a new program, show
   // it at overview fit so they see the whole thing first.
