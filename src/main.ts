@@ -198,6 +198,79 @@ function activateTape(ti: number, pi: number): void {
   showDisassembly = false;
 }
 
+/**
+ * Close a program tab (the close-button "x" on each prog-tab).
+ *
+ * Per the design discussion: no confirmation dialog — the close
+ * button's border colour is the warning (neutral when clean, yellow
+ * when `prog.unsaved`).  Clicking is treated as the user committing
+ * to the loss.
+ *
+ * Cleanup:
+ *   - Removes the program from its tape.
+ *   - If that empties the tape, removes the tape too (no stale
+ *     empty-tape entries clutter the tab bar).
+ *   - Re-anchors `activeTapeIdx` / `activeProgIdx` so the active
+ *     selection lands on something sensible: prefer staying on the
+ *     same slot (which now holds the next program), else the last
+ *     remaining program in the same tape, else fall back to a
+ *     neighbouring tape, else (0, 0) for the empty-everything case.
+ *
+ * Doesn't touch `userMerges` — they snapshot their source bytes at
+ * merge time, so closing a source program doesn't invalidate any
+ * merge result.
+ */
+function closeProgram(tapeIdx: number, progIdx: number): void {
+  const tape = tapes[tapeIdx];
+  if (!tape || progIdx < 0 || progIdx >= tape.programs.length) return;
+
+  // Was the closed program the currently active one (in tape view)?
+  const closedActive =
+    viewMode === 'tape' && activeTapeIdx === tapeIdx && activeProgIdx === progIdx;
+
+  tape.programs.splice(progIdx, 1);
+
+  if (tape.programs.length === 0) {
+    // Tape becomes empty — drop it.  Active-tape index needs to
+    // shift if it pointed at this tape or any tape to its right.
+    tapes.splice(tapeIdx, 1);
+    if (activeTapeIdx > tapeIdx) {
+      activeTapeIdx--;
+    } else if (activeTapeIdx === tapeIdx) {
+      // Pick a neighbouring tape (or 0 if no tapes left).
+      activeTapeIdx = Math.min(activeTapeIdx, Math.max(0, tapes.length - 1));
+      activeProgIdx = 0;
+    }
+  } else if (activeTapeIdx === tapeIdx) {
+    // Same tape — adjust within it.
+    if (activeProgIdx > progIdx) {
+      activeProgIdx--;
+    } else if (activeProgIdx === progIdx) {
+      // Active program closed — clamp to the last remaining slot.
+      activeProgIdx = Math.min(activeProgIdx, tape.programs.length - 1);
+    }
+  }
+
+  // Re-bind the convenience aliases so subsequent code sees the
+  // current active tape's programs / samples.
+  programs    = tapes[activeTapeIdx]?.programs ?? [];
+  leftSamples = tapes[activeTapeIdx]?.samples  ?? null;
+
+  // Clear any lingering byte selection — its index could now point
+  // to a different program's bytes.  Only when the closed prog was
+  // the one the user was looking at; otherwise the selection still
+  // refers to whatever's currently shown.
+  if (closedActive) {
+    selByte         = null;
+    selMergeLine    = null;
+    selMergeCol     = null;
+    selMergeElem    = null;
+    showDisassembly = false;
+  }
+
+  renderAll();
+}
+
 /** Reset the waveform to overview 100% fit for the currently active
  *  program.  Called from actions that should reset the zoom to
  *  "show me the whole program" — currently just the tab-bar click,
@@ -250,8 +323,17 @@ function decodeInWorker(buffer: ArrayBuffer): Promise<WorkerResponse> {
 
 // ── File loading ──────────────────────────────────────────────────────────────
 fileInput.addEventListener('change', async () => {
-  const files = fileInput.files;
-  if (!files || files.length === 0) return;
+  if (!fileInput.files || fileInput.files.length === 0) return;
+  // Snapshot the FileList into a real array BEFORE clearing the
+  // input's value — clearing also empties `fileInput.files`, and
+  // we need the references to load from below.
+  const files = Array.from(fileInput.files);
+  // Clear the input's value so subsequent picks of the same file
+  // re-fire `change`.  Without this, the browser treats "user
+  // selected exactly the same file again" as a no-op and our
+  // handler never runs — bites the user when they want to reload
+  // a file after closing all its tabs.
+  fileInput.value = '';
 
   // Reset all state.
   waveform.resetZoom();
@@ -361,6 +443,19 @@ function nearestLineIdx(prog: Program, targetLineNum: number): number {
 }
 
 progTabs.addEventListener('click', (e) => {
+  // Close button takes precedence — it lives inside a tab button so
+  // a naive `closest('[data-ti]')` would still match the parent.
+  // Resolve the close target first and short-circuit.  No
+  // confirmation dialog: the yellow border on unsaved tabs is the
+  // pre-warning the user agreed to in the design discussion.
+  const closeBtn = (e.target as Element).closest<HTMLElement>('[data-close-ti]');
+  if (closeBtn) {
+    const ti = +(closeBtn.dataset.closeTi ?? '');
+    const pi = +(closeBtn.dataset.closePi ?? '');
+    closeProgram(ti, pi);
+    return;
+  }
+
   const btn = (e.target as Element).closest<HTMLElement>('[data-ti],[data-mi]');
   if (!btn) return;
 
@@ -479,6 +574,18 @@ function renderTabs(): void {
         `<div class="prog-tab-name"><span class="prog-num">${prog.progNumber}</span>${escHtml(prog.name || `Prog ${prog.progNumber}`)}</div>` +
         `<div class="prog-tab-info">${infoText}</div>` +
         `<div class="prog-tab-badges">${badgesHtml}</div>`;
+      // Close button — neutral by default, yellow when the program
+      // has unsaved edits.  Click is dispatched via the existing
+      // progTabs delegate (it short-circuits to closeProgram before
+      // the tab-activation branch).
+      const closeBtn = document.createElement('button');
+      closeBtn.className          = `prog-tab-close${prog.unsaved ? ' unsaved' : ''}`;
+      closeBtn.textContent        = '×';
+      closeBtn.dataset.closeTi    = String(ti);
+      closeBtn.dataset.closePi    = String(pi);
+      closeBtn.tabIndex           = -1;   // skip in keyboard tab order
+      closeBtn.title              = prog.unsaved ? 'Close (unsaved changes)' : 'Close';
+      btn.appendChild(closeBtn);
       progTabs.appendChild(btn);
     });
   });
@@ -837,6 +944,14 @@ function renderBasic(prog: Program): void {
   // having to update each direct call site.  Cheap — two DOM property
   // writes — so no harm running it on non-state-changing renders too.
   updateFixToggle(prog);
+  // Refresh program tabs too — every BASIC re-render is a moment when
+  // line-level state may have changed (edits, splits, joins, asm
+  // patches), and the tabs need to reflect the current `unsaved`
+  // flag on each program (drives the close-button colour and the
+  // tooltip text).  Same "covers all pathways without sprinkling
+  // calls everywhere" reasoning as `updateFixToggle` above; rebuild
+  // cost is a handful of DOM nodes per tape.
+  renderTabs();
 
   if (!prog.lines.length) {
     // Two sub-cases share this "no BASIC content rendered" path:
@@ -1799,6 +1914,9 @@ function doDownloadTap(): void {
   // trip on this run's contents until the user makes another edit.
   // (Programs not included in this build remain dirty.)
   for (const entry of entries) entry.prog.unsaved = false;
+  // Refresh tabs so close-button colours reflect the cleared
+  // state immediately.
+  renderTabs();
   closeTapBuilder();
 }
 
@@ -2658,6 +2776,11 @@ function saveProgramAsSingleTap(prog: Program, includeMeta: boolean): void {
   const filename = `${prog.name || 'program'}.tap`;
   downloadTap(bytes, filename);
   prog.unsaved = false;
+  // Refresh the tabs so the close button drops its yellow `unsaved`
+  // tint immediately.  Save paths bypass `renderBasic` (where the
+  // edit-driven refresh lives), so the tabs would otherwise stay
+  // yellow until the next renderAll / renderBasic.
+  renderTabs();
 }
 
 function quickSaveActiveProgram(): void {
@@ -2730,6 +2853,9 @@ function quickSaveActiveProgram(): void {
   // Mark every program written into the TAP as saved.
   prog.unsaved = false;
   for (const p of newPrograms) p.unsaved = false;
+  // And refresh the tabs so the close-button colour reflects the
+  // newly-clean state (same reasoning as saveProgramAsSingleTap).
+  renderTabs();
 
   const n = newPrograms.length;
   statusBar.innerHTML =
