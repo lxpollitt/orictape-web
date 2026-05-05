@@ -2629,15 +2629,26 @@ const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
  * inclusion so quick-saves and Build-TAP downloads of the same
  * program produce identical output.
  */
-function quickSaveActiveProgram(): void {
-  const includeMeta = tapMetaToggle.checked;
-  let prog: Program | undefined;
-  if (viewMode === 'merged') {
-    prog = userMerges[activeProgIdx]?.result.output;
-  } else {
-    prog = programs[activeProgIdx];
+/** Cheap textual scan for `[[ CSAVE` regions in a program's
+ *  rendered text — drives the Cmd+S enhanced flow that re-assembles
+ *  and saves a combined BASIC + CSAVE TAP.  Permissive on purpose:
+ *  if a stray "CSAVE" appears in BASIC source it'll match here, but
+ *  `applyAssembler` will simply produce no TAPs (or surface its own
+ *  error) and the save falls back to BASIC-only — so the worst case
+ *  is one no-op assembler pass, not a wrong save. */
+function programHasCsaveRegion(prog: Program): boolean {
+  for (const line of prog.lines) {
+    if (/\[\[\s+CSAVE\b/i.test(line.v)) return true;
   }
-  if (!prog) return;
+  return false;
+}
+
+/** Save a single program as a one-block TAP file.  Used by the
+ *  Cmd+S no-CSAVE fast path and the merged-view path; also used as
+ *  a fall-back by the CSAVE path when re-assembly produced errors
+ *  (so the user's BASIC work isn't lost just because the assembler
+ *  is mid-broken). */
+function saveProgramAsSingleTap(prog: Program, includeMeta: boolean): void {
   const entry: TapEntry = {
     prog,
     autorun:         prog.header.autorun,
@@ -2646,9 +2657,83 @@ function quickSaveActiveProgram(): void {
   const bytes    = encodeTapFile([entry]);
   const filename = `${prog.name || 'program'}.tap`;
   downloadTap(bytes, filename);
-  // Saved — clear the dirty flag so beforeunload won't warn about
-  // this program until the user makes another change.
   prog.unsaved = false;
+}
+
+function quickSaveActiveProgram(): void {
+  const includeMeta = tapMetaToggle.checked;
+
+  // Merged view: keep current behaviour — save the merged output as
+  // a one-program TAP.  CSAVE re-assembly is a tape-view feature.
+  if (viewMode === 'merged') {
+    const merged = userMerges[activeProgIdx]?.result.output;
+    if (!merged) return;
+    saveProgramAsSingleTap(merged, includeMeta);
+    return;
+  }
+
+  const prog = programs[activeProgIdx];
+  if (!prog) return;
+
+  // Fast path: no `[[ CSAVE` regions → save BASIC alone.  Identical
+  // to the previous Cmd+S behaviour; no assembler activity, no
+  // status-bar update (browser's download confirmation is the
+  // implicit feedback).
+  if (!programHasCsaveRegion(prog)) {
+    saveProgramAsSingleTap(prog, includeMeta);
+    return;
+  }
+
+  // CSAVE path: re-assemble (which appends generated CSAVE Programs
+  // to the host tape, same as Cmd+Shift+A), then build one
+  // combined TAP file containing the BASIC plus each generated
+  // assembler TAP.  Lets the user save-and-test in one keystroke
+  // during assembler iteration.
+  const filename = `${prog.name || 'program'}.tap`;
+  const { newPrograms, errors } = applyAssemblerAndAppendTaps(prog);
+  // Re-render so the new CSAVE tabs (and any DATA back-patches)
+  // show up.  Done before status-bar update so updateStatusBar
+  // doesn't overwrite our message.
+  if (newPrograms.length > 0 || errors.length > 0) renderAll();
+
+  if (errors.length > 0) {
+    // Assembler had errors — `applyAssembler`'s global gate already
+    // suppressed CSAVE TAP generation, so we save the BASIC alone
+    // (preserving the user's current edits) and surface the errors
+    // in the status bar in red.  No modal: this flow is meant for
+    // fast iteration, and the user can hit Cmd+Shift+A any time to
+    // see the full error breakdown.
+    saveProgramAsSingleTap(prog, includeMeta);
+    const n = errors.length;
+    statusBar.innerHTML =
+      `<span class="sb-dim">Saved ${escHtml(filename)} · </span>` +
+      `<span class="sb-err">${n} error${n !== 1 ? 's' : ''} · assembler TAPs skipped - Ctrl+Shift+A for details</span>`;
+    return;
+  }
+
+  // No errors — build the combined TAP.  Order: BASIC first, then
+  // each generated assembler TAP in source order.  Each program's
+  // own `header.autorun` flag is preserved (the BASIC retains
+  // whatever the user set; each CSAVE's flag was set by its
+  // `[[ CSAVE … AUTO]` directive at assembly time).
+  const entries: TapEntry[] = [
+    { prog, autorun: prog.header.autorun, includeMetadata: includeMeta },
+    ...newPrograms.map(p => ({
+      prog:            p,
+      autorun:         p.header.autorun,
+      includeMetadata: includeMeta,
+    })),
+  ];
+  const bytes = encodeTapFile(entries);
+  downloadTap(bytes, filename);
+
+  // Mark every program written into the TAP as saved.
+  prog.unsaved = false;
+  for (const p of newPrograms) p.unsaved = false;
+
+  const n = newPrograms.length;
+  statusBar.innerHTML =
+    `<span class="sb-dim">Saved ${escHtml(filename)} · BASIC + ${n} assembler TAP${n !== 1 ? 's' : ''}</span>`;
 }
 
 /** True when ANY loaded program (across all tapes, plus any merge
@@ -3409,29 +3494,34 @@ function showAsmErrorModal(errors: AsmApplyError[], linesPatched: number[]): voi
  * targets) are required to declare `ORG` themselves.  The assembler
  * reports a clear error otherwise.
  */
-function runReassembler(): void {
-  const prog = programs[activeProgIdx];
-  if (!prog) return;
-
+/**
+ * Run the assembler on a program and append any `[[ CSAVE` outputs
+ * as new programs to the host tape (matching the convention of
+ * grouping generated binaries with their source tape).  Returns
+ * everything the caller might want to report on: the number of
+ * source lines that got patched, the assembler errors (if any),
+ * and the list of newly-appended Programs so the caller can
+ * include them in further actions like a combined-TAP save.
+ *
+ * Shared by `runReassembler` (Cmd+Shift+A — re-assemble) and
+ * `quickSaveActiveProgram`'s CSAVE path (Cmd+S on a program with
+ * `[[ CSAVE` regions — re-assemble + save combined TAP).
+ *
+ * Each generated TAP's bytes are round-tripped through
+ * `parseTapFile` so the resulting Program is built the same way as
+ * user-loaded TAPs (consistent metadata, error-flag handling).
+ * The global error gate inside `applyAssembler` guarantees
+ * `generatedTaps` is empty when the program has any error, so this
+ * helper never appends broken Programs to the host tape.
+ */
+function applyAssemblerAndAppendTaps(prog: Program): {
+  newPrograms: Program[];
+  errors:      AsmApplyError[];
+  linesPatched: number[];
+} {
   const { linesPatched, errors, generatedTaps } = applyAssembler(prog);
-  const nPatched = linesPatched.length;
-  const nErrors  = errors.length;
-
-  // Any `[[ CSAVE "<name>" [AUTO] ... ]]` regions in the source
-  // produce virtual programs appended to the SAME tape as the
-  // source program — logical grouping: the generated binaries belong
-  // to the source they came from, and tape tabs stay tidy across
-  // repeat runs.  We round-trip through `parseTapFile` so each
-  // Program is built via the same path as user-loaded TAPs (catches
-  // any encoding edge-cases and gives consistent metadata).
-  // Programs are APPENDED — prior generated entries are never
-  // overwritten, so the user can compare successive runs or close
-  // stale ones (closing tabs is a planned future feature).  The
-  // global error gate inside `applyAssembler` guarantees
-  // `generatedTaps` is empty when the program has any error, so we
-  // never produce broken TAPs.
+  const newPrograms: Program[] = [];
   const hostTape = tapes[activeTapeIdx];
-  let nTapsAdded = 0;
   if (hostTape) {
     for (const tap of generatedTaps) {
       let tapPrograms: Program[];
@@ -3445,9 +3535,20 @@ function runReassembler(): void {
       }
       assignProgNumbers(tapPrograms);
       hostTape.programs.push(...tapPrograms);
-      nTapsAdded++;
+      newPrograms.push(...tapPrograms);
     }
   }
+  return { newPrograms, errors, linesPatched };
+}
+
+function runReassembler(): void {
+  const prog = programs[activeProgIdx];
+  if (!prog) return;
+
+  const { newPrograms, errors, linesPatched } = applyAssemblerAndAppendTaps(prog);
+  const nPatched   = linesPatched.length;
+  const nErrors    = errors.length;
+  const nTapsAdded = newPrograms.length;
 
   // Render first: `renderAll()` calls `updateStatusBar()` which would
   // overwrite our message, so the order matters — render, then set the
