@@ -2054,13 +2054,52 @@ test('CSAVE: empty region errors with generic zero-bytes message', () => {
   return null;
 });
 
-test('CSAVE: multiple regions with same name → multiple TAPs', () => {
+test('CSAVE: same-name regions combine into one TAP, gaps zero-filled', () => {
+  // Two `[[ CSAVE "GAME"` regions with the same name and a 13-byte
+  // gap between them ($9803-$980F).  Under the same-name-merge spec
+  // they emit a single TAP whose buffer spans $9800-$9810 with the
+  // gap bytes zero-filled.
   const p = mkProgram([
     "100 [[ CSAVE \"GAME\"",
     "110 ORG $9800",
+    "120 LDA #$AA",                       // A9 AA at $9800
+    "130 RTS",                            // 60    at $9802
+    "140 ]]",
+    "200 [[ CSAVE \"GAME\"",
+    "210 ORG $9810",                      // gap from $9803..$980F
+    "220 RTS",                            // 60    at $9810
+    "230 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps.length !== 1) return `expected 1 TAP, got ${r.generatedTaps.length}`;
+  const t = r.generatedTaps[0];
+  if (t.name !== 'GAME') return `name: ${t.name}`;
+  const b = t.bytes;
+  const startAddr = (b[15] << 8) | b[16];
+  const endAddr   = (b[13] << 8) | b[14];
+  if (startAddr !== 0x9800) return `startAddr: ${startAddr.toString(16)}`;
+  // 17 bytes: 3 from region 1 + 13 zero-fill + 1 from region 2.
+  if (endAddr !== 0x9811) return `endAddr: ${endAddr.toString(16)}`;
+  // Data: A9 AA 60 [00 ×13] 60
+  const dataStart = 18 + 'GAME'.length + 1;
+  if (b[dataStart]     !== 0xA9) return `data[0]: ${b[dataStart].toString(16)}`;
+  if (b[dataStart + 1] !== 0xAA) return `data[1]: ${b[dataStart + 1].toString(16)}`;
+  if (b[dataStart + 2] !== 0x60) return `data[2]: ${b[dataStart + 2].toString(16)}`;
+  for (let i = 3; i <= 15; i++) {
+    if (b[dataStart + i] !== 0x00) return `data[${i}] (gap): ${b[dataStart + i].toString(16)}`;
+  }
+  if (b[dataStart + 16] !== 0x60) return `data[16]: ${b[dataStart + 16].toString(16)}`;
+  return null;
+});
+
+test('CSAVE: different names still produce separate TAPs', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"FOO\"",
+    "110 ORG $9800",
     "120 RTS",
     "130 ]]",
-    "200 [[ CSAVE \"GAME\"",
+    "200 [[ CSAVE \"BAR\"",
     "210 ORG $9900",
     "220 RTS",
     "230 ]]",
@@ -2068,6 +2107,50 @@ test('CSAVE: multiple regions with same name → multiple TAPs', () => {
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
   if (r.generatedTaps.length !== 2) return `expected 2 TAPs, got ${r.generatedTaps.length}`;
+  // First-occurrence order in source.
+  if (r.generatedTaps[0].name !== 'FOO') return `taps[0].name: ${r.generatedTaps[0].name}`;
+  if (r.generatedTaps[1].name !== 'BAR') return `taps[1].name: ${r.generatedTaps[1].name}`;
+  return null;
+});
+
+test('CSAVE: same-name regions disagree on AUTO → error', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+    "200 [[ CSAVE \"GAME\" AUTO",         // disagrees with the first region
+    "210 ORG $9900",
+    "220 RTS",
+    "230 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an AUTO-mismatch error';
+  if (!/disagree on AUTO/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  if (r.generatedTaps.length !== 0) return `expected 0 TAPs, got ${r.generatedTaps.length}`;
+  return null;
+});
+
+test('CSAVE: same-name regions agreeing on AUTO preserve AUTO flag', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\" AUTO",
+    "110 ORG $9800",
+    "120 RTS",
+    "130 ]]",
+    "200 [[ CSAVE \"GAME\" AUTO",
+    "210 ORG $9900",
+    "220 RTS",
+    "230 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps.length !== 1) return `expected 1 TAP, got ${r.generatedTaps.length}`;
+  if (r.generatedTaps[0].autorun !== true) return 'autorun should be true';
+  if (r.generatedTaps[0].bytes[12] !== 0xC7) {
+    return `autorun byte: ${r.generatedTaps[0].bytes[12].toString(16)}`;
+  }
   return null;
 });
 

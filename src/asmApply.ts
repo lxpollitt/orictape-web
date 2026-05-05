@@ -473,7 +473,9 @@ export function applyAssembler(
       continue;
     }
 
-    const buf = buildRegionByteBuffer(emissions, region.openLineIdx, region.closeLineIdx);
+    const buf = buildRegionByteBuffer(emissions, [
+      { openLineIdx: region.openLineIdx, closeLineIdx: region.closeLineIdx },
+    ]);
     if (!buf) {
       const openLine = prog.lines[region.openLineIdx];
       const openLineNum = prog.bytes[openLine.firstByte + 2].v
@@ -488,38 +490,81 @@ export function applyAssembler(
     patches.push({ lineIdx: targetIdx, newText, ownedContentOffsets });
   }
 
-  // Type-2 TAP-output blocks.  For each `[[ CSAVE "<name>" [AUTO]`
-  // region that assembled cleanly, collect its bytes into a
-  // contiguous buffer and construct a raw TAP block.  The result
-  // goes into `generatedTaps` — the UI layer round-trips it through
-  // `parseTapFile` to produce a virtual tape.  Regions with any
-  // error in their lines are skipped; emission of *any* TAP is
-  // additionally gated globally (below) on zero overall errors, so
-  // a broken program never produces partial TAP output.
+  // Type-2 TAP-output blocks.  Same-named `[[ CSAVE "<name>" [AUTO]`
+  // regions are combined into a single TAP — bytes from every region
+  // in the name group are placed at their assembled PCs into one
+  // buffer (gaps zero-filled), and one `GeneratedTap` is emitted per
+  // group.  This lets a logical program be split across multiple
+  // `[[ CSAVE`s interleaved with BASIC, without producing one TAP
+  // per fragment.
+  //
+  // Result goes into `generatedTaps` — the UI layer round-trips it
+  // through `parseTapFile` to produce a virtual tape.  Groups
+  // containing any line with assembler errors are skipped; emission
+  // of *any* TAP is additionally gated globally (below) on zero
+  // overall errors, so a broken program never produces partial TAP
+  // output.
   const candidateTaps: GeneratedTap[] = [];
+  // Map preserves first-occurrence insertion order of names, so TAPs
+  // appear in the same order as the user wrote them in source.
+  const tapsByName = new Map<string, TapOutputRegion[]>();
   for (const region of tapOutputRegions) {
-    let regionHasErrors = false;
-    for (let i = region.openLineIdx; i <= region.closeLineIdx; i++) {
-      if (perLine[i].errors.length > 0) { regionHasErrors = true; break; }
-    }
-    if (regionHasErrors) continue;
-
-    const buf = buildRegionByteBuffer(emissions, region.openLineIdx, region.closeLineIdx);
-    if (!buf) {
-      const openLine = prog.lines[region.openLineIdx];
+    const list = tapsByName.get(region.name);
+    if (list) list.push(region);
+    else tapsByName.set(region.name, [region]);
+  }
+  for (const [name, group] of tapsByName) {
+    // AUTO consistency: every region in the group must agree on the
+    // autorun flag.  Mismatch is a hard error attributed to the first
+    // region whose AUTO disagrees with the group's first region.  This
+    // surfaces accidental inconsistency loudly rather than picking
+    // one and silently dropping the other.
+    const expectedAutorun = group[0].autorun;
+    const conflicting = group.find(r => r.autorun !== expectedAutorun);
+    if (conflicting !== undefined) {
+      const openLine = prog.lines[conflicting.openLineIdx];
       const openLineNum = prog.bytes[openLine.firstByte + 2].v
                         + prog.bytes[openLine.firstByte + 3].v * 256;
       errors.push({
-        lineIdx: region.openLineIdx, lineNum: openLineNum,
+        lineIdx: conflicting.openLineIdx, lineNum: openLineNum,
+        message: `[[ CSAVE "${name}" regions disagree on AUTO flag — all regions sharing a name must either all set AUTO or none`,
+      });
+      continue;
+    }
+
+    // Skip the whole group if any line in any region has an error —
+    // a partial TAP would be missing bytes the user expected.
+    let groupHasErrors = false;
+    for (const region of group) {
+      for (let i = region.openLineIdx; i <= region.closeLineIdx; i++) {
+        if (perLine[i].errors.length > 0) { groupHasErrors = true; break; }
+      }
+      if (groupHasErrors) break;
+    }
+    if (groupHasErrors) continue;
+
+    const buf = buildRegionByteBuffer(
+      emissions,
+      group.map(r => ({ openLineIdx: r.openLineIdx, closeLineIdx: r.closeLineIdx })),
+    );
+    if (!buf) {
+      // Attribute the empty-output error to the first region in the
+      // group — the user's "produced no bytes" diagnostic should land
+      // at the earliest source position they can scroll to.
+      const openLine = prog.lines[group[0].openLineIdx];
+      const openLineNum = prog.bytes[openLine.firstByte + 2].v
+                        + prog.bytes[openLine.firstByte + 3].v * 256;
+      errors.push({
+        lineIdx: group[0].openLineIdx, lineNum: openLineNum,
         message: `[[ region produced no assembled bytes`,
       });
       continue;
     }
 
     candidateTaps.push({
-      name:    region.name,
-      autorun: region.autorun,
-      bytes:   buildMachineCodeTap(region.name, region.autorun, buf.startPc, buf.bytes),
+      name,
+      autorun: expectedAutorun,
+      bytes:   buildMachineCodeTap(name, expectedAutorun, buf.startPc, buf.bytes),
     });
   }
 
@@ -817,24 +862,35 @@ function findLineIdxByLineNum(prog: Program, targetLineNum: number): number | nu
   return null;
 }
 
-/** Collect the bytes of a type-2 DATA-output region into a single
+/** Collect the bytes of one or more type-2 output regions into a single
  *  contiguous buffer, indexed by PC.  Pulls every emission whose
- *  `lineIdx` falls inside the region's open/close range, computes
- *  the min and max PCs covered, and zero-fills any gaps between
- *  emissions (e.g. when the user uses multiple `ORG`s for alignment
- *  without filling the space with NOPs).  Returns null when the
- *  region produced no emissions at all — callers treat that as "no
- *  output to write". */
+ *  `lineIdx` falls inside any of the supplied open/close ranges,
+ *  computes the min and max PCs covered, and zero-fills any gaps
+ *  between emissions (e.g. when the user uses multiple `ORG`s for
+ *  alignment without filling the space with NOPs, or — in the
+ *  multi-range case — between two regions in the same CSAVE name
+ *  group whose ORGs leave a hole).
+ *
+ *  Single-range invocation (one `[[ DATA <line>` or one `[[ CSAVE`)
+ *  is the common case.  The multi-range variant lets multiple
+ *  same-name `[[ CSAVE` regions combine into one TAP — bytes from
+ *  every region in the group are placed at their assembled PCs in
+ *  the same buffer.
+ *
+ *  Returns null when the supplied ranges produced no emissions at
+ *  all — callers treat that as "no output to write". */
 function buildRegionByteBuffer(
-  emissions:    Emission[],
-  openLineIdx:  number,
-  closeLineIdx: number,
+  emissions: Emission[],
+  ranges:    { openLineIdx: number; closeLineIdx: number }[],
 ): { bytes: number[]; startPc: number } | null {
+  const inAnyRange = (lineIdx: number): boolean =>
+    ranges.some(r => lineIdx >= r.openLineIdx && lineIdx <= r.closeLineIdx);
+
   let startPc        = Infinity;
   let endPcInclusive = -Infinity;
   let any            = false;
   for (const e of emissions) {
-    if (e.lineIdx < openLineIdx || e.lineIdx > closeLineIdx) continue;
+    if (!inAnyRange(e.lineIdx)) continue;
     any = true;
     if (e.pc < startPc) startPc = e.pc;
     const last = e.pc + e.bytes.length - 1;
@@ -844,7 +900,7 @@ function buildRegionByteBuffer(
   const size = endPcInclusive - startPc + 1;
   const buffer = new Array<number>(size).fill(0);
   for (const e of emissions) {
-    if (e.lineIdx < openLineIdx || e.lineIdx > closeLineIdx) continue;
+    if (!inAnyRange(e.lineIdx)) continue;
     for (let k = 0; k < e.bytes.length; k++) {
       buffer[e.pc - startPc + k] = e.bytes[k];
     }

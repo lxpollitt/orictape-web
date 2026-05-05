@@ -71,6 +71,13 @@ Two flavours are supported:
 
 - **`[[ CSAVE "<name>" [AUTO]`** — package the region's bytes as a machine-code TAP block named `<name>`.  The tool surfaces the result as a new virtual tape in the tape list, identical in treatment to a loaded `.tap` file — the user can click through to its program, inspect it, or include it via *Build TAP…* for emulator testing.  `AUTO` sets the TAP header's autorun flag, so CLOAD auto-executes from the start address.  Each `applyAssembler` run appends new tapes; existing tapes are never overwritten (close and re-run if you want a clean slate).  The TAP's start address defaults to `$501` if the region has no explicit `ORG`; an explicit `ORG $xxxx` (named or bare) at the region's top overrides this and sets the start address directly.  `endAddr` = last assembled byte + 1.  Gaps between non-contiguous `ORG`s are zero-filled.
 
+**Combining CSAVE blocks.**  Multiple `[[ CSAVE "<name>" ]]` regions sharing the same `<name>` are merged into a single TAP — bytes from every region in the name group are placed at their assembled PCs into one buffer, with gaps between them zero-filled.  This lets a logical machine-code program be split across non-contiguous regions in the source (interleaved with BASIC, scattered around the file) without producing one TAP per fragment.  Notes:
+
+- Each region must specify its own `ORG` explicitly (or rely on the `$501` default — but only the first region in a name group does, since two regions both defaulting to `$501` would overlap).  PC continuation across regions is not automatic.
+- The combined buffer's `startAddr` is the lowest emitted PC across all regions; `endAddr` is the highest plus one.  Gaps between regions, and gaps between non-contiguous `ORG`s within any region, are filled with `$00`.
+- All regions in a name group must agree on the `AUTO` flag — mismatch is a hard error, surfaced at the first conflicting region.
+- TAPs appear in the order of each name's first occurrence in the source.
+
 **Common rules for output sinks:**
 
 - Output-sink declarations scope to the `[[` that carries them: the region's end is the matching `]]` (or end of program if unclosed).
