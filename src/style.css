@@ -852,6 +852,15 @@ header h1 {
   margin-right: 2px;
   opacity: 0.75;
 }
+/* List of conflicting filenames in the Load Files conflict dialog.
+   Default <ul> indent (~40px) looks excessive against the modal's
+   16/20 padding; trim it and tighten the vertical margin so the list
+   reads as part of the surrounding sentence rather than a separate
+   block. */
+.confirm-modal-body .load-conflict-list {
+  margin: 6px 0 12px;
+  padding-left: 24px;
+}
 /* Prominent warning prepended to the confirm message when the action
    will discard user edits.  Matches the badge-err palette used in the
    program tabs so the severity cue is consistent. */

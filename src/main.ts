@@ -335,11 +335,42 @@ fileInput.addEventListener('change', async () => {
   // a file after closing all its tabs.
   fileInput.value = '';
 
-  // Additive load: don't wipe existing tapes / merges / search / view
+  // Detect filename conflicts against already-loaded tapes (filename
+  // match only — see the design discussion: we delegate the "is this
+  // really the same file?" smarts to the user via the popup).
+  const conflictNames = files
+    .map(f => f.name)
+    .filter(n => tapes.some(t => t.filename === n));
+
+  // If any picked file conflicts, prompt for a global decision that
+  // applies to the entire batch.  Cancel aborts the load entirely;
+  // Replace drops the matching existing tapes before the additive
+  // load runs; Add proceeds without touching them (producing
+  // duplicate same-named tabs, which is the multi-take merge case).
+  if (conflictNames.length > 0) {
+    const anyUnsaved = tapes
+      .filter(t => conflictNames.includes(t.filename))
+      .some(t => t.programs.some(p => p.unsaved));
+    const choice = await askLoadConflict(conflictNames, anyUnsaved);
+    if (choice === 'cancel') return;
+    if (choice === 'replace') {
+      // Drop existing tapes whose filename appears in the picked set.
+      // Direct filter rather than per-program closeProgram() loops:
+      // closeProgram does active-index recovery work that's pointless
+      // here since activateTape(firstNewTapeIdx, 0) overwrites it
+      // below.  Merges are self-contained (they snapshot their source
+      // bytes) so dropping a source tape doesn't invalidate them.
+      tapes = tapes.filter(t => !conflictNames.includes(t.filename));
+    }
+  }
+
+  // Additive load: don't wipe remaining tapes / merges / search / view
   // mode / zoom.  Snapshot where the new tapes will start in the array
   // so we can land focus on the first newly-loaded program at the end.
   // Empty-session case: firstNewTapeIdx === 0, behaviour matches the
-  // previous "fresh load" flow.
+  // previous "fresh load" flow.  Computed AFTER the optional Replace
+  // filter above so the index points at the first slot beyond the
+  // surviving tapes.
   const firstNewTapeIdx = tapes.length;
 
   for (let fi = 0; fi < files.length; fi++) {
@@ -3553,6 +3584,112 @@ function confirmAction(messageHtml: string): Promise<boolean> {
     });
 
     overlay.querySelector<HTMLButtonElement>('.confirm-ok')!.focus();
+  });
+}
+
+/**
+ * Three-way prompt shown when Load Files detects that one or more of
+ * the picked filenames matches an already-loaded tape (filename match
+ * only — see the design discussion).  Mirrors the structure of
+ * `confirmAction` but with three buttons (Cancel / Add / Replace) and
+ * a typed result.
+ *
+ * - **Add** is the default-focused button: non-destructive (it just
+ *   loads the picked files alongside the existing ones, producing
+ *   duplicate same-named tapes — frequently the desired outcome for
+ *   the multi-take merge workflow).
+ * - **Replace** drops the existing tape(s) with matching filenames
+ *   before the additive load proceeds.  When any of those tapes has
+ *   unsaved program edits the body shows a prominent warning banner
+ *   (same `.confirm-modal-warn` styling used by split/join confirms).
+ * - **Cancel** / Escape / backdrop click → abort the load entirely.
+ *
+ * Enter activates whichever button is focused (browser default), so
+ * unlike `confirmAction` we don't bind Enter explicitly — there's no
+ * single "OK" to map it to.
+ */
+function askLoadConflict(
+  conflictNames: string[],
+  anyUnsaved: boolean,
+): Promise<'add' | 'replace' | 'cancel'> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'tap-modal-overlay';
+    // Two-sentence body: a statement describing the conflict, then a
+    // question that names the two non-cancel button choices so the
+    // user doesn't have to interpret "Replace" / "Add" cold from the
+    // footer.
+    //
+    // Plurality is driven by two independent counts that can diverge:
+    //   - `manyAdds`  = how many picked files would be added (== list
+    //     row count): drives "name(s)" in the intro and "a new file"
+    //     vs "new files" in the question.
+    //   - `manyFiles` = how many already-loaded tapes Replace would
+    //     drop: drives "file(s)" in "the already loaded ___".
+    // They diverge when the user has the same file loaded multiple
+    // times: re-picking it once shows one list row but Replace would
+    // drop two existing tapes.
+    const totalMatching = tapes.filter(t => conflictNames.includes(t.filename)).length;
+    const manyAdds  = conflictNames.length > 1;
+    const manyFiles = totalMatching > 1;
+    const intro = manyAdds
+      ? 'Files with the following names are already loaded.'
+      : manyFiles
+        ? 'Files with the following name are already loaded.'
+        : 'A file with the following name is already loaded.';
+    const replacePart = manyFiles ? 'replace the already loaded files' : 'replace the already loaded file';
+    const addPart     = manyAdds  ? 'add as new files'                 : 'add as a new file';
+    const question    = `Do you want to ${replacePart} or ${addPart}?`;
+    const listHtml = conflictNames
+      .map(n => `<li>${escHtml(n)}</li>`)
+      .join('');
+    const warnHtml = anyUnsaved
+      ? '<div class="confirm-modal-warn"><span class="warn-icon">⚠</span> Unsaved edits will be overwritten if you select Replace.</div>'
+      : '';
+    // Button order: Add, Replace, Cancel (left-to-right reading order
+    // matches the question above).  `.confirm-cancel`'s `margin-left:
+    // auto` rule pulls Cancel to the right edge, separating the
+    // action buttons from the escape hatch.
+    overlay.innerHTML =
+      '<div class="tap-modal-box confirm-modal-box">' +
+        '<div class="tap-modal-body confirm-modal-body">' +
+          `<p>${intro}</p>` +
+          `<ul class="load-conflict-list">${listHtml}</ul>` +
+          `<p>${question}</p>` +
+          warnHtml +
+        '</div>' +
+        '<div class="tap-modal-footer">' +
+          '<button class="load-conflict-add">Add</button>' +
+          '<button class="load-conflict-replace">Replace</button>' +
+          '<button class="confirm-cancel">Cancel</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    const close = (result: 'add' | 'replace' | 'cancel'): void => {
+      overlay.remove();
+      resolve(result);
+    };
+
+    overlay.querySelector<HTMLButtonElement>('.confirm-cancel')!
+      .addEventListener('click', () => close('cancel'));
+    overlay.querySelector<HTMLButtonElement>('.load-conflict-add')!
+      .addEventListener('click', () => close('add'));
+    overlay.querySelector<HTMLButtonElement>('.load-conflict-replace')!
+      .addEventListener('click', () => close('replace'));
+
+    // Backdrop click (anywhere outside the modal box) cancels — same
+    // affordance as the merge / TAP-builder modals.
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close('cancel');
+    });
+
+    overlay.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close('cancel'); }
+      // Enter falls through to the focused button's default click.
+    });
+
+    overlay.querySelector<HTMLButtonElement>('.load-conflict-add')!.focus();
   });
 }
 
