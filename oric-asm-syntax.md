@@ -23,20 +23,23 @@ Annotations on lines of any other kind (e.g. `PRINT`, `LET`, `GOTO`) — and REM
 
 ## Bounded Regions
 
-Two annotation statements — `[[` and `]]` — bound the portion of the program the re-assembler considers.  They are useful when converting an existing program incrementally (process a few lines at a time, leaving the rest untouched), or as a master switch to disable re-assembly across the whole program.
+Two annotation statements — `[[` and `]]` — delimit regions of the program where additional behaviours apply.  They do **not** gate whether annotations are processed: every annotation in the program is always passed to the re-assembler regardless of marker position.  Markers retain three jobs:
 
-- **`[[`** sets the active state to *on* (from that statement onward).
-- **`]]`** sets the active state to *off* (from that statement onward).
+1. **Strict zero-emit DATA check.**  Inside a `[[ … ]]` region, a DATA line whose annotation produces zero assembled bytes is a hard error.  Outside, the same situation is lenient (silent PC-break).  See *Strict vs lenient enforcement* under *Assembler block boundaries* below.
+2. **Output sinks.**  `[[ DATA <line>` and `[[ CSAVE "<name>"` open output regions whose assembled bytes are routed to a single target instead of being patched per-line.  See *Output Sinks*.
+3. **Sticky parameters.**  `[[ WORDS` / `[[ BYTES` set the DATA-line render mode for subsequent emissions; the setting persists past `]]` closes until another `[[ PARAM …` updates it.
+
+Marker mechanics:
+
+- **`[[`** opens a bracket region (from that statement onward).
+- **`]]`** closes the current bracket region (from that statement onward).
 - Both are **absolute state setters**, not counted open/close pairs.  `[[` after `[[` is a no-op; `]]` after `]]` is a no-op.  They may each appear any number of times, including multiple on the same annotation.
 - Markers themselves emit no bytes and declare no symbols.  They are stripped before the annotation reaches the assembler.
-- State tracking is **statement-level**: within a single annotation, `' [[:LDX #0:]]:LDY #5` activates, keeps `LDX #0`, deactivates, and drops `LDY #5`.
-
-**Initial state rule.**  If the program contains at least one `[[` *or* at least one `]]` anywhere in an annotation, the initial state is **off** (nothing is processed until a `[[` activates it).  If the program contains neither marker, the initial state is **on** (the re-assembler processes everything, for full backward compatibility).
+- State tracking is **statement-level**: within a single annotation, `' [[:LDX #0:]]:LDY #5` keeps both `LDX #0` and `LDY #5` (always processed under the lenient default); the `[[`/`]]` toggle only changes whether the strict zero-emit check would apply to the surrounding DATA line.
 
 **Common patterns.**
-- Mark a single conversion region: `[[` at the start line, `]]` at the end line.  Outside the region, the re-assembler does nothing.
-- Disable everything: a single `]]` anywhere (typically as the only statement on a REM line near the top).  Initial state is off, `]]` keeps it off, the rest of the program is silently skipped.
-- Multiple regions: alternate `[[` and `]]` markers to cover several non-contiguous ranges.
+- Mark a region as assembler-only (opt into strict checking): `[[` at the start, `]]` at the end.  DATA lines inside that produce no assembled bytes will error; outside, lenient.
+- Multiple regions: alternate `[[` and `]]` markers to cover several non-contiguous strict ranges.
 
 **Where markers may appear.**  Anywhere an annotation is accepted — i.e. `REM`, `DATA`, or `CALL`/`POKE`/`DOKE`/`PEEK`/`DEEK` lines per the Host Line Eligibility rules.  Markers may be combined with other valid annotation statements on the same line (`' [[:LDX #0`, `' .LOOPA:]]`, etc.).
 
@@ -44,8 +47,8 @@ Two annotation statements — `[[` and `]]` — bound the portion of the program
 
 `[[` optionally accepts whitespace-separated parameters that configure tool behaviour, e.g. `[[ WORDS` or `[[ BYTES`.  Parameters are case-insensitive (matching mnemonic and `ORG` case handling).  Unknown parameters are errors.
 
-- Parameters install **sticky settings** — they persist across annotations and across `]]` closes, changing only when another `[[ PARAM …` updates them.  A bare `[[` (no params) preserves the prevailing setting and only toggles the active region on.
-- `]]` does not carry parameters and does not reset settings; it only toggles the active region off.
+- Parameters install **sticky settings** — they persist across annotations and across `]]` closes, changing only when another `[[ PARAM …` updates them.  A bare `[[` (no params) preserves the prevailing setting and only opens a bracket region.
+- `]]` does not carry parameters and does not reset settings; it only closes the bracket region.
 
 Currently defined parameters:
 
@@ -56,7 +59,7 @@ Currently defined parameters:
 | `DATA <line>`    | **Output sink** (type-2 only). All assembled bytes from this `[[`-opened region are concatenated into a single BASIC `DATA` statement on the given line number, rendered byte-per-value as `#XX,#XX,…`.  Pairs with a pre-existing `DATA 0` (or similar placeholder) at the target line; the placeholder's value is overwritten in full.  See *Output Sinks* below. |
 | `CSAVE "<name>" [AUTO]` | **Output sink** (type-2 only). Packages the region's assembled bytes as a standalone machine-code TAP block named `<name>`, surfaced in the UI as a new virtual tape (same treatment as a loaded `.tap`).  `AUTO` sets the TAP header's autorun flag.  Name is any non-empty byte string that doesn't contain a NUL (spaces and symbols like `&` are fine).  See *Output Sinks* below. |
 
-Per-line granularity: the render mode applied to a given DATA line is the mode prevailing at the start of its first active statement.  Mid-annotation mode changes (`' LDA $9800:[[ BYTES`) take effect at the next line, not within the current annotation's emission.  In practice, mode changes are best placed on a dedicated REM line.
+Per-line granularity: the render mode applied to a given DATA line is the mode prevailing at the start of its first non-marker statement.  Mid-annotation mode changes (`' LDA $9800:[[ BYTES`) take effect at the next line, not within the current annotation's emission.  In practice, mode changes are best placed on a dedicated REM line.
 
 ### Output Sinks
 
@@ -145,9 +148,9 @@ Using a label whose block has no `ORG` in either of these contexts is an error. 
 
 **Relative branches stay within the block.**  `BNE LABEL`, `BEQ LABEL`, etc. must branch to a label in the **same block** as the branch.  A branch that would cross a block boundary is an error — the signed-byte offset would be meaningless.  REL to a label in the same block is valid whether the block has an `ORG` or not.
 
-**Skipping non-code lines.**  A bounded-region skip (`]]` before the non-code line and `[[` after it) removes the line from the assembler's view entirely, so the current block continues across it.  This is how you tell the tool "these DATA values aren't assembly — please ignore them for assembly purposes".
+**Skipping non-code lines.**  Pure-data DATA lines that aren't meant for the assembler simply omit the `'` annotation — without an annotation there's nothing for the assembler to interpret and the line's bytes are left untouched.  For DATA lines that need to carry a human-readable note alongside data values, prefix the note with `*` (the end-of-annotation comment marker) so the assembler treats the rest of the annotation as prose: `DATA #21,#34,#56 ' * splash byte pattern`.
 
-**Strict vs lenient enforcement.**  The behaviour above is the *lenient* default and applies when the program contains no `[[` / `]]` markers anywhere (full backward compatibility).  When the program does contain markers, the tool switches to **strict mode**: a DATA line inside an active region that produces no assembled output is a **hard error** at that line, rather than silently ending the block.  The rationale: `[[` is the user declaring "everything in this region is assembler"; a no-output DATA line inside is almost certainly a mistake (forgotten annotation, typo'd mnemonic that parsed as a comment, or stray non-code DATA that should have been skipped).  The fix is one of: annotate with instructions, skip it with `]]` and `[[`, or move any pure directive (`ORG`, label, equate) onto a REM line.
+**Strict vs lenient enforcement.**  By default the assembler operates leniently: a DATA line that produces no assembled output silently ends the current block (PC-break), and downstream ABS uses of later labels error only if actually affected.  Wrapping a stretch of code in `[[ … ]]` opts that stretch into **strict mode**: a DATA line inside that produces no assembled bytes is a **hard error** at that line.  The rationale: `[[` is the user declaring "this region is assembler"; a no-output DATA line inside is almost certainly a mistake (forgotten annotation, typo'd mnemonic that parsed as a comment, or stray non-code DATA inside what was meant to be all-code).  The fix is one of: annotate with instructions, move any pure directive (`ORG`, label, equate) onto a REM line, or close the strict region with `]]` before the non-code line and re-open with `[[` after.
 
 ## Branches
 

@@ -777,141 +777,94 @@ test('no markers → process everything (backward compatible)', () => {
   return null;
 });
 
-test('[[ alone: lines before skipped, lines from [[ onward processed', () => {
-  const p = mkProgram([
-    "10 DATA 0 ' LDA #$AA",              // before [[, not processed
-    "20 REM ' [[",
-    "30 DATA 0 ' LDA #$BB",              // inside region
-    "40 DATA 0 ' RTS",                    // inside region
-  ]);
-  const r = applyAssembler(p);
-  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (r.linesPatched.includes(0)) return `line 0 (before [[) should not be patched`;
-  if (!r.linesPatched.includes(2)) return `line 2 should be patched`;
-  if (!r.linesPatched.includes(3)) return `line 3 should be patched`;
-  // Line 0's DATA body should still read "0" (original), not #AA.
-  if (!/^10 DATA 0 /.test(p.lines[0].v)) return `line 0 was modified: ${p.lines[0].v}`;
-  return null;
-});
+// ── Option-2 bounded-region semantics ──────────────────────────────────
+//
+// Under the option-2 spec, `[[` / `]]` markers no longer gate annotation
+// processing — all non-marker statements are passed to the assembler
+// regardless of their position relative to markers.  Markers retain
+// three jobs:
+//   (a) strip themselves from the annotation before it reaches the
+//       assembler;
+//   (b) carry sticky parameters (`[[ WORDS` / `[[ BYTES`) and open
+//       output sinks (`[[ DATA <line>`, `[[ CSAVE "name"`);
+//   (c) delimit regions where the strict zero-emit DATA check applies
+//       (covered separately under the 'strict ([[): ...' tests).
+//
+// The tests in this section assert (a) and the lenient-everywhere
+// processing that follows from removing the old gate behaviour.  Tests
+// for (b) live with the CSAVE / DATA-output regions; tests for (c) live
+// with the strict-mode tests below.
 
-test('[[ and ]] bracket a region', () => {
+test('lines outside [[ ... ]] are processed (option-2 default)', () => {
+  // Under the previous spec, presence of any `[[` in the program flipped
+  // the initial state to `off` and lines outside `[[ ... ]]` were
+  // silently skipped.  Under option-2 they're processed leniently —
+  // bracket regions only gate the strict zero-emit DATA check, not
+  // whether annotations are seen at all.
   const p = mkProgram([
-    "10 DATA 0 ' LDA #$AA",              // before [[: not processed
+    "10 DATA 0 ' LDA #$AA",              // outside any region — patched
     "20 REM ' [[",
-    "30 DATA 0 ' LDA #$BB",              // inside: processed
+    "30 DATA 0 ' LDA #$BB",              // inside region — patched
     "40 REM ' ]]",
-    "50 DATA 0 ' LDA #$CC",              // after ]]: not processed
+    "50 DATA 0 ' LDA #$CC",              // outside again — also patched
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (r.linesPatched.includes(0)) return `line 0 before [[ should not be patched`;
-  if (!r.linesPatched.includes(2)) return `line 2 inside region should be patched`;
-  if (r.linesPatched.includes(4)) return `line 4 after ]] should not be patched`;
-  if (!/^30 DATA #A9,#BB/.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  if (!r.linesPatched.includes(0)) return `line 0 should be patched`;
+  if (!r.linesPatched.includes(2)) return `line 2 should be patched`;
+  if (!r.linesPatched.includes(4)) return `line 4 should be patched`;
+  if (!/^10 DATA #A9,#AA/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  if (!/^30 DATA #A9,#BB/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
+  if (!/^50 DATA #A9,#CC/.test(p.lines[4].v)) return `line 4: ${p.lines[4].v}`;
   return null;
 });
 
-test('[[ combined with instruction on same line', () => {
+test('mid-annotation markers are stripped, statements on either side kept', () => {
+  // `]]` mid-annotation no longer causes statements after it to be
+  // dropped — under option-2 the marker is stripped and both halves of
+  // the annotation reach the assembler.
   const p = mkProgram([
-    "10 DATA 0 ' LDA #$AA",              // before [[: not processed
-    "20 DATA 0 ' [[:LDA #$BB",           // [[ activates mid-annotation, LDA is in-region
+    "10 DATA 0 ' LDA #$BB:]]:LDA #$CC",  // both LDA statements emit bytes
+    "20 DATA 0 ' [[:LDA #$DD",           // [[ stripped, LDA emits
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (r.linesPatched.includes(0)) return `line 0 should not be patched`;
-  if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
-  if (!/^20 DATA #A9,#BB/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  if (!/^10 DATA #A9,#BB,#A9,#CC/.test(p.lines[0].v)) return `line 0: ${p.lines[0].v}`;
+  if (!/^20 DATA #A9,#DD/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
   return null;
 });
 
-test('marker mid-line: drops only statements after ]]', () => {
+test('repeated markers don\'t error (idempotent toggles)', () => {
+  // `[[ [[` and `]] ]]` — the bracket-region tracker treats repeated
+  // markers as harmless re-toggles.  Under option-2 there's no observable
+  // gating effect from the markers; this is mostly a smoke test that the
+  // walker doesn't trip on repeats.
   const p = mkProgram([
-    "10 DATA 0 ' [[",
-    "20 DATA 0 ' LDA #$BB:]]:LDA #$CC",  // LDA #$BB active, then ]] deactivates, LDA #$CC dropped
-  ]);
-  const r = applyAssembler(p);
-  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  // Line 1 patched with LDA #$BB (2 bytes), the LDA #$CC is dropped.
-  if (!/^20 DATA #A9,#BB/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
-  // Should NOT contain more than just the LDA #$BB bytes.
-  if (/#A9,#BB,#A9,#CC/.test(p.lines[1].v)) return `LDA #$CC after ]] wasn't dropped: ${p.lines[1].v}`;
-  return null;
-});
-
-test('multiple non-contiguous regions', () => {
-  const p = mkProgram([
-    "10 REM ' [[",
-    "20 DATA 0 ' LDA #$11",              // region 1: processed
-    "30 REM ' ]]",
-    "40 DATA 0 ' LDA #$22",              // gap: not processed
-    "50 REM ' [[",
-    "60 DATA 0 ' LDA #$33",              // region 2: processed
-  ]);
-  const r = applyAssembler(p);
-  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
-  if (r.linesPatched.includes(3))  return `line 3 in gap should not be patched`;
-  if (!r.linesPatched.includes(5)) return `line 5 should be patched`;
-  if (!/^20 DATA #A9,#11/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
-  if (!/^40 DATA 0/.test(p.lines[3].v))       return `line 3 was modified: ${p.lines[3].v}`;
-  if (!/^60 DATA #A9,#33/.test(p.lines[5].v)) return `line 5: ${p.lines[5].v}`;
-  return null;
-});
-
-test('solo ]] at top disables everything (kill switch)', () => {
-  // Presence of ]] anywhere forces initial state = inactive.  With no [[
-  // to re-activate, nothing gets processed.
-  const p = mkProgram([
-    "10 REM ' ]]",
+    "10 REM ' [[:[[",
     "20 DATA 0 ' LDA #$BB",
-    "30 DATA 0 ' RTS",
+    "30 REM ' ]]:]]",
+    "40 DATA 0 ' LDA #$CC",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (r.linesPatched.length !== 0) return `nothing should be patched, got ${JSON.stringify(r.linesPatched)}`;
+  if (!/^20 DATA #A9,#BB/.test(p.lines[1].v)) return `line 1: ${p.lines[1].v}`;
+  if (!/^40 DATA #A9,#CC/.test(p.lines[3].v)) return `line 3: ${p.lines[3].v}`;
   return null;
 });
 
 test('markers interact with back-patch directives', () => {
-  // [[ on a CALL line, followed by the back-patch directive — the marker
-  // is stripped by the filter, leaving ".LOOPA" which is a valid
-  // back-patch annotation.
+  // `[[` on a CALL line, followed by the back-patch directive — the
+  // marker is stripped by the filter, leaving `.LOOPA` which is a valid
+  // back-patch annotation.  Under option-2 this works regardless of the
+  // line's position relative to other markers.
   const p = mkProgram([
     "10 REM ' [[:ORG $9800:.LOOPA",
     "20 DATA 0 ' RTS",
-    "30 CALL #0000 ' [[:.LOOPA",         // [[ (no-op — already active), then .LOOPA
+    "30 CALL #0000 ' [[:.LOOPA",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
   if (!/^30 CALL #9800/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
-  return null;
-});
-
-test(']] before any [[ in a program: nothing processed', () => {
-  // Since ANY marker triggers initial-inactive, an early ]] doesn't do
-  // anything (state already off) and without a later [[ to open, nothing
-  // is processed.
-  const p = mkProgram([
-    "10 DATA 0 ' LDA #$BB",
-    "20 REM ' ]]",
-    "30 DATA 0 ' RTS",
-  ]);
-  const r = applyAssembler(p);
-  if (r.linesPatched.length !== 0) return `nothing should be patched`;
-  return null;
-});
-
-test('repeated markers are idempotent', () => {
-  // [[ [[ is equivalent to just [[; ]] ]] is equivalent to just ]].
-  const p = mkProgram([
-    "10 REM ' [[:[[",
-    "20 DATA 0 ' LDA #$BB",              // active from first [[
-    "30 REM ' ]]:]]",
-    "40 DATA 0 ' LDA #$CC",              // inactive from first ]]
-  ]);
-  const r = applyAssembler(p);
-  if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
-  if (r.linesPatched.includes(3))  return `line 3 should not be patched`;
   return null;
 });
 
@@ -1885,8 +1838,14 @@ test('type-2: stray BASIC line inside region surfaces assembler error', () => {
 });
 
 test('type-2: target line preserves existing annotation', () => {
+  // The annotation uses `*` (end-of-annotation comment marker) so the
+  // assembler treats the rest as prose and emits no bytes.  Under the
+  // option-2 spec all annotations are processed regardless of bracket
+  // state, so prose comments on a DATA-output target line need `*` to
+  // be skipped — this is the idiomatic way to keep human notes alongside
+  // an auto-replaced `DATA` placeholder.
   const p = mkProgram([
-    "10 DATA 0 ' user note",
+    "10 DATA 0 ' * user note",
     "100 [[ DATA 10",
     "110 ORG $9800",
     "120 RTS",

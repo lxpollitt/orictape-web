@@ -99,13 +99,15 @@ export function applyAssembler(
   prog:       Program,
   startAddr?: number,
 ): AsmApplyResult {
-  // 0. Bounded-region pre-filter (Phase 6b).  Walks every annotation in
-  //    program order, tracking a single active/inactive state that
-  //    `[[` and `]]` markers flip.  The initial state is *inactive* if
-  //    any marker appears anywhere in the program, else *active* (the
-  //    fully-backward-compatible default).  The result is a per-line
-  //    array of filtered annotation strings — markers stripped, inactive
-  //    statements dropped — that feeds both Phase 5 and Phase 6.
+  // 0. Bounded-region pre-walk (Phase 6b).  Walks every annotation in
+  //    program order, tracking a single inBracket flag that `[[` and
+  //    `]]` markers flip.  Initial state is `false` (outside any
+  //    region).  Non-marker statements are passed through unchanged
+  //    regardless of the flag — bracket regions don't gate processing
+  //    under the option-2 spec, only the strict zero-emit DATA check.
+  //    Marker statements (`[[`, `]]`, `[[ <param>`) are stripped from
+  //    the per-line filtered annotation strings that feed both Phase 5
+  //    and Phase 6.
   //
   //    Annotation extraction is kind-aware: REM lines only yield a
   //    non-empty annotation when the body starts with `'` (so
@@ -128,8 +130,13 @@ export function applyAssembler(
     }
   }
   const rawAnnotations  = prog.lines.map((l, i) => extractAnnotation(l.v, hostKinds[i]));
-  const anyMarker       = rawAnnotations.some(a => annotationContainsMarker(a));
-  let   activeState     = !anyMarker;
+  // Track whether each line is inside an open `[[ ... ]]` region.
+  // Under the option-2 semantics this only gates the strict zero-emit
+  // DATA check — not whether annotations are processed (they always
+  // are).  Initial state is `false` (outside any region); the first
+  // `[[` flips it on, the next `]]` flips it off.  Programs with no
+  // markers stay `false` throughout, so the strict check never fires.
+  let   inBracketState  = false;
   // Sticky settings from `[[ PARAM ...`.  Default BYTES — every
   // byte of each 2-byte operand gets its own `#XX` entry in the
   // DATA line, one-to-one with memory layout.  `[[ WORDS` opts
@@ -138,16 +145,16 @@ export function applyAssembler(
   let   wordModeState   = false;
   const filteredAnnots: string[] = [];
   /** Per-line render mode — the wordMode prevailing at the start of
-   *  this annotation's first active statement.  Used by
+   *  this annotation's first non-marker statement.  Used by
    *  `buildNewDataLineText` to decide byte-wise vs word-wise emission. */
   const lineWordModes:  boolean[] = [];
-  /** Per-line "is this line sitting in an active region" flag.  True
-   *  if active state was on at the start of the line, OR the line
-   *  itself opened a region via `[[`.  Used by the strict-mode check
-   *  below to distinguish "zero-emit DATA inside a user-declared
-   *  assembler region" (error) from "zero-emit DATA outside any
-   *  assembler region" (silently skipped). */
-  const lineInActiveRegion: boolean[] = [];
+  /** Per-line "is this line sitting inside an open `[[ ... ]]` region"
+   *  flag.  True iff the inBracket state was on at the start of the
+   *  line.  Used by the strict-mode check below to distinguish "zero-
+   *  emit DATA inside a user-declared assembler region" (error) from
+   *  "zero-emit DATA outside any bracket region" (lenient — silently
+   *  skipped). */
+  const lineInBracketRegion: boolean[] = [];
   /** Per-line "did this annotation contain a `]]` close marker?"
    *  flag.  Passed to the assembler as `blockEndAfterLine` so any
    *  active named block (`ORG $xxxx .NAME`) closes at the user-
@@ -186,19 +193,20 @@ export function applyAssembler(
   for (let i = 0; i < rawAnnotations.length; i++) {
     const line    = prog.lines[i];
     const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
-    const beforeActive = activeState;
-    const res = filterStatementsByState(rawAnnotations[i], activeState, wordModeState);
+    const beforeInBracket = inBracketState;
+    const res = filterStatementsByState(rawAnnotations[i], inBracketState, wordModeState);
     filteredAnnots.push(res.filtered);
     lineWordModes.push(res.lineWordMode);
-    // A line is "in an active region" if it started active (carrying
-    // state from a prior `[[`).  Lines whose annotation itself flips
-    // the active state are edge cases handled by the filter's normal
-    // statement-level tracking — the strict-mode gate uses only the
-    // coarse "was this line sitting inside an open region?" view.
-    lineInActiveRegion.push(beforeActive);
+    // A line is "in a bracket region" if it started inside one
+    // (carrying state from a prior `[[`).  Lines whose annotation
+    // itself flips the bracket state are edge cases handled by the
+    // filter's normal statement-level tracking — the strict-mode gate
+    // uses only the coarse "was this line sitting inside an open
+    // region?" view.
+    lineInBracketRegion.push(beforeInBracket);
     blockEndAfterLine.push(res.sawCloseMarker);
-    activeState   = res.active;
-    wordModeState = res.wordMode;
+    inBracketState = res.inBracket;
+    wordModeState  = res.wordMode;
     // Track output-sink regions.  A `[[ DATA <line>` or
     // `[[ CSAVE "name"` opens one; the next `]]` closes it.  The
     // open line and close line are both considered part of the
@@ -357,30 +365,29 @@ export function applyAssembler(
       errors.push({ lineIdx: i, lineNum, message: e.message });
     }
 
-    // Strict mode: when the program contains any `[[` or `]]` marker,
-    // the user has explicitly declared one or more assembler regions.
-    // A DATA line inside an active region that emits zero assembled
-    // bytes is almost certainly a mistake (forgotten annotation,
-    // comment-only annotation, or stray non-code DATA inside what was
-    // meant to be an all-code region) — surface it as an error so the
-    // user is pushed to either annotate it with instructions, wrap it
-    // in `]]`/`[[` to skip, or move any ORG-only statement onto a REM
-    // line where zero-emit annotations are idiomatic.  In lenient mode
-    // (no markers anywhere) the same situation just triggers a silent
-    // PC-break; downstream ABS uses of later labels will error if
-    // affected.
-    // Target DATA lines for type-2 `[[ DATA <line>` output sinks
-    // are EXPECTED to be placeholder DATA (often just `DATA 0`)
-    // because their contents will be fully replaced by the
-    // assembled bytes from the region.  Exclude them from the
-    // strict-mode "must contain non-zero bytes" check.
+    // Strict-mode zero-emit DATA check.  Inside a `[[ ... ]]` region
+    // the user has explicitly declared "this stretch is assembler" —
+    // a DATA line that emits zero bytes is almost certainly a mistake
+    // (forgotten annotation, comment-only annotation, or typo'd
+    // mnemonic that parsed as a comment).  Surface it as an error so
+    // the user is pushed to annotate it, wrap it in `]]`/`[[` to skip
+    // the strict check, or move any pure directive (ORG, label,
+    // equate) onto a REM line where zero-emit is idiomatic.
+    //
+    // Outside any bracket region the same situation is lenient: the
+    // assembler triggers a silent PC-break and downstream ABS uses of
+    // later labels will error only if actually affected.
+    //
+    // Target DATA lines for type-2 `[[ DATA <line>` output sinks are
+    // EXPECTED to be placeholder DATA (often just `DATA 0`) — their
+    // contents get fully replaced by the assembled bytes from the
+    // region.  Exclude them from the check.
     const isDataOutputTarget = dataOutputRegions.some(
       r => findLineIdxByLineNum(prog, r.targetLine) === i,
     );
-    if (anyMarker &&
-        isDataLine[i] &&
+    if (isDataLine[i] &&
         state.bytes.length === 0 &&
-        lineInActiveRegion[i] &&
+        lineInBracketRegion[i] &&
         !isDataOutputTarget) {
       errors.push({
         lineIdx: i, lineNum,
@@ -538,9 +545,10 @@ export function applyAssembler(
   }
 
   // 5. Phase 6: walk every line and apply back-patch directives.  Uses the
-  //    filtered annotation so lines outside the active region are ignored
-  //    and markers embedded in the annotation are transparent.  Type-2
-  //    body / open / close lines are skipped entirely: inside a
+  //    filtered annotation so bracket-region markers embedded in the
+  //    annotation are transparent (under option-2 semantics, non-marker
+  //    statements are always processed regardless of bracket state).
+  //    Type-2 body / open / close lines are skipped entirely: inside a
   //    `[[ ... ]]` bare-assembler region, the whole line is assembler
   //    source, not BASIC with a back-patch annotation.  The byte-wise
   //    token scan in `countBackPatchTokens` would otherwise get fooled
@@ -1227,9 +1235,10 @@ function rewriteLineForBackPatch(
 
 /** Orchestrate back-patching for one line: eligibility check, directive
  *  parsing, count check, rewrite, apply.  Takes the pre-filtered
- *  annotation text (bounded-region markers stripped, inactive statements
- *  already removed) so out-of-region lines never reach the directive
- *  parser.  Returns whether the line was patched and any errors to
+ *  annotation text (bounded-region markers stripped) so callers don't
+ *  need to handle markers themselves; under option-2 semantics no
+ *  non-marker statements are removed by the filter.  Returns whether
+ *  the line was patched and any errors to
  *  surface. */
 function applyBackPatchesToLine(
   prog:       Program,
@@ -1448,8 +1457,7 @@ function annotationHasOrg(annotation: string): boolean {
 
 /** Split an annotation into raw statement texts, `'c`-literal aware
  *  AND `"..."`-string aware (the latter for `DB` data values),
- *  stopping at the first `*` end-of-annotation comment.  Shared
- *  between {@link annotationContainsMarker} and
+ *  stopping at the first `*` end-of-annotation comment.  Used by
  *  {@link filterStatementsByState}.  String-aware splitting matters
  *  because a `DB "abc:def"` value legitimately contains `:` as a
  *  string char, not a statement separator; same for `;` and `*`. */
@@ -1476,43 +1484,34 @@ function splitAnnotationStatements(annotation: string): string[] {
   return out;
 }
 
-/** Check whether an annotation contains a bounded-region marker (`[[`
- *  with or without params, or `]]`) as a top-level statement.  Used to
- *  decide the initial active state for the program walk — if any
- *  marker exists anywhere, the program starts inactive; otherwise
- *  fully-backward-compatible active.  Invalid `[[ PARAM` uses count as
- *  markers here (so the program still starts inactive); the actual
- *  parse error surfaces during the walk. */
-function annotationContainsMarker(annotation: string): boolean {
-  for (const raw of splitAnnotationStatements(annotation)) {
-    const c = classifyStatement(raw);
-    if (c.kind === 'open' || c.kind === 'close' || c.kind === 'error') return true;
-  }
-  return false;
-}
-
-/** Walk an annotation's statements (separated by `:` or `;`) and filter
- *  by the bounded-region state.  Tracks two pieces of state:
+/** Walk an annotation's statements (separated by `:` or `;`) and strip
+ *  bounded-region marker statements (`[[`, `]]`, `[[ <param>`).  All
+ *  non-marker statements are passed through unchanged.  Tracks two
+ *  pieces of state:
  *
- *   - **active**: `[[` activates, `]]` deactivates.  Inactive and marker
- *     statements are dropped; active non-marker statements are kept.
+ *   - **inBracket**: `[[` opens a bracket region, `]]` closes it.  Used
+ *     by the caller only to gate the strict zero-emit DATA check —
+ *     non-marker statements are NOT filtered out based on this flag
+ *     (lenient processing applies everywhere; `[[ ... ]]` opts a
+ *     region into strict checking on top).
  *   - **wordMode**: sticky — `[[ WORDS` / `[[ BYTES` set it; bare `[[`
  *     or `]]` leave it alone.  Persists across annotations and past
  *     `]]` closes.  Used by the DATA-line renderer, not by the
  *     assembler's byte emission.
  *
- *  Returns the filtered annotation (markers stripped, may be empty),
- *  the post-walk active and wordMode states for the next annotation,
- *  any param-parse errors, and the wordMode **at the start of the
- *  annotation** (for rendering bytes produced by this annotation's
- *  statements).  Trailing `*` comments are dropped along the way. */
+ *  Returns the marker-stripped annotation (always preserves all
+ *  non-marker statements), the post-walk inBracket and wordMode states
+ *  for the next annotation, any param-parse errors, and the wordMode
+ *  **at the start of the annotation** (for rendering bytes produced by
+ *  this annotation's statements).  Trailing `*` comments are dropped
+ *  along the way. */
 function filterStatementsByState(
-  annotation:       string,
-  initialActive:    boolean,
-  initialWordMode:  boolean,
+  annotation:        string,
+  initialInBracket:  boolean,
+  initialWordMode:   boolean,
 ): {
   filtered:        string;
-  active:          boolean;
+  inBracket:       boolean;
   wordMode:        boolean;
   lineWordMode:    boolean;
   sawCloseMarker:  boolean;
@@ -1521,12 +1520,12 @@ function filterStatementsByState(
 } {
   const statements = splitAnnotationStatements(annotation);
 
-  let active   = initialActive;
-  let wordMode = initialWordMode;
+  let inBracket = initialInBracket;
+  let wordMode  = initialWordMode;
   // The per-line render mode is the prevailing wordMode at the point
-  // the first active non-marker statement begins.  If the annotation
-  // has no such statement the value doesn't matter — use the incoming
-  // mode as the obvious default.
+  // the first non-marker statement begins.  If the annotation has no
+  // such statement the value doesn't matter — use the incoming mode
+  // as the obvious default.
   let lineWordMode         = initialWordMode;
   let lineWordModeCaptured = false;
   // `sawCloseMarker` lets the caller know a `]]` appeared on this
@@ -1547,25 +1546,25 @@ function filterStatementsByState(
   for (const raw of statements) {
     const c = classifyStatement(raw);
     if (c.kind === 'open') {
-      active = true;
+      inBracket = true;
       if (c.params.wordMode !== undefined) wordMode = c.params.wordMode;
       if (c.params.output   !== undefined) openedOutput = c.params.output;
       continue;
     }
-    if (c.kind === 'close') { active = false; sawCloseMarker = true; continue; }
+    if (c.kind === 'close') { inBracket = false; sawCloseMarker = true; continue; }
     if (c.kind === 'error') { errors.push(c.message); continue; }
-    // plain statement
-    if (active) {
-      if (!lineWordModeCaptured) {
-        lineWordMode = wordMode;
-        lineWordModeCaptured = true;
-      }
-      kept.push(raw);
+    // Plain (non-marker) statement — always kept under the option-2
+    // semantics: bracket regions no longer gate processing, only the
+    // strict zero-emit DATA check (handled by the caller).
+    if (!lineWordModeCaptured) {
+      lineWordMode = wordMode;
+      lineWordModeCaptured = true;
     }
+    kept.push(raw);
   }
 
   return {
     filtered: kept.join(':'),
-    active, wordMode, lineWordMode, sawCloseMarker, openedOutput, errors,
+    inBracket, wordMode, lineWordMode, sawCloseMarker, openedOutput, errors,
   };
 }
