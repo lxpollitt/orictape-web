@@ -608,6 +608,32 @@ export function applyAssembler(
     if (res.patched) linesPatched.push(i);
   }
 
+  // 6. `>BASICEND` runtime-overlap assertions.  Each ORG that carried
+  //    the `>BASICEND` decoration declared "this address must be
+  //    strictly greater than the BASIC program's last byte".  The
+  //    check runs here, after Phase 5 patches and Phase 6 back-patches
+  //    have settled the final BASIC byte count — `applyLineEdit` keeps
+  //    `prog.header.endAddr` in sync via `adjustHeaderEndAddr`, so by
+  //    this point `endAddr - 1` reliably names the last byte address
+  //    of the BASIC program in memory (inclusive of all line and
+  //    end-of-program null terminators).  Reported errors flow into
+  //    the global gate below and suppress TAP emission, since shipping
+  //    a TAP whose CLOAD would clobber the host BASIC program is the
+  //    exact failure mode this check exists to catch.
+  const basicEnd = prog.header.endAddr - 1;
+  for (const run of orgRuns) {
+    if (!run.assertAboveBasicEnd) continue;
+    if (run.startAddr > basicEnd) continue;
+    const line    = prog.lines[run.lineIdx];
+    const lineNum = prog.bytes[line.firstByte + 2].v
+                  + prog.bytes[line.firstByte + 3].v * 256;
+    errors.push({
+      lineIdx: run.lineIdx, lineNum,
+      message: `ORG $${run.startAddr.toString(16).toUpperCase().padStart(4, '0')} >BASICEND assertion failed: `
+             + `BASICEND is $${basicEnd.toString(16).toUpperCase().padStart(4, '0')}`,
+    });
+  }
+
   // Global gate for TAP generation: per the user's preference, any
   // error anywhere in the program suppresses all TAP creation.  Per-
   // line DATA patches are independently gated (per-line `state.errors`

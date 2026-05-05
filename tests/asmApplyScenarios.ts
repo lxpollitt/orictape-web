@@ -120,7 +120,14 @@ function mkProgram(lineTexts: string[]): Program {
       fileType:  0,
       autorun:   false,
       startAddr: START_ADDR,
-      endAddr:   nextMemAddr,
+      // `endAddr` is the real-decoder convention: the first byte
+      // address past all program data, INCLUDING the two end-of-
+      // program 0x00 0x00 terminators we just pushed.  So bump
+      // nextMemAddr by 2 to cover them.  Without this, code that
+      // reads `endAddr - 1` as "address of last program byte" would
+      // land on the byte before the first terminator, which is
+      // wrong by the user's BASICEND definition.
+      endAddr:   nextMemAddr + 2,
     },
   };
 }
@@ -2209,6 +2216,161 @@ test('[[ DATA N also rejected on type-1 inline [[', () => {
   if (r.errors.length === 0) return 'expected error';
   if (!/only valid on a type-2/.test(r.errors[0].message)) {
     return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+// ── ORG >BASICEND runtime-overlap assertions ───────────────────────────────
+
+test('ORG >BASICEND: ORG well above BASICEND passes', () => {
+  // Program ends well below $9800 — the assertion succeeds and the
+  // CSAVE TAP is emitted normally.
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $9800 >BASICEND",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps.length !== 1) return `expected 1 TAP, got ${r.generatedTaps.length}`;
+  return null;
+});
+
+test('ORG >BASICEND: ORG inside BASIC program errors', () => {
+  // ORG $0501 is the absolute start of the BASIC program — guaranteed
+  // to be inside, regardless of program size.
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $0501 >BASICEND",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an assertion error';
+  if (!/>BASICEND assertion failed/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  // Error suppresses TAP emission via the global gate.
+  if (r.generatedTaps.length !== 0) return `expected 0 TAPs, got ${r.generatedTaps.length}`;
+  return null;
+});
+
+// Boundary tests use a probe-then-rebuild strategy: assemble once with
+// a placeholder ORG that's guaranteed inside BASIC (forcing the
+// assertion error, whose message contains BASICEND), then rebuild
+// with ORG set to exactly BASICEND or BASICEND+1.  Both runs share the
+// same source-line shape EXCEPT the ORG address, so we pad the ORG
+// hex to four digits to keep the rebuilt line the same length as the
+// probe — otherwise the program shrinks/grows by a few bytes between
+// runs and BASICEND moves with it, defeating the boundary check.
+const padOrg = (n: number): string =>
+  '$' + n.toString(16).toUpperCase().padStart(4, '0');
+
+test('ORG >BASICEND: ORG = BASICEND fails (strictly-greater-than)', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $0501 >BASICEND",            // probe at program start: guaranteed inside
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const probe = applyAssembler(p);
+  const m = probe.errors.find(e => /BASICEND is/.test(e.message))
+                       ?.message?.match(/BASICEND is \$([0-9A-F]+)/i);
+  if (!m) return `probe didn't produce expected error: ${probe.errors.map(e => e.message).join('; ') || '(none)'}`;
+  const basicEnd = parseInt(m[1], 16);
+  const p2 = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    `110 ORG ${padOrg(basicEnd)} >BASICEND`,
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p2);
+  if (r.errors.length === 0) return 'expected an assertion error (ORG = BASICEND should fail)';
+  if (!/>BASICEND assertion failed/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('ORG >BASICEND: ORG = BASICEND + 1 passes (boundary)', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $0501 >BASICEND",            // probe at program start: guaranteed inside
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const probe = applyAssembler(p);
+  const m = probe.errors.find(e => /BASICEND is/.test(e.message))
+                       ?.message?.match(/BASICEND is \$([0-9A-F]+)/i);
+  if (!m) return `probe didn't produce expected error: ${probe.errors.map(e => e.message).join('; ') || '(none)'}`;
+  const basicEnd = parseInt(m[1], 16);
+  const p2 = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    `110 ORG ${padOrg(basicEnd + 1)} >BASICEND`,
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p2);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps.length !== 1) return `expected 1 TAP, got ${r.generatedTaps.length}`;
+  return null;
+});
+
+test('ORG (no assertion): low ORG silently accepted (status quo)', () => {
+  // Without the >BASICEND decoration, the low ORG is accepted —
+  // user is opting out of the runtime-overlap check.  This guards
+  // against the assertion accidentally becoming always-on.
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $0501",                      // very low, would fail with >BASICEND
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.generatedTaps.length !== 1) return `expected 1 TAP, got ${r.generatedTaps.length}`;
+  return null;
+});
+
+test('ORG >BASICEND: combines with .BLOCKNAME in either order', () => {
+  // Both decorations on the same ORG, in both orders.  Each program
+  // declares the same ENTRY label and references it from a back-patch
+  // CALL — verifies the parser accepted the decoration and the block
+  // name worked.
+  for (const orgLine of [
+    "110 ORG $9800 .ENTRY >BASICEND",
+    "110 ORG $9800 >BASICEND .ENTRY",
+  ]) {
+    const p = mkProgram([
+      "10 CALL #0 ' .ENTRY",
+      "100 [[ CSAVE \"GAME\"",
+      orgLine,
+      "120 RTS",
+      "130 ]]",
+    ]);
+    const r = applyAssembler(p);
+    if (r.errors.length !== 0) return `[${orgLine}] unexpected errors: ${r.errors[0].message}`;
+    // The CALL on line 10 should have been back-patched to $9800.
+    if (!/^10 CALL #9800/.test(p.lines[0].v)) {
+      return `[${orgLine}] back-patch missing: ${p.lines[0].v}`;
+    }
+  }
+  return null;
+});
+
+test('ORG >BASICEND: error message names both addresses in $XXXX form', () => {
+  const p = mkProgram([
+    "100 [[ CSAVE \"GAME\"",
+    "110 ORG $0501 >BASICEND",
+    "120 RTS",
+    "130 ]]",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an error';
+  // Format: `ORG $0501 >BASICEND assertion failed: BASICEND is $XXXX`
+  if (!/^ORG \$[0-9A-F]{4} >BASICEND assertion failed: BASICEND is \$[0-9A-F]{4}$/i.test(r.errors[0].message)) {
+    return `wrong format: ${r.errors[0].message}`;
   }
   return null;
 });

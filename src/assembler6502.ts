@@ -537,7 +537,7 @@ type Statement =
   | { kind: 'empty' }
   | { kind: 'label';  name: string }
   | { kind: 'equate'; name: string; value: Resolved }
-  | { kind: 'org';    address: number; blockName?: string }
+  | { kind: 'org';    address: number; blockName?: string; assertAboveBasicEnd?: boolean }
   | { kind: 'instr';  mnemonic: string; op: ParsedOperand }
   | { kind: 'db';     values: DbValue[] }
   | { kind: 'error';  message: string };
@@ -564,30 +564,66 @@ function parseStatement(raw: string): Statement {
     return { kind: 'error', message: `invalid declaration: ${t}` };
   }
 
-  // `ORG <literal> [.BLOCKNAME]` — case-insensitive.  The optional
-  // trailing `.NAME` names the assembler block that begins at this
-  // ORG: the tool declares `NAME` = start address and `NAME_END` =
-  // inclusive last byte of the block (populated when the block ends,
-  // which happens at the next ORG, a zero-output DATA line, a `]]`
-  // close marker, or end of program).
+  // `ORG <literal> [.BLOCKNAME] [>BASICEND]` — case-insensitive.  Two
+  // optional decorations follow the address, in either order:
+  //   - `.BLOCKNAME` names the assembler block that begins at this
+  //     ORG: the tool declares `NAME` = start address and `NAME_END`
+  //     = inclusive last byte of the block (populated when the block
+  //     ends, which happens at the next ORG, a zero-output DATA
+  //     line, a `]]` close marker, or end of program).
+  //   - `>BASICEND` is a runtime-overlap assertion: at the end of
+  //     re-assembly, the asmApply layer checks that this ORG's
+  //     address is strictly greater than the address of the BASIC
+  //     program's last byte.  Used when the assembled machine code
+  //     is intended to be CLOAD'd at runtime alongside the BASIC
+  //     program — this catches the case where the BASIC program has
+  //     grown into the space the user reserved for the machine code.
+  //     `BASICEND` is a contextual keyword recognised only here, not
+  //     a general symbol.  Whitespace around `>` is optional.
   const orgM = t.match(/^[Oo][Rr][Gg](?:\s+(.*))?$/);
   if (orgM) {
     const rest = (orgM[1] ?? '').trim();
     if (rest.length === 0) return { kind: 'error', message: 'ORG requires an address' };
-    // Split off optional trailing `.BLOCKNAME`.
+    // Peel the suffixes off the end one at a time, in either order.
+    // Each may appear at most once.  Parsing terminates when neither
+    // suffix matches; whatever's left should be the address literal.
     let operand   = rest;
     let blockName: string | undefined = undefined;
-    const nameM = rest.match(/^(.+?)\s+\.([A-Za-z][A-Za-z0-9_]*)\s*$/);
-    if (nameM) {
-      operand   = nameM[1].trim();
-      blockName = nameM[2];
+    let assertAboveBasicEnd = false;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      // Trailing `.BLOCKNAME` — requires whitespace before the dot
+      // so the literal `$1234.5` (if it ever appears) doesn't get
+      // misparsed as `$1234` + label `5`.
+      const nameM = operand.match(/^(.*?)\s+\.([A-Za-z][A-Za-z0-9_]*)\s*$/);
+      if (nameM) {
+        if (blockName !== undefined) {
+          return { kind: 'error', message: 'duplicate .BLOCKNAME on ORG' };
+        }
+        operand   = nameM[1].trim();
+        blockName = nameM[2];
+        changed = true;
+        continue;
+      }
+      // Trailing `>BASICEND` (case-insensitive, whitespace flexible).
+      const beM = operand.match(/^(.*?)\s*>\s*BASICEND\s*$/i);
+      if (beM) {
+        if (assertAboveBasicEnd) {
+          return { kind: 'error', message: 'duplicate >BASICEND on ORG' };
+        }
+        operand = beM[1].trim();
+        assertAboveBasicEnd = true;
+        changed = true;
+        continue;
+      }
     }
     const lit = parseLiteralOnly(operand);
     if ('error' in lit) return { kind: 'error', message: lit.error };
     if (lit.value < 0 || lit.value > 0xFFFF) {
       return { kind: 'error', message: `ORG address out of 16-bit range: ${lit.value}` };
     }
-    return { kind: 'org', address: lit.value, blockName };
+    return { kind: 'org', address: lit.value, blockName, assertAboveBasicEnd };
   }
 
   // `DB <value>[,<value>...]` — define data bytes.  Case-insensitive.
@@ -1027,7 +1063,12 @@ function pass1(
           pc       = stmt.address & 0xFFFF;
           anchored = true;
           sawOrgThisLine = true;
-          currentOrgRun = { lineIdx, startAddr: pc, endAddr: pc - 1 };
+          currentOrgRun = {
+            lineIdx,
+            startAddr: pc,
+            endAddr:   pc - 1,
+            assertAboveBasicEnd: stmt.assertAboveBasicEnd,
+          };
           if (stmt.blockName !== undefined) {
             // Declare the start-of-block label (same as a plain
             // `.NAME` at post-ORG PC) and open a new named block.
@@ -1383,6 +1424,12 @@ export interface OrgRun {
   lineIdx:   number;
   startAddr: number;
   endAddr:   number;
+  /** Set when the ORG declaration carried `>BASICEND` — asks the
+   *  asmApply layer to assert that `startAddr` is strictly greater
+   *  than the last byte of the BASIC program after re-assembly.
+   *  Only the orgRun's start matters for the check (the run's extent
+   *  is determined by emissions, not the assertion). */
+  assertAboveBasicEnd?: boolean;
 }
 
 /** One instruction's emitted bytes, tagged with the PC it landed at
