@@ -2569,6 +2569,171 @@ test('DB label reference resolves to address', () => {
   return null;
 });
 
+// ── Byte-extract operators (<LABEL, >LABEL) ─────────────────────────────────
+
+test('byte-extract: immediate operands LDA #<MYDATA / LDA #>MYDATA', () => {
+  // The canonical use case: load the low and high bytes of an
+  // address-valued label into the accumulator.  MYDATA at $9876 →
+  // low byte $76, high byte $98.
+  const p = mkProgram([
+    "10 REM ' ORG $9876",
+    "20 DATA #60 ' .MYDATA:RTS",
+    "30 DATA 0,0 ' LDA #<MYDATA",         // A9 76
+    "40 DATA 0,0 ' LDA #>MYDATA",         // A9 98
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^30 DATA #A9,#76/.test(p.lines[2].v)) return `line 3: ${p.lines[2].v}`;
+  if (!/^40 DATA #A9,#98/.test(p.lines[3].v)) return `line 4: ${p.lines[3].v}`;
+  return null;
+});
+
+test('byte-extract: works with forward references', () => {
+  // `<LATER` resolves at pass 2, so referring to a label declared
+  // later in the source must work the same as a backward reference.
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA 0,0 ' LDA #<LATER",          // forward ref
+    "30 DATA 0,0 ' LDA #>LATER",          // forward ref
+    "40 DATA #60 ' .LATER:RTS",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // LATER lands at $9800 + 2 (after the two LDA #imm = 2 bytes each = 4 bytes total)
+  // 4 bytes total of LDA #imm before it = $9800 + 4 = $9804.
+  if (!/^20 DATA #A9,#04/.test(p.lines[1].v)) return `line 2: ${p.lines[1].v}`;
+  if (!/^30 DATA #A9,#98/.test(p.lines[2].v)) return `line 3: ${p.lines[2].v}`;
+  return null;
+});
+
+test('byte-extract: DB pointer table <P,>P', () => {
+  // The pointer-table use case: pack pairs of low/high bytes for two
+  // addresses, useful for indirect-indexed loops over a list of
+  // pointers.  PTR1 at $9800 (RTS = 1 byte), PTR2 right after at
+  // $9801 → table is 00 98 01 98.
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA #60 ' .PTR1:RTS",
+    "30 DATA #60 ' .PTR2:RTS",
+    "40 DATA 0,0,0,0 ' DB <PTR1,>PTR1,<PTR2,>PTR2",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^40 DATA #00,#98,#01,#98/.test(p.lines[3].v)) return `line 4: ${p.lines[3].v}`;
+  return null;
+});
+
+test('byte-extract: works with literals (low/high of $ABCD)', () => {
+  // `parseExpr` recurses on the inner, so a literal as inner falls
+  // out naturally.  Less useful than label byte-extract (you could
+  // just write the byte directly), but consistent with the operator
+  // model and free.
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA 0,0 ' LDA #<$ABCD",          // A9 CD
+    "30 DATA 0,0 ' LDA #>$ABCD",          // A9 AB
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DATA #A9,#CD/.test(p.lines[1].v)) return `line 2: ${p.lines[1].v}`;
+  if (!/^30 DATA #A9,#AB/.test(p.lines[2].v)) return `line 3: ${p.lines[2].v}`;
+  return null;
+});
+
+test('byte-extract: unanchored label in instruction operand errors', () => {
+  // No ORG → the label's address is unknown → the byte we'd extract
+  // is meaningless.  Same gating as ABS use, but message specialised
+  // to mention byte-extract so the user knows where to look.
+  const p = mkProgram([
+    "10 DATA #60 ' .TGT:RTS",             // unanchored
+    "20 DATA 0,0 ' LDA #<TGT",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an anchoring error';
+  if (!/byte-extract operand/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  if (!/TGT/.test(r.errors[0].message)) {
+    return `error doesn't name the label: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('byte-extract: unanchored label in DB errors', () => {
+  const p = mkProgram([
+    "10 DATA #60 ' .TGT:RTS",             // unanchored
+    "20 DATA 0 ' DB <TGT",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an anchoring error';
+  if (!/byte-extract/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('byte-extract: undefined symbol errors with the label name', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800",
+    "20 DATA 0,0 ' LDA #<DOES_NOT_EXIST",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an undefined-symbol error';
+  if (!/undefined symbol: DOES_NOT_EXIST/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
+test('byte-extract: whitespace between < and label is tolerated', () => {
+  // `< LABEL` (with space) works the same as `<LABEL`.  Forgiving
+  // spacing matches how the operand parser handles whitespace
+  // elsewhere.
+  const p = mkProgram([
+    "10 REM ' ORG $9876",
+    "20 DATA #60 ' .MYDATA:RTS",
+    "30 DATA 0,0 ' LDA #< MYDATA",
+    "40 DATA 0,0 ' LDA #> MYDATA",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^30 DATA #A9,#76/.test(p.lines[2].v)) return `line 3: ${p.lines[2].v}`;
+  if (!/^40 DATA #A9,#98/.test(p.lines[3].v)) return `line 4: ${p.lines[3].v}`;
+  return null;
+});
+
+test('byte-extract: equate as inner produces the right byte', () => {
+  // `MYEQU EQU $9876` then `LDA #<MYEQU` → low byte $76.  Equates
+  // resolve through `resolveExpr` the same as labels; byte-extract
+  // composes naturally.
+  const p = mkProgram([
+    "10 REM ' .MYEQU = $9876",
+    "20 DATA 0,0 ' LDA #<MYEQU",
+    "30 DATA 0,0 ' LDA #>MYEQU",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DATA #A9,#76/.test(p.lines[1].v)) return `line 2: ${p.lines[1].v}`;
+  if (!/^30 DATA #A9,#98/.test(p.lines[2].v)) return `line 3: ${p.lines[2].v}`;
+  return null;
+});
+
+test('byte-extract: rejected as ORG operand (literal-only)', () => {
+  // ORG requires a literal address — `<LABEL` is an expression, not
+  // a literal.  The error message should make clear what the parser
+  // expected.
+  const p = mkProgram([
+    "10 REM ' .TGT = $9800",
+    "20 REM ' ORG <TGT",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected a parse error';
+  if (!/expected a literal/.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
 test('DB string can contain statement separators', () => {
   const p = mkProgram([
     "10 DATA 0,0,0,0,0 ' DB \"a:b;c\"",

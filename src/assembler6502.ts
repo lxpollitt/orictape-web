@@ -217,7 +217,13 @@ export type DataFormat = 'hex' | 'decimal';
  *  correspond to hex/decimal digit widths. */
 type Expr =
   | { kind: 'lit'; value: number; forceWide: boolean; dataFormat: DataFormat; digitCount?: number }
-  | { kind: 'sym'; name: string };
+  | { kind: 'sym'; name: string }
+  /** Low- or high-byte extraction (`<expr` or `>expr`).  Result is
+   *  always a 1-byte value, suitable for IMM operands and DB byte
+   *  values.  `inner` is recursive so a future expression-engine
+   *  upgrade can generalise it from a single label/literal to a
+   *  full arithmetic expression without restructuring the tree. */
+  | { kind: 'byteExtract'; which: 'lo' | 'hi'; inner: Expr };
 
 /** A resolved value — either what a literal Expr already carries, or the
  *  result of looking up a symbol in the symbol table.  `isLabel` is set
@@ -265,6 +271,20 @@ const IDENT_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 function parseExpr(text: string): Expr | { error: string } {
   const t = text.trim();
   if (t.length === 0) return { error: 'missing operand' };
+  // Byte-extract prefix: `<expr` (low byte) or `>expr` (high byte).
+  // Recurses on the rest, so today `<LABEL` parses as byteExtract(sym
+  // 'LABEL'); when the expression engine grows to support arithmetic
+  // (`<(LABEL+1)` etc.), the recursion already handles it — only
+  // `parseExpr`'s primary cases need new clauses.  Note: `>` is also
+  // used as the contextual `>BASICEND` decoration on `ORG` lines, but
+  // that's parsed in a different syntactic position (trailing on ORG)
+  // and never reaches `parseExpr`, so the two uses don't collide.
+  if (t.startsWith('<') || t.startsWith('>')) {
+    const which: 'lo' | 'hi' = t[0] === '<' ? 'lo' : 'hi';
+    const inner = parseExpr(t.slice(1));
+    if ('error' in inner) return { error: inner.error };
+    return { kind: 'byteExtract', which, inner };
+  }
   if (t.startsWith('$')) {
     const hex = t.slice(1);
     if (!/^[0-9A-Fa-f]+$/.test(hex)) return { error: `invalid hex literal: ${t}` };
@@ -314,7 +334,15 @@ function parseExpr(text: string): Expr | { error: string } {
 function parseLiteralOnly(text: string): Resolved | { error: string } {
   const e = parseExpr(text);
   if ('error' in e) return e;
-  if (e.kind !== 'lit') return { error: `expected a literal, got identifier: ${e.name}` };
+  if (e.kind !== 'lit') {
+    // ORG / equate declarations require a literal — symbol references
+    // and byte-extract expressions aren't allowed.  Mention which
+    // shape we got so the error is actionable.
+    const got = e.kind === 'sym'
+      ? `identifier: ${e.name}`
+      : `byte-extract expression`;
+    return { error: `expected a literal, got ${got}` };
+  }
   return {
     value:      e.value,
     forceWide:  e.forceWide,
@@ -326,6 +354,18 @@ function parseLiteralOnly(text: string): Resolved | { error: string } {
 /** Look up an expression's value in the symbol table.  Returns the
  *  resolved value, `null` if the symbol is unresolved, or an error for
  *  structural issues (should not happen for well-formed Exprs). */
+/** Best-effort label name to mention in error messages.  Walks past a
+ *  byte-extract wrapper so `<MYLABEL` and `>MYLABEL` errors still name
+ *  `MYLABEL` rather than `?`.  Returns `'?'` for non-label expressions
+ *  (literals etc.) which shouldn't reach the relevant error sites
+ *  anyway. */
+function exprLabelName(e: Expr | null): string {
+  if (!e) return '?';
+  if (e.kind === 'sym') return e.name;
+  if (e.kind === 'byteExtract') return exprLabelName(e.inner);
+  return '?';
+}
+
 function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
   if (expr.kind === 'lit') {
     return {
@@ -333,6 +373,30 @@ function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
       forceWide:  expr.forceWide,
       dataFormat: expr.dataFormat,
       digitCount: expr.digitCount,
+    };
+  }
+  if (expr.kind === 'byteExtract') {
+    const inner = resolveExpr(expr.inner, symbols);
+    if (inner === null) return null;
+    const byte = expr.which === 'lo'
+      ? (inner.value & 0xFF)
+      : ((inner.value >> 8) & 0xFF);
+    // Always a 1-byte value (`forceWide: false`) regardless of the
+    // inner's width.  We propagate `isLabel` / `anchored` / `regionId`
+    // so the existing anchoring check at pass 2 fires when the inner
+    // is an unanchored label — `LDA #<LABEL` is just as dependent on
+    // `LABEL` having a known address as `JMP LABEL` is.  Hex format
+    // for DATA-line rendering: address-derived bytes read more
+    // naturally as `#XX`.  `digitCount` intentionally undefined —
+    // the byte-extract result is a fresh value with no user-typed
+    // digit width to preserve.
+    return {
+      value:      byte,
+      forceWide:  false,
+      dataFormat: 'hex',
+      isLabel:    inner.isLabel,
+      anchored:   inner.anchored,
+      regionId:   inner.regionId,
     };
   }
   const sym = symbols.get(expr.name);
@@ -528,10 +592,21 @@ function splitStatements(s: string): string[] {
  *               instruction operands (label must live in an
  *               ORG-declared block). */
 type DbValue =
-  | { kind: 'byte';   value: number }
-  | { kind: 'word';   value: number }
-  | { kind: 'string'; bytes: number[] }
-  | { kind: 'sym';    name: string };
+  | { kind: 'byte';        value: number }
+  | { kind: 'word';        value: number }
+  | { kind: 'string';      bytes: number[] }
+  | { kind: 'sym';         name: string }
+  /** Byte-extract of a label's address: `<LABEL` (low byte) or
+   *  `>LABEL` (high byte).  Always emits a single byte.  Mirrors the
+   *  byte-extract form on instruction operands; falls out naturally
+   *  here so we don't have to deliberately exclude it from DB.
+   *  Today only labels are accepted (the symmetry with the operand
+   *  form is partial — `parseExpr` allows literals as inner, but DB
+   *  byte-extract restricts to identifiers because a literal byte-
+   *  extract is just a shorter literal anyway).  When DB grows full
+   *  expression support this whole kind goes away in favour of an
+   *  `expr` variant. */
+  | { kind: 'byteExtract'; which: 'lo' | 'hi'; name: string };
 
 type Statement =
   | { kind: 'empty' }
@@ -761,6 +836,23 @@ function parseDbValue(t: string): { value: DbValue } | { error: string } {
       return { value: { kind: 'byte', value } };
     }
     return { value: { kind: 'word', value } };
+  }
+  // Byte-extract: `<LABEL` (low byte) or `>LABEL` (high byte).  Must
+  // come before the bare-identifier branch since `<` and `>` are not
+  // valid in identifier names.  Restricted to a single label name
+  // for now — generalises to expressions when DB switches to Expr
+  // values.  Whitespace between `<`/`>` and the label is tolerated
+  // (`< LABEL` works just like `<LABEL`).
+  if (t.startsWith('<') || t.startsWith('>')) {
+    const which: 'lo' | 'hi' = t[0] === '<' ? 'lo' : 'hi';
+    const rest = t.slice(1).trim();
+    if (rest.length === 0) {
+      return { error: `${t[0]} byte-extract: expected a label name` };
+    }
+    if (!IDENT_RE.test(rest)) {
+      return { error: `${t[0]} byte-extract: expected a label name (got: ${rest})` };
+    }
+    return { value: { kind: 'byteExtract', which, name: rest } };
   }
   // Identifier (resolved later as a word).
   if (IDENT_RE.test(t)) {
@@ -1124,10 +1216,11 @@ function pass1(
           let size = 0;
           for (const v of stmt.values) {
             switch (v.kind) {
-              case 'byte':   size += 1; break;
-              case 'word':   size += 2; break;
-              case 'sym':    size += 2; break;
-              case 'string': size += v.bytes.length; break;
+              case 'byte':        size += 1; break;
+              case 'word':        size += 2; break;
+              case 'sym':         size += 2; break;
+              case 'string':      size += v.bytes.length; break;
+              case 'byteExtract': size += 1; break;
             }
           }
           prepared.push({
@@ -1248,6 +1341,34 @@ function pass2(
             dbBytes.push(sym.value & 0xFF, (sym.value >> 8) & 0xFF);
             break;
           }
+          case 'byteExtract': {
+            // Same gating as the `sym` case but emits a single byte
+            // (low or high half of the resolved address).  Pad one
+            // zero on error to keep PC offsets in sync — matches the
+            // 1-byte size committed in pass 1.
+            const sym = symbols.get(v.name);
+            if (!sym) {
+              lineState.errors.push({ message: `undefined symbol: ${v.name}` });
+              dbBytes.push(0);
+              dbHadError = true;
+              break;
+            }
+            if (sym.isLabel && !sym.anchored) {
+              const op = v.which === 'lo' ? '<' : '>';
+              lineState.errors.push({
+                message: `label ${v.name} used in DB byte-extract (${op}${v.name}) but no ORG `
+                       + `was declared for this block of assembler`,
+              });
+              dbBytes.push(0);
+              dbHadError = true;
+              break;
+            }
+            const byte = v.which === 'lo'
+              ? (sym.value & 0xFF)
+              : ((sym.value >> 8) & 0xFF);
+            dbBytes.push(byte);
+            break;
+          }
         }
       }
       // Sanity: bytes emitted match the size pass 1 committed.
@@ -1280,8 +1401,7 @@ function pass2(
 
     const resolved = resolveExpr(p.op.expr, symbols);
     if (resolved === null) {
-      const name = (p.op.expr.kind === 'sym') ? p.op.expr.name : '?';
-      lineState.errors.push({ message: `undefined symbol: ${name}` });
+      lineState.errors.push({ message: `undefined symbol: ${exprLabelName(p.op.expr)}` });
       continue;
     }
 
@@ -1290,10 +1410,19 @@ function pass2(
     // intervening PC-break from a zero-emit DATA line.  REL-mode is
     // gated separately (see below) — offsets are base-independent
     // within a region but are meaningless across a PC-break.
+    //
+    // Byte-extract operands (`<LABEL`, `>LABEL`) hit the same gate
+    // because the byte we'd emit is derived from the label's address,
+    // which is unknown without an `ORG`.  We tweak the message in
+    // that case so the user knows it's the byte-extract usage, not
+    // an absolute address reference.
     if (resolved.isLabel && p.mode !== 'REL' && !resolved.anchored) {
-      const name = (p.op.expr.kind === 'sym') ? p.op.expr.name : '?';
+      const name = exprLabelName(p.op.expr);
+      const usage = p.op.expr?.kind === 'byteExtract'
+        ? 'a byte-extract operand'
+        : 'absolute addressing';
       lineState.errors.push({
-        message: `label ${name} used in absolute addressing but no ORG was declared ` +
+        message: `label ${name} used in ${usage} but no ORG was declared ` +
                  `for this block of assembler`,
       });
       continue;
@@ -1304,9 +1433,8 @@ function pass2(
     // is meaningless.  Within one region (anchored or not), REL is
     // fine: PC arithmetic is internally consistent.
     if (resolved.isLabel && p.mode === 'REL' && resolved.regionId !== p.regionId) {
-      const name = (p.op.expr.kind === 'sym') ? p.op.expr.name : '?';
       lineState.errors.push({
-        message: `branch to label ${name} is between different blocks of assembler ` +
+        message: `branch to label ${exprLabelName(p.op.expr)} is between different blocks of assembler ` +
                  `and requires ORG declarations for both blocks`,
       });
       continue;

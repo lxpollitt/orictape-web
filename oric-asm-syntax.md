@@ -96,6 +96,27 @@ Two flavours are supported:
 
 An explicit leading `+` on decimal literals is accepted (equivalent to the bare positive form) and is useful for branches where a signed literal like `+5` or `-7` reads as an explicit offset.
 
+### Byte-extract operators (`<` and `>`)
+
+Two unary prefix operators extract the low or high byte of an address-valued expression:
+
+| Operator | Meaning                                     | Example                            |
+|----------|---------------------------------------------|------------------------------------|
+| `<`      | Low byte of operand (bits 0–7)              | `LDA #<MYDATA`, `DB <PTR1`         |
+| `>`      | High byte of operand (bits 8–15)            | `LDA #>MYDATA`, `DB >PTR1`         |
+
+Result is always a 1-byte value, suitable for any context that accepts a byte:
+
+- **Immediate operands**: `LDA #<MYDATA` / `LDA #>MYDATA` — the canonical pointer-loading idiom.
+- **DB byte values**: `DB <PTR1, >PTR1, <PTR2, >PTR2` — building pointer tables byte-by-byte for indirect-indexed loops.
+- **Anywhere else a 1-byte value is accepted** (falls out of the operator model — though the immediate and DB forms are the primary intended uses).
+
+The operand can be a label or a numeric literal.  Whitespace between the operator and the operand is optional (`<MYDATA`, `< MYDATA`).  Equates resolve through the operator naturally — given `MYEQU = $9876`, `LDA #<MYEQU` emits `A9 76`.
+
+Byte-extract follows the same anchoring rule as absolute label references: if the inner label has no `ORG` declared for its block (and isn't an equate), the address is unknown and the byte-extract errors with a message naming the byte-extract usage.
+
+> **Note on `>`**: this operator and the `>BASICEND` decoration on `ORG` lines are different uses of the `>` token, disambiguated by syntactic position.  `>BASICEND` only appears as a trailing decoration after an `ORG` literal and is a contextual keyword; the `>` byte-extract operator appears as a prefix on an expression in operand position.
+
 ## Operand Syntax
 
 | Addressing Mode   | Syntax          | Example                          |
