@@ -692,6 +692,11 @@ export const TOKEN_TO   = 0x80 + KEYWORDS.indexOf('TO');
 // needs to recognise it as the marker between variable name and
 // start-address literal.  Exposed here so asmApply can consume it.
 export const TOKEN_EQ   = 0x80 + KEYWORDS.indexOf('=');
+// `DEF USR = <addr>` forms a single back-patch site (the address
+// literal).  Detected as a two-token sequence so `DEF FNX(...)` and
+// bare `USR` (in `PRINT USR(arg)`) are correctly excluded.
+export const TOKEN_DEF  = 0x80 + KEYWORDS.indexOf('DEF');
+export const TOKEN_USR  = 0x80 + KEYWORDS.indexOf('USR');
 
 // Literal byte values that are invalid in code mode — the Oric tokeniser would
 // have produced keyword tokens for these, so seeing them as literals indicates

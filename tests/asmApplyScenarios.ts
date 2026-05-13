@@ -521,6 +521,111 @@ test('CALL back-patch with hex literal preserves hex format', () => {
   return null;
 });
 
+test('DEF USR back-patch with hex literal', () => {
+  // The canonical use case: DEF USR=#0000 ' .ENTRY  →  DEF USR=#9800
+  // when ENTRY resolves to $9800.  Patches the literal immediately
+  // after the `=` token.  The space between DEF and USR is preserved
+  // from the source (it's a literal byte between the two keyword
+  // tokens, the rewriter just passes it through).
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.ENTRY",
+    "20 DATA 0 ' RTS",
+    "30 DEF USR=#0000 ' .ENTRY",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!r.linesPatched.includes(2)) return `line 2 should be patched`;
+  if (!/^30 DEF USR=#9800/.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  return null;
+});
+
+test('DEF USR back-patch with decimal literal preserves decimal format', () => {
+  const p = mkProgram([
+    "10 REM ' .ENTRY = $9800",
+    "20 DEF USR=0 ' .ENTRY",        // original literal "0" is decimal
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DEF USR=38912/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('DEF USR with whitespace around = is tolerated', () => {
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.ENTRY",
+    "20 DATA 0 ' RTS",
+    "30 DEF USR = #0000 ' .ENTRY",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // The whitespace around `=` is preserved in the rewritten line.
+  if (!/^30 DEF USR = #9800/.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  return null;
+});
+
+test('DEF FN... is NOT a back-patch site (only DEF USR triggers)', () => {
+  // The line uses DEF but not USR — it's a function definition, not
+  // a USR address declaration.  Without `DEF USR`, the line shouldn't
+  // be classified as a back-patch host, so the `.LABEL` annotation
+  // wouldn't be interpreted as a directive.  We verify by checking
+  // the line isn't patched.
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.LABEL",
+    "20 DATA 0 ' RTS",
+    "30 DEFFNX(I)=I*2",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  // Line 30 should NOT appear in linesPatched — no back-patch site.
+  if (r.linesPatched.includes(2)) return `line 2 should not be patched`;
+  return null;
+});
+
+test('USR outside DEF (e.g. PRINT USR(...)) is NOT a back-patch site', () => {
+  // `PRINT USR(arg)` calls the user function; no patching should
+  // happen.  Without a preceding DEF, USR isn't a site.
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.ENTRY",
+    "20 DATA 0 ' RTS",
+    "30 PRINT USR(0)",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (r.linesPatched.includes(2)) return `line 2 should not be patched`;
+  return null;
+});
+
+test('DEF USR site count: one per occurrence (mixed with CALL)', () => {
+  // Two sites on one line — verify both are patched and the directive
+  // list pairs them in source order.
+  const p = mkProgram([
+    "10 REM ' ORG $9800:.A",
+    "20 DATA #60 ' RTS",
+    "30 REM ' ORG $9900:.B",
+    "40 DATA #60 ' RTS",
+    "50 DEF USR=#0:CALL #0 ' .A:.B",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^50 DEF USR=#9800:CALL #9900/.test(p.lines[4].v)) return `line 4 text: ${p.lines[4].v}`;
+  return null;
+});
+
+test('DEF USR back-patch: unanchored label errors clearly', () => {
+  const p = mkProgram([
+    "10 DATA #60 ' .ENTRY:RTS",       // unanchored — no ORG
+    "20 DEF USR=#0 ' .ENTRY",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length === 0) return 'expected an anchoring error';
+  // Reuses the existing back-patch anchoring error path — message
+  // form is `back-patch label X is missing ORG declaration for ...`.
+  if (!/ENTRY.*missing ORG/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  return null;
+});
+
 test('POKE back-patch with decimal literal preserves decimal format', () => {
   const p = mkProgram([
     "10 REM ' .LIVES = $04",

@@ -7,7 +7,7 @@ Conventions for assembler annotations and tool directives embedded in Oric BASIC
 - All annotations follow Oric BASIC `'`.  What counts as the annotation-opening `'` depends on the host line kind (see Host Line Eligibility below); apostrophes that don't match the host's required shape are ordinary literal characters, not annotation markers.
 - Assembler code annotations pair with a `DATA` statement on the same line — the DATA's values are what the annotation assembles to.
 - Declarations (`ORG`, labels, equates) may live on `REM` lines with no DATA attached.
-- BASIC back-patch directives live on `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` lines.
+- BASIC back-patch directives live on `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` / `FOR` / `TO` / `DEF USR` lines.
 
 ## Host Line Eligibility
 
@@ -15,7 +15,7 @@ Annotations are only interpreted as assembler input when they appear on a line w
 
 - `REM` — the line is recognised as an assembler host only when the body directly after the `REM` keyword starts with `'` (allowing any whitespace between), i.e. exactly the shape `<line number> REM ' …`.  REM lines whose body starts with anything else — including ordinary comments containing apostrophes like `REM UDG's` or `REM don't touch` — are plain BASIC comments and are left untouched.  When the line is a host, the annotation (everything after the opening `'`) must consist of valid assembly fragments only (declarations like `ORG`, labels, and equates, separated by `:`); human comments are permitted only at the very end via `;`.  Single statement per line.
 - `DATA` — single statement per line.  The annotation's assembled bytes overwrite the DATA's values in full — any pre-existing values on the DATA (in any count or format) are replaced by the assembled output.  Annotation must consist of valid assembly fragments only (instructions, and/or `:`-separated local label declarations); trailing `;` comments are permitted.
-- `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` / `FOR` / `TO` — any line containing one or more of these tokens (as statements, or as function calls inside expressions).  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
+- `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` / `FOR` / `TO` / `DEF USR` — any line containing one or more of these tokens or token-sequences (as statements, or as function calls inside expressions).  `DEF USR` is a two-token sequence (`DEF` followed by `USR`); bare `DEF` and bare `USR` are not patch hosts.  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
 
 Annotations on lines of any other kind (e.g. `PRINT`, `LET`, `GOTO`) — and REM/DATA lines that violate the single-statement rule above — are treated as human comments and ignored outright.
 
@@ -211,9 +211,10 @@ The tool accepts `:` on DATA-line annotations as input without complaint, and pr
 
 ## BASIC Back-Patch Directives
 
-On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, or `TO` tokens (as statements or as function calls inside expressions), the annotation carries back-patch directives: `.LABEL` replaces the address literal at a patch site with the resolved label address; `-` is a placeholder meaning "don't patch this site".
+On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, `TO`, or `DEF USR` patch sites, the annotation carries back-patch directives: `.LABEL` replaces the address literal at a patch site with the resolved label address; `-` is a placeholder meaning "don't patch this site".
 
 - **Patch sites.**  Each occurrence of `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, or `TO` on the line is a patch site, in BASIC-source order.  The site's literal is the first numeric constant immediately following the verb token (after the opening `(` for `PEEK`/`DEEK`, or after the `=` for `FOR`), terminated by the first `,`, `)`, `:`, BASIC operator, or end-of-line.  A `FOR var=<start> TO <end>` loop therefore contributes **two** patch sites — one for the start address (paired with the FOR's literal) and one for the end address (paired with the TO's literal).
+- **`DEF USR` sites.**  The two-token sequence `DEF USR` (with any whitespace between them) is also a patch site — the literal immediately after `=` is the user-function entry address, patched as a 16-bit value.  Detection is contextual: bare `DEF` (e.g. `DEF FNX(I)=I*2`) and bare `USR` (e.g. `PRINT USR(arg)`) are **not** patch sites, only the full `DEF USR` form.
 - **Positional pairing.**  Directives pair 1:1 with patch sites, using `:` as the separator (mirroring BASIC's `:`).  A count mismatch is an error — use `-` to skip positions.
 - **Size.**  Every patch site holds a 16-bit address.
 - **Non-literal sites.**  If a patch site's argument is a variable or expression (not a numeric constant), only `-` is valid; `.LABEL` on such a site is an error.

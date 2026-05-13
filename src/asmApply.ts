@@ -39,6 +39,7 @@ import {
   TOKEN_DATA, TOKEN_REM,
   TOKEN_CALL, TOKEN_POKE, TOKEN_DOKE, TOKEN_PEEK, TOKEN_DEEK,
   TOKEN_FOR,  TOKEN_TO,  TOKEN_EQ,
+  TOKEN_DEF,  TOKEN_USR,
   KEYWORDS,
 } from './decoder';
 import { applyLineEdit } from './editor';
@@ -725,7 +726,7 @@ function hasAnyBackPatchToken(prog: Program, lineIdx: number): boolean {
     if (inString) { if (b === 0x22) inString = false; continue; }
     if (b === 0x22) { inString = true; continue; }
     if (b === 0x27) break;
-    if (isBackPatchToken(b)) return true;
+    if (isBackPatchSiteAt(prog, i, line.lastByte)) return true;
   }
   return false;
 }
@@ -1055,13 +1056,38 @@ type BackPatchDirective =
   | { kind: 'label'; name: string }
   | { kind: 'skip' };
 
-/** True when `b` is one of the back-patch verb token bytes.  A
+/** True when `b` is one of the single-token back-patch verb bytes.  A
  *  `FOR` / `TO` pair on one line contributes two patch sites (start
- *  address, end address); each token is counted separately. */
+ *  address, end address); each token is counted separately.  This
+ *  helper is the single-byte test only — callers that need to handle
+ *  the multi-token `DEF USR` sequence use {@link isBackPatchSiteAt}
+ *  instead, which wraps this and adds the two-token peek-ahead. */
 function isBackPatchToken(b: number): boolean {
   return b === TOKEN_CALL || b === TOKEN_POKE || b === TOKEN_DOKE
       || b === TOKEN_PEEK || b === TOKEN_DEEK
       || b === TOKEN_FOR  || b === TOKEN_TO;
+}
+
+/** True when the byte at `prog.bytes[i]` starts a back-patch site,
+ *  considering byte-sequence context for multi-token verbs.  Wraps
+ *  {@link isBackPatchToken} and additionally recognises `DEF` when
+ *  immediately followed (possibly via whitespace) by `USR` — the
+ *  `DEF USR = <addr>` form for setting Oric BASIC's user-function
+ *  pointer.  Bare `DEF` (e.g. `DEF FNX(...)`) and bare `USR` (e.g.
+ *  `PRINT USR(arg)`) are correctly not sites: DEF without a USR
+ *  follower fails the peek-ahead, and USR not preceded by DEF is
+ *  never tested here because the outer scan only invokes this on
+ *  bytes that could plausibly start a verb. */
+function isBackPatchSiteAt(prog: Program, i: number, lineEnd: number): boolean {
+  const b = prog.bytes[i].v;
+  if (isBackPatchToken(b)) return true;
+  if (b === TOKEN_DEF) {
+    // Skip whitespace and confirm the next non-space byte is USR.
+    let j = i + 1;
+    while (j <= lineEnd && prog.bytes[j].v === 0x20) j++;
+    return j <= lineEnd && prog.bytes[j].v === TOKEN_USR;
+  }
+  return false;
 }
 
 /** Test whether an annotation's prefix marks it as back-patch directives —
@@ -1111,8 +1137,10 @@ function parseBackPatchDirectives(
   return { directives };
 }
 
-/** Count back-patch verb tokens on a line, respecting string-literal
- *  context and stopping at the first `'` annotation marker. */
+/** Count back-patch verb sites on a line, respecting string-literal
+ *  context and stopping at the first `'` annotation marker.  Uses the
+ *  context-aware {@link isBackPatchSiteAt} so a `DEF USR` two-token
+ *  sequence contributes one site, not two. */
 function countBackPatchTokens(prog: Program, lineIdx: number): number {
   const line = prog.lines[lineIdx];
   let count = 0;
@@ -1123,7 +1151,7 @@ function countBackPatchTokens(prog: Program, lineIdx: number): number {
     if (inString) { if (b === 0x22) inString = false; continue; }
     if (b === 0x22) { inString = true; continue; }
     if (b === 0x27) break;            // annotation starts — stop scanning
-    if (isBackPatchToken(b)) count++;
+    if (isBackPatchSiteAt(prog, i, line.lastByte)) count++;
   }
   return count;
 }
@@ -1218,19 +1246,22 @@ function rewriteLineForBackPatch(
     if (b === 0x22) { emitByte('"'); inString = true; i++; continue; }
 
     // Patch-site verb token.
-    if (isBackPatchToken(b)) {
+    if (isBackPatchSiteAt(prog, i, line.lastByte)) {
       const verbToken = b;
       emitByte(KEYWORDS[b - 0x80]);
       i++;
 
-      // For `FOR var=<literal>` we need to pass through the variable
-      // name and `=` sign before we reach the literal.  Walk chars
-      // up to and including the first `=` (emitting each as-is).
-      // Oric BASIC tokenises `=` into `TOKEN_EQ`, so we break on
-      // that; a raw `0x3D` is also accepted in case some source form
-      // ever leaves it untokenised.  Bail out early on annotation
-      // markers or end-of-content to stay safe on malformed input.
-      if (verbToken === TOKEN_FOR) {
+      // For `FOR var=<literal>` and `DEF USR=<literal>` we need to
+      // pass through the bytes between the verb and the literal,
+      // ending at the `=` sign.  Walk chars up to and including the
+      // first `=` (emitting each as-is).  Oric BASIC tokenises `=`
+      // into `TOKEN_EQ`, so we break on that; a raw `0x3D` is also
+      // accepted in case some source form ever leaves it untokenised.
+      // Bail out early on annotation markers or end-of-content to
+      // stay safe on malformed input.  For DEF specifically, the
+      // bytes consumed here will include the USR token and any
+      // intervening whitespace before `=`.
+      if (verbToken === TOKEN_FOR || verbToken === TOKEN_DEF) {
         while (i <= line.lastByte) {
           const bj = prog.bytes[i].v;
           if (bj === 0) break;
@@ -1276,8 +1307,14 @@ function rewriteLineForBackPatch(
 
       // directive.kind === 'label'.
       if (literal === '' || literal === '#') {
+        // For DEF USR, the verb is conceptually two keywords; spell it
+        // out so the diagnostic points the user at the actual phrase
+        // they wrote rather than just "DEF".
+        const verbName = verbToken === TOKEN_DEF
+          ? 'DEF USR'
+          : KEYWORDS[b - 0x80];
         errors.push(
-          `back-patch at '${KEYWORDS[b - 0x80]}' has no numeric literal argument`,
+          `back-patch at '${verbName}' has no numeric literal argument`,
         );
         emitAsciiRun(literal, false);    // emit original on error; not owned
         continue;
