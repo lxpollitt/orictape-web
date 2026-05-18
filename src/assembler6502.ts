@@ -59,6 +59,7 @@
  */
 
 import { oricCharToByte } from './oricCharset';
+import { lookupSysSymbol, isReservedSysName } from './oricRomSymbols';
 
 // ── Addressing modes ────────────────────────────────────────────────────────
 
@@ -394,6 +395,20 @@ function exprLabelName(e: Expr | null): string {
   return '?';
 }
 
+/** If the expression references a `SYS.` built-in that fails to
+ *  resolve (ROM-specific bare ref, wrong-ROM suffix, suffix on an
+ *  invariant symbol, unknown name, …), return its precise message;
+ *  else null.  Recurses through byte-extract so `#<SYS.X` reports the
+ *  same diagnostic.  Callers use this to replace the generic
+ *  "undefined symbol" message with the specific built-in one. */
+function sysErrorIn(e: Expr | null): string | null {
+  if (!e) return null;
+  if (e.kind === 'byteExtract') return sysErrorIn(e.inner);
+  if (e.kind !== 'sym') return null;
+  const r = lookupSysSymbol(e.name);
+  return r.kind === 'error' ? r.message : null;
+}
+
 function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
   if (expr.kind === 'lit') {
     return {
@@ -427,6 +442,21 @@ function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
       regionId:   inner.regionId,
     };
   }
+  // Built-in `SYS.` ROM symbols are resolved before user symbols.
+  // `ok` → a concrete address (treated like a label-ish constant; the
+  // value's range drives ZP-vs-ABS via the existing forceWide rule).
+  // `error` → return null here; the precise diagnostic is surfaced by
+  // the caller via `sysErrorIn` (resolveExpr can't carry a message).
+  // `notSys` → fall through to the user symbol table.
+  const sys = lookupSysSymbol(expr.name);
+  if (sys.kind === 'ok') {
+    return {
+      value:      sys.value,
+      forceWide:  sys.value > 0xFF,
+      dataFormat: 'hex',
+    };
+  }
+  if (sys.kind === 'error') return null;
   const sym = symbols.get(expr.name);
   return sym ?? null;
 }
@@ -1045,6 +1075,14 @@ function pass1(
   let regionId  = 0;
 
   const declare = (lineIdx: number, name: string, value: Resolved): string | null => {
+    // `SYS` is the reserved built-in ROM-symbol namespace; a user
+    // label/equate/block named `SYS` would shadow it confusingly.
+    // (User names can't contain `.`, so only the bare `SYS` collides;
+    // the synthesised `NAME.END` only reaches here as `SYS.END` if the
+    // block was named `SYS`, which this same guard rejects upstream.)
+    if (isReservedSysName(name)) {
+      return `SYS is a reserved built-in namespace and cannot be used as a label name`;
+    }
     if (symbols.has(name)) return `symbol already declared: ${name}`;
     symbols.set(name, value);
     void lineIdx;
@@ -1357,6 +1395,20 @@ function pass2(
           case 'word':   dbBytes.push(v.value & 0xFF, (v.value >> 8) & 0xFF); break;
           case 'string': for (const b of v.bytes) dbBytes.push(b & 0xFF); break;
           case 'sym': {
+            // Built-in `SYS.` symbol resolves to a 16-bit address
+            // (emitted low,high like any DB word).  `error` surfaces
+            // the precise built-in diagnostic; `notSys` falls through.
+            const sys = lookupSysSymbol(v.name);
+            if (sys.kind === 'error') {
+              lineState.errors.push({ message: sys.message });
+              dbBytes.push(0, 0);
+              dbHadError = true;
+              break;
+            }
+            if (sys.kind === 'ok') {
+              dbBytes.push(sys.value & 0xFF, (sys.value >> 8) & 0xFF);
+              break;
+            }
             const sym = symbols.get(v.name);
             if (!sym) {
               lineState.errors.push({ message: `undefined symbol: ${v.name}` });
@@ -1384,6 +1436,19 @@ function pass2(
             // (low or high half of the resolved address).  Pad one
             // zero on error to keep PC offsets in sync — matches the
             // 1-byte size committed in pass 1.
+            const sys = lookupSysSymbol(v.name);
+            if (sys.kind === 'error') {
+              lineState.errors.push({ message: sys.message });
+              dbBytes.push(0);
+              dbHadError = true;
+              break;
+            }
+            if (sys.kind === 'ok') {
+              dbBytes.push(v.which === 'lo'
+                ? (sys.value & 0xFF)
+                : ((sys.value >> 8) & 0xFF));
+              break;
+            }
             const sym = symbols.get(v.name);
             if (!sym) {
               lineState.errors.push({ message: `undefined symbol: ${v.name}` });
@@ -1439,7 +1504,10 @@ function pass2(
 
     const resolved = resolveExpr(p.op.expr, symbols);
     if (resolved === null) {
-      lineState.errors.push({ message: `undefined symbol: ${exprLabelName(p.op.expr)}` });
+      const sysErr = sysErrorIn(p.op.expr);
+      lineState.errors.push({
+        message: sysErr ?? `undefined symbol: ${exprLabelName(p.op.expr)}`,
+      });
       continue;
     }
 

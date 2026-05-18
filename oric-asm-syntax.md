@@ -140,6 +140,7 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 - **Reference** (in assembler code): bare `LABEL`.
 - **Declarable name characters:** letters and digits only; must start with a letter (`[A-Za-z][A-Za-z0-9]*`). **No underscore** — see *Character set* below — and no `.` (the dot is reserved for tool-synthesised members, not user-declarable).
 - **Member references:** a reference may use `.`-separated member access — `NAME.END` resolves the synthesised end label of a named block (see `ORG $xxxx .NAME`).  The reference grammar is general (`NAME.MEMBER`), so further synthesised members (`.START`, `.LEN`, …) can be added later without a grammar change.  `.END` is the only one defined today.  Users cannot *declare* dotted names; only the tool synthesises them.
+- **Reserved:** `SYS` is the built-in ROM-symbol namespace (see *Built-in ROM symbols* below) and cannot be used as a label, equate, or block name.
 
 ### Character set
 
@@ -167,6 +168,40 @@ Consequence for this DSL: **underscore is not a valid identifier character** (it
 - **Declaration:** `.LABEL = value`, where `value` is any numeric literal.
 - **Reference** (in assembler code): bare `LABEL`.
 - **Forward references work as expected** for both ZP and ABS sizing: equate values are PC-independent, so the assembler resolves all `.NAME = <literal>` declarations in a quick prescan before instruction sizing runs.  `LDA LIVES` followed later by `.LIVES = $04` correctly emits the 2-byte ZP form.
+
+## Built-in ROM symbols (`SYS.`)
+
+The assembler ships a built-in symbol table of useful Oric BASIC ROM addresses, referenced via the reserved `SYS.` namespace — `JSR SYS.MUSIC.V11`, `STA SYS.PARAMS`, `LDA #<SYS.INT2FAC.V10`, `DB SYS.TIMER3`, or as a back-patch directive `' .SYS.MUSIC.V11`.  No declaration is needed; `SYS.*` is resolved before the user symbol table.  The authoritative symbol list and addresses are [`oric-asm-rom-v10-v11b-reference.md`](./oric-asm-rom-v10-v11b-reference.md) §5 (the curated reference; the §6 raw `.sym` dumps are deliberately *not* ingested).
+
+Two target ROMs: **V1.0** (Oric-1, `basic10.rom`) and **V1.1b** (Oric Atmos, `basic11b.rom`).  In `SYS.` names, `.V10` = V1.0 and `.V11` = V1.1b.
+
+A symbol's address may vary on one of **two independent axes**, each with its own mandatory suffix.  The governing rule is the same for both: **a suffix is present iff the address genuinely varies on that axis** — so reading source, a bare name *means* "fixed everywhere".
+
+| Class | Axis / suffix | Form | Bare reference |
+|-------|---------------|------|----------------|
+| **Invariant** | none | `SYS.PARAMS`, `SYS.TIMER3`, `SYS.VERIFY` | resolves |
+| **ROM-variant** | ROM: `.V10` / `.V11` | `SYS.MUSIC.V10` | **error** — must pick a ROM |
+| **Single-ROM** | ROM (one side only) | `SYS.CHECKKBD.V11` | **error** — suffix still required (no auto-default) |
+| **Video-mode-variant** | mode: `.TEXTMODE` / `.HIRESMODE` | `SYS.SCREEN.HIRESMODE` | **error** — must pick a mode |
+
+Error behaviours (all surfaced as normal assembler errors):
+
+- Bare reference to a ROM-variant symbol → *"SYS.MUSIC differs between BASIC V1.0 and V1.1b — use SYS.MUSIC.V10 or SYS.MUSIC.V11"*.
+- Bare reference to a mode-variant symbol → *"SYS.SCREEN depends on the video mode — use SYS.SCREEN.TEXTMODE or SYS.SCREEN.HIRESMODE"*.
+- Wrong axis's suffix → *"SYS.SCREEN varies by video mode, not ROM — use SYS.SCREEN.TEXTMODE or SYS.SCREEN.HIRESMODE"* (and the converse for a mode suffix on a ROM-variant symbol).
+- A version the symbol doesn't have → *"SYS.CHECKKBD is not available on BASIC V1.0 (Oric-1)"*.
+- Any suffix on an invariant symbol → *"SYS.PARAMS is the same on both ROMs and video modes — drop the .V11 suffix"* (keeps "suffix ⇔ varies" reliable).
+- Unknown name → *"unknown built-in symbol SYS.FOO"*.
+
+Names are matched **case-insensitively** and are the reference/manual names verbatim, upper-cased.  The only renames (where the manual name isn't a legal identifier) are the three indirect-jump vectors: `PTR_USR` → `SYS.USRVEC`, `!VEC` → `SYS.BANGVEC`, `&VEC` → `SYS.AMPVEC` (named `*VEC` — ROM JMPs through them — distinct from data pointers like `SYS.TXTPTR`).  Multi-byte pointers/vectors resolve to the low-byte address (the location you `DOKE`).  `SYS` itself is reserved and cannot be a user label/equate/block name.
+
+The CPU hardware vectors (`SYS.NMIVEC` `$FFFA`, `SYS.RESETVEC` `$FFFC`, `SYS.IRQVEC` `$FFFE`) and the ROM cold-start entry (`SYS.RESET.V10` / `.V11`) are included.  The clean-named 6522 VIA registers (`SYS.ORB`, `SYS.ORA`, `SYS.DDRB`, `SYS.DDRA`, `SYS.SR`, `SYS.ACR`, `SYS.PCR`, `SYS.IFR`, `SYS.IER`) and a `SYS.VIA` block base are included.  `SYS.CHARSET` and `SYS.KEYCODETAB` are the ROM charset/keymap copies and are `.V10`/`.V11` variant (validated different per ROM).  The video-mode-variant areas are included: `SYS.SCREEN`, `SYS.STDCHARSET`, `SYS.ALTCHARSET` (each `.TEXTMODE` / `.HIRESMODE`).
+
+Not yet included: the per-byte FAC zero-page cells; the page-2 NMI/IRQ "vector target" rows (overlap `NMIJP`/`INTFS`); the user-ML scratch area; "signed FAC→int"; and the dash-named VIA timer-latch registers.
+
+**16K vs 48K.** The (future) `SYS.SCREEN` / `SYS.STDCHARSET` / `SYS.ALTCHARSET` video-RAM labels will be **48K addresses**; on a 16K Oric every such address is `−$8000`.  The tool defines 48K labels only — the 16K case is intended to be handled by assembler address arithmetic (a planned feature) rather than a parallel `.16K` label set.  This shift applies *only* to those video-RAM areas: ROM symbols (`SYS.CHARSET`, `SYS.SOUND.V11`, …) and zero-page / page-2 symbols (`SYS.PARAMS`, `SYS.TIMER3`, …) are identical on 16K and 48K.
+
+> **Cross-ROM note.** A built-in label resolves to a single address, so `JSR SYS.MUSIC.V11` emits V1.1b bytes.  The reference's recommended portable idiom is runtime ROM-detection plus back-patching the `JSR` operands — built-in labels are the foundation for that.  A future increment may add a per-block default-ROM directive so single-target programs can write bare `SYS.MUSIC`.
 
 ## Directives
 

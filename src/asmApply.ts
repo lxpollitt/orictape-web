@@ -44,6 +44,7 @@ import {
 } from './decoder';
 import { applyLineEdit } from './editor';
 import { assembleProgram, type Symbols, type Chunk, type Emission } from './assembler6502';
+import { lookupSysSymbol } from './oricRomSymbols';
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -1323,6 +1324,20 @@ function rewriteLineForBackPatch(
           `back-patch at '${verbName}' has no numeric literal argument`,
         );
         emitAsciiRun(literal, false);    // emit original on error; not owned
+        continue;
+      }
+      // Built-in `SYS.` ROM symbols resolve before user symbols and
+      // skip the anchoring check below (a fixed ROM address is always
+      // "anchored").  `error` surfaces the precise built-in
+      // diagnostic; `notSys` falls through to the user symbol table.
+      const sys = lookupSysSymbol(directive.name);
+      if (sys.kind === 'error') {
+        errors.push(sys.message);
+        emitAsciiRun(literal, false);
+        continue;
+      }
+      if (sys.kind === 'ok') {
+        emitAsciiRun(formatBackPatchValue(sys.value, literal), true);
         continue;
       }
       const sym = symbols.get(directive.name);
