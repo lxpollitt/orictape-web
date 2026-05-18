@@ -161,6 +161,24 @@ test('wrong-axis suffixes error helpfully', () => {
   return null;
 });
 
+test('SYS.PARAMS+1 (the manual idiom) resolves to $02E1', () => {
+  // STA SYS.PARAMS+1 → 8D E1 02 (ABS; PARAMS=$02E0).
+  const b = asmBytes('STA SYS.PARAMS+1');
+  return (b.length === 3 && b[0] === 0x8D && b[1] === 0xE1 && b[2] === 0x02)
+    ? null : `got [${b.map(x => x.toString(16)).join(' ')}]`;
+});
+
+test('SYS.PARAMS+3 in immediate byte-extract: #<SYS.PARAMS+3 → A9 E3', () => {
+  const b = asmBytes('LDA #<SYS.PARAMS+3');
+  return (b.length === 2 && b[0] === 0xA9 && b[1] === 0xE3)
+    ? null : `got [${b.map(x => x.toString(16)).join(' ')}]`;
+});
+
+test('arithmetic on a bare ROM-variant symbol still errors first', () => {
+  const e = asmErr('JSR SYS.MUSIC+1');
+  return e !== null && /differs between/.test(e) ? null : `got ${e}`;
+});
+
 test('mode-variant assembles in operand position', () => {
   const b = asmBytes('LDA SYS.SCREEN.HIRESMODE');   // AD 00 A0 (ABS)
   return (b.length === 3 && b[0] === 0xAD && b[1] === 0x00 && b[2] === 0xA0)

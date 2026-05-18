@@ -1129,6 +1129,91 @@ test('DB followed by instruction on same line', () => {
   return compareBytes(r.perLine[0].bytes, [0x42, 0xEA]);
 });
 
+// ── Expression arithmetic (+ / -) ───────────────────────────────────────────
+
+test('literal arithmetic: LDA #2+3 → A9 05', () =>
+  compareBytes(asm('LDA #2+3'), [0xA9, 0x05]));
+
+test('literal arithmetic: LDA #$10-1 → A9 0F', () =>
+  compareBytes(asm('LDA #$10-1'), [0xA9, 0x0F]));
+
+test('left-associative: LDA #10-3-2 → A9 05', () =>
+  compareBytes(asm('LDA #10-3-2'), [0xA9, 0x05]));
+
+test('address + constant stays ABS: STA $9800+1 → 8D 01 98', () =>
+  compareBytes(asm('STA $9800+1'), [0x8D, 0x01, 0x98]));
+
+test('label + constant resolves and is address-like', () => {
+  // L=$9800, NOP (1 byte), JMP at $9801; operand L+3 = $9803 → 4C 03 98
+  const r = assembleProgram(["ORG $9800 .L:NOP:JMP L+3"]);
+  const errs = r.perLine.flatMap(s => s.errors.map(e => e.message));
+  if (errs.length) return `unexpected: ${errs.join('; ')}`;
+  const b = r.perLine[0].bytes;
+  return (b[0] === 0xEA && b[1] === 0x4C && b[2] === 0x03 && b[3] === 0x98)
+    ? null : `bytes [${b.map(hex2).join(' ')}]`;
+});
+
+test('byte-extract wraps whole expression: #<$1234+1 → A9 35', () =>
+  compareBytes(asm('LDA #<$1234+1'), [0xA9, 0x35]));   // <($1235) = $35
+
+test('byte-extract high: #>$12FF+1 → A9 13', () =>
+  compareBytes(asm('LDA #>$12FF+1'), [0xA9, 0x13]));   // >($1300) = $13
+
+test('label − label is a PC-independent constant (size idiom)', () => {
+  // .A at $9800, two NOPs, .B at $9802 → B-A = 2.  LDX #B-A → A2 02.
+  const r = assembleProgram(["ORG $9800 .A:NOP:NOP:.B:LDX #B-A"]);
+  const errs = r.perLine.flatMap(s => s.errors.map(e => e.message));
+  if (errs.length) return `unexpected: ${errs.join('; ')}`;
+  const b = r.perLine[0].bytes;
+  return (b[2] === 0xA2 && b[3] === 0x02) ? null : `bytes [${b.map(hex2).join(' ')}]`;
+});
+
+test('address + address is an error', () => {
+  const e = asmErrMulti("ORG $9800 .A:NOP:LDA A+A");
+  if (e === null) return 'expected an error';
+  return /combines two addresses/i.test(e) ? null : `wrong message: ${e}`;
+});
+
+test('constant − address is an error', () => {
+  const e = asmErrMulti("ORG $9800 .A:NOP:LDA 5-A");
+  if (e === null) return 'expected an error';
+  return /subtracts an address from a constant/i.test(e) ? null : `wrong message: ${e}`;
+});
+
+test('label+const with no ORG still errors (anchoring propagates)', () => {
+  // assembleProgram with no startAddr → genuinely unanchored (asmErr*
+  // pass startAddr 0, which would anchor it).
+  const r = assembleProgram([".A:NOP:LDA A+1"]);
+  const msgs = r.perLine.flatMap(s => s.errors.map(e => e.message));
+  if (msgs.length === 0) return 'expected an anchoring error';
+  return msgs.some(m => /no ORG/i.test(m)) ? null : `wrong: ${msgs.join('; ')}`;
+});
+
+test('signed-literal operands unaffected: BNE -7 still works', () =>
+  compareBytes(asm('.L:BNE -7'), [0xD0, 0xF9]));
+
+test('trailing garbage after expression errors', () => {
+  const e = asmErr('LDA $10+1 X');
+  if (e === null) return 'expected an error';
+  return /trailing|unrecognised/i.test(e) ? null : `wrong message: ${e}`;
+});
+
+test("char literal regression: LDA #'+ still parses (0x2B)", () =>
+  compareBytes(asm("LDA #'+"), [0xA9, 0x2B]));
+
+test('DB expression emits a 2-byte word: DB $9800+1 → 01 98', () => {
+  const r = assembleProgram(['DB $9800+1']);
+  if (r.perLine[0].errors.length) return `unexpected: ${r.perLine[0].errors[0].message}`;
+  return compareBytes(r.perLine[0].bytes, [0x01, 0x98]);
+});
+
+test('DB size idiom: DB B-A where block is 3 bytes → 03 00', () => {
+  const r = assembleProgram(["ORG $9800 .A:NOP:NOP:NOP:.B", 'DB B-A']);
+  const errs = r.perLine.flatMap(s => s.errors.map(e => e.message));
+  if (errs.length) return `unexpected: ${errs.join('; ')}`;
+  return compareBytes(r.perLine[1].bytes, [0x03, 0x00]);
+});
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 let allPass = true;

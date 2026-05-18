@@ -236,7 +236,14 @@ type Expr =
    *  values.  `inner` is recursive so a future expression-engine
    *  upgrade can generalise it from a single label/literal to a
    *  full arithmetic expression without restructuring the tree. */
-  | { kind: 'byteExtract'; which: 'lo' | 'hi'; inner: Expr };
+  | { kind: 'byteExtract'; which: 'lo' | 'hi'; inner: Expr }
+  /** Additive expression: `left + right` or `left - right`.
+   *  Left-associative, `+`/`-` only (no precedence, no `* /`).
+   *  Resolution rules: `address ± constant` stays an address (label
+   *  anchoring propagated); `address − address` is a PC-independent
+   *  constant (size idiom); `address + address` (or `const − address`)
+   *  is an error.  See {@link resolveExpr}. */
+  | { kind: 'binary'; op: '+' | '-'; left: Expr; right: Expr };
 
 /** A resolved value — either what a literal Expr already carries, or the
  *  result of looking up a symbol in the symbol table.  `isLabel` is set
@@ -291,71 +298,161 @@ const IDENT_RE = new RegExp(`^${IDENT_SEGMENT}(?:\\.${IDENT_SEGMENT})*$`);
  *  DATA statement should look (hex → `#XX`, decimal → bare digits; `%`
  *  binary maps to hex, `'c` char maps to decimal).  Identifiers are
  *  resolved later against the symbol table. */
-function parseExpr(text: string): Expr | { error: string } {
-  const t = text.trim();
-  if (t.length === 0) return { error: 'missing operand' };
-  // Byte-extract prefix: `<expr` (low byte) or `>expr` (high byte).
-  // Recurses on the rest, so today `<LABEL` parses as byteExtract(sym
-  // 'LABEL'); when the expression engine grows to support arithmetic
-  // (`<(LABEL+1)` etc.), the recursion already handles it — only
-  // `parseExpr`'s primary cases need new clauses.  Note: `>` is also
-  // used as the contextual `>BASICEND` decoration on `ORG` lines, but
-  // that's parsed in a different syntactic position (trailing on ORG)
-  // and never reaches `parseExpr`, so the two uses don't collide.
-  if (t.startsWith('<') || t.startsWith('>')) {
-    const which: 'lo' | 'hi' = t[0] === '<' ? 'lo' : 'hi';
-    const inner = parseExpr(t.slice(1));
-    if ('error' in inner) return { error: inner.error };
-    return { kind: 'byteExtract', which, inner };
+/** Cursor over an operand string for the recursive-descent parser. */
+interface Cur { s: string; i: number }
+
+const isDigit = (c: string): boolean => c >= '0' && c <= '9';
+const isLetter = (c: string): boolean =>
+  (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+const skipSpaces = (cur: Cur): void => {
+  while (cur.i < cur.s.length && cur.s[cur.i] === ' ') cur.i++;
+};
+
+/** Parse one primary: a literal (`$hex` / `%bin` / `'c` / signed
+ *  decimal) or an identifier reference (`NAME`, dotted `NAME.MEMBER`).
+ *  Reads from the cursor; the `'c`/sign ambiguities that would plague
+ *  a string-splitter dissolve because primaries are recognised
+ *  structurally.  Byte-extract (`<`/`>`) is NOT a primary — it's a
+ *  whole-expression leading prefix handled in {@link parseExpr}. */
+function parsePrimary(cur: Cur): Expr | { error: string } {
+  skipSpaces(cur);
+  if (cur.i >= cur.s.length) return { error: 'missing operand' };
+  const c = cur.s[cur.i];
+
+  if (c === '<' || c === '>') {
+    return { error: `byte-extract (${c}) must be the leading operator of the whole expression` };
   }
-  if (t.startsWith('$')) {
-    const hex = t.slice(1);
-    if (!/^[0-9A-Fa-f]+$/.test(hex)) return { error: `invalid hex literal: ${t}` };
+
+  if (c === '$') {
+    cur.i++;
+    const start = cur.i;
+    while (cur.i < cur.s.length && /[0-9A-Fa-f]/.test(cur.s[cur.i])) cur.i++;
+    const hex = cur.s.slice(start, cur.i);
+    if (hex.length === 0) return { error: `invalid hex literal: $` };
     return {
       kind: 'lit', value: parseInt(hex, 16),
-      forceWide: hex.length >= 3,
-      dataFormat: 'hex',
-      digitCount: hex.length,
+      forceWide: hex.length >= 3, dataFormat: 'hex', digitCount: hex.length,
     };
   }
-  if (t.startsWith('%')) {
-    // Binary maps to hex on DATA output, but the user didn't write hex
-    // digits — so we have no digitCount to preserve.
-    const bin = t.slice(1);
-    if (!/^[01]+$/.test(bin)) return { error: `invalid binary literal: ${t}` };
+
+  if (c === '%') {
+    cur.i++;
+    const start = cur.i;
+    while (cur.i < cur.s.length && (cur.s[cur.i] === '0' || cur.s[cur.i] === '1')) cur.i++;
+    const bin = cur.s.slice(start, cur.i);
+    // A digit immediately after the binary run means the user wrote a
+    // malformed binary literal (`%123`), not "%1 then junk".
+    if (bin.length === 0 || (cur.i < cur.s.length && isDigit(cur.s[cur.i]))) {
+      const badStart = start;
+      while (cur.i < cur.s.length && (isDigit(cur.s[cur.i]) || isLetter(cur.s[cur.i]))) cur.i++;
+      return { error: `invalid binary literal: %${cur.s.slice(badStart, cur.i)}` };
+    }
     return { kind: 'lit', value: parseInt(bin, 2), forceWide: false, dataFormat: 'hex' };
   }
-  if (t.startsWith("'")) {
-    // Char literal maps to decimal on DATA output.  One character;
-    // no user-chosen digit width to carry.  Routed through the Oric
-    // charset so `'£` yields 0x5F and non-Oric characters error
-    // rather than emitting a bogus Unicode codepoint.
-    const rest = t.slice(1);
-    if (rest.length !== 1) return { error: `invalid character literal: ${t}` };
-    const byte = oricCharToByte(rest);
+
+  if (c === "'") {
+    // Apostrophe + exactly one char (any char, including `+`/`-`/space).
+    if (cur.i + 1 >= cur.s.length) return { error: `invalid character literal: '` };
+    const ch = cur.s[cur.i + 1];
+    cur.i += 2;
+    // More alphanumerics immediately after a char literal (`'ab`) is a
+    // malformed literal, not "'a then junk" — keep the precise message.
+    if (cur.i < cur.s.length && (isLetter(cur.s[cur.i]) || isDigit(cur.s[cur.i]))) {
+      const badStart = cur.i - 2;
+      while (cur.i < cur.s.length && (isLetter(cur.s[cur.i]) || isDigit(cur.s[cur.i]))) cur.i++;
+      return { error: `invalid character literal: ${cur.s.slice(badStart, cur.i)}` };
+    }
+    const byte = oricCharToByte(ch);
     if (byte === null) {
-      return { error: `character not in the Oric character set: ${t}` };
+      return { error: `character not in the Oric character set: '${ch}` };
     }
     return { kind: 'lit', value: byte, forceWide: false, dataFormat: 'decimal' };
   }
-  if (/^[+-]?\d+$/.test(t)) {
-    // Decimal digit width is preserved too — `LDY #00` → DATA `00`,
-    // `LDY #0` → DATA `0`.  Leading sign (`+` or `-`) is not counted
-    // as a digit.  An explicit `+` is accepted so that branch operands
-    // can be written as `BNE +5` for a forward-branch offset in parallel
-    // with `BNE -7` for a backward one.
-    const digits = /^[+-]/.test(t) ? t.slice(1) : t;
+
+  // Signed decimal literal: an optional sign here is part of the
+  // number (e.g. `BNE -7`), distinct from a binary `+`/`-` which is
+  // only consumed between primaries by parseAdditive.
+  if (c === '+' || c === '-' || isDigit(c)) {
+    const start = cur.i;
+    if (c === '+' || c === '-') cur.i++;
+    const dStart = cur.i;
+    while (cur.i < cur.s.length && isDigit(cur.s[cur.i])) cur.i++;
+    if (cur.i === dStart) {
+      return { error: `unrecognised operand: ${cur.s.slice(start).trim() || c}` };
+    }
+    const lit = cur.s.slice(start, cur.i);
     return {
-      kind: 'lit', value: parseInt(t, 10),
-      forceWide: false,
-      dataFormat: 'decimal',
-      digitCount: digits.length,
+      kind: 'lit', value: parseInt(lit, 10),
+      forceWide: false, dataFormat: 'decimal', digitCount: cur.i - dStart,
     };
   }
-  if (IDENT_RE.test(t)) {
-    return { kind: 'sym', name: t };
+
+  // Identifier reference, with optional dotted member chain.
+  if (isLetter(c)) {
+    const start = cur.i;
+    cur.i++;
+    while (cur.i < cur.s.length && (isLetter(cur.s[cur.i]) || isDigit(cur.s[cur.i]))) cur.i++;
+    // Optional `.SEGMENT` members (`BLOCKA.END`, `SYS.MUSIC.V11`).
+    while (cur.i < cur.s.length && cur.s[cur.i] === '.'
+           && cur.i + 1 < cur.s.length && isLetter(cur.s[cur.i + 1])) {
+      cur.i++;  // consume '.'
+      cur.i++;  // consume the leading letter
+      while (cur.i < cur.s.length && (isLetter(cur.s[cur.i]) || isDigit(cur.s[cur.i]))) cur.i++;
+    }
+    return { kind: 'sym', name: cur.s.slice(start, cur.i) };
   }
-  return { error: `unrecognised operand: ${t}` };
+
+  return { error: `unrecognised operand: ${cur.s.slice(cur.i).trim()}` };
+}
+
+/** `primary (('+'|'-') primary)*` — left-associative, no precedence. */
+function parseAdditive(cur: Cur): Expr | { error: string } {
+  let left = parsePrimary(cur);
+  if ('error' in left) return left;
+  for (;;) {
+    skipSpaces(cur);
+    const c = cur.s[cur.i];
+    if (c !== '+' && c !== '-') break;
+    cur.i++;  // consume operator
+    const right = parsePrimary(cur);
+    if ('error' in right) return right;
+    left = { kind: 'binary', op: c, left, right };
+  }
+  return left;
+}
+
+/** Parse a complete operand expression.  Grammar:
+ *
+ *    expr     := ('<' | '>')? additive
+ *    additive := primary (('+' | '-') primary)*
+ *
+ *  Byte-extract is a leading whole-expression prefix (so `<LABEL+1`
+ *  means `<(LABEL+1)` — the ca65/ACME convention), not a primary;
+ *  `a + <b` is therefore not expressible in v1 (rare; revisit with
+ *  parentheses if ever needed).  `>` here is unrelated to the
+ *  `>BASICEND` ORG decoration (different syntactic position; that
+ *  never reaches parseExpr). */
+function parseExpr(text: string): Expr | { error: string } {
+  const cur: Cur = { s: text, i: 0 };
+  skipSpaces(cur);
+  if (cur.i >= cur.s.length) return { error: 'missing operand' };
+
+  let result: Expr | { error: string };
+  const c = cur.s[cur.i];
+  if (c === '<' || c === '>') {
+    cur.i++;
+    const inner = parseAdditive(cur);
+    if ('error' in inner) return inner;
+    result = { kind: 'byteExtract', which: c === '<' ? 'lo' : 'hi', inner };
+  } else {
+    result = parseAdditive(cur);
+    if ('error' in result) return result;
+  }
+  skipSpaces(cur);
+  if (cur.i < cur.s.length) {
+    return { error: `unexpected trailing characters in operand: ${cur.s.slice(cur.i).trim()}` };
+  }
+  return result;
 }
 
 /** Parse an Expr and require it to be a literal.  Used for ORG and equate
@@ -369,7 +466,9 @@ function parseLiteralOnly(text: string): Resolved | { error: string } {
     // shape we got so the error is actionable.
     const got = e.kind === 'sym'
       ? `identifier: ${e.name}`
-      : `byte-extract expression`;
+      : e.kind === 'binary'
+        ? `arithmetic expression`
+        : `byte-extract expression`;
     return { error: `expected a literal, got ${got}` };
   }
   return {
@@ -404,9 +503,70 @@ function exprLabelName(e: Expr | null): string {
 function sysErrorIn(e: Expr | null): string | null {
   if (!e) return null;
   if (e.kind === 'byteExtract') return sysErrorIn(e.inner);
+  if (e.kind === 'binary') return sysErrorIn(e.left) ?? sysErrorIn(e.right);
   if (e.kind !== 'sym') return null;
   const r = lookupSysSymbol(e.name);
   return r.kind === 'error' ? r.message : null;
+}
+
+/** Net count of *address* terms in an additive expression, used to
+ *  decide whether the result is still an address (`±constant`, net 1),
+ *  a PC-independent constant (e.g. `label − label`, net 0), or an
+ *  illegal combination (net 2 = `addr+addr`, net −1 = `const−addr`).
+ *  A `sym` is an address term only if it resolves to a *user label*
+ *  (built-ins / equates / literals are fixed constants → 0).
+ *  `byteExtract` is a byte, never an address → 0.  Returns an error
+ *  string for an illegal combination; `null` if a sub-symbol is
+ *  unresolved (let the existing undefined/SYS reporters handle it). */
+function addrNet(e: Expr, symbols: Symbols): number | { error: string } | null {
+  if (e.kind === 'lit') return 0;
+  if (e.kind === 'byteExtract') {
+    // Inner must still resolve (so an unresolved label is reported),
+    // but a byte-extract result is not an address term.
+    return resolveExpr(e.inner, symbols) === null ? null : 0;
+  }
+  if (e.kind === 'binary') {
+    const l = addrNet(e.left, symbols);
+    if (l === null || typeof l === 'object') return l;
+    const r = addrNet(e.right, symbols);
+    if (r === null || typeof r === 'object') return r;
+    const net = e.op === '+' ? l + r : l - r;
+    if (net < 0) {
+      return { error: 'expression subtracts an address from a constant (only address ± constant, or address − address, is allowed)' };
+    }
+    if (net > 1) {
+      return { error: 'expression combines two addresses (only address ± constant, or address − address, is allowed)' };
+    }
+    return net;
+  }
+  // sym
+  const rv = resolveExpr(e, symbols);
+  if (rv === null) return null;
+  return rv.isLabel === true ? 1 : 0;
+}
+
+/** If an additive expression is an illegal address combination, or a
+ *  `label − label` size spanning two different assembler blocks,
+ *  return the precise message; else null.  Mirrors `sysErrorIn`'s
+ *  role for the arithmetic layer.  Recurses through byte-extract. */
+function arithErrorIn(e: Expr | null, symbols: Symbols): string | null {
+  if (!e) return null;
+  if (e.kind === 'byteExtract') return arithErrorIn(e.inner, symbols);
+  if (e.kind !== 'binary') return null;
+  const n = addrNet(e, symbols);
+  if (n !== null && typeof n === 'object') return n.error;
+  // label − label across different regions → meaningless size.
+  if (e.op === '-') {
+    const l = resolveExpr(e.left, symbols);
+    const r = resolveExpr(e.right, symbols);
+    if (l && r && l.isLabel && r.isLabel
+        && l.regionId !== undefined && r.regionId !== undefined
+        && l.regionId !== r.regionId) {
+      return 'subtraction between labels in different assembler blocks';
+    }
+  }
+  // Recurse so a nested sub-expression's error still surfaces.
+  return arithErrorIn(e.left, symbols) ?? arithErrorIn(e.right, symbols);
 }
 
 function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
@@ -440,6 +600,31 @@ function resolveExpr(expr: Expr, symbols: Symbols): Resolved | null {
       isLabel:    inner.isLabel,
       anchored:   inner.anchored,
       regionId:   inner.regionId,
+    };
+  }
+  if (expr.kind === 'binary') {
+    const L = resolveExpr(expr.left, symbols);
+    const R = resolveExpr(expr.right, symbols);
+    if (L === null || R === null) return null;  // undefined/SYS — reported elsewhere
+    const net = addrNet(expr, symbols);
+    if (net === null || typeof net === 'object') return null;  // arithErrorIn reports
+    const value = expr.op === '+' ? L.value + R.value : L.value - R.value;
+    // Anchoring (isLabel/anchored/regionId) propagates from whichever
+    // operand is label-bearing — independent of `net`, so an unanchored
+    // label still trips the pass-2 ABS/anchoring check even through
+    // `±constant` or a byte-extract.  When both sides are labels and
+    // they cancelled (net 0, e.g. `END − START`) the result is a
+    // PC-independent constant: no anchoring metadata (the cross-block
+    // case is rejected by arithErrorIn).
+    let anchorFrom: Resolved | null = null;
+    if (net === 1) anchorFrom = L.isLabel ? L : (R.isLabel ? R : null);
+    return {
+      value,
+      forceWide:  L.forceWide || R.forceWide || (net === 1 && value > 0xFF),
+      dataFormat: 'hex',
+      isLabel:    anchorFrom?.isLabel,
+      anchored:   anchorFrom?.anchored,
+      regionId:   anchorFrom?.regionId,
     };
   }
   // Built-in `SYS.` ROM symbols are resolved before user symbols.
@@ -664,7 +849,13 @@ type DbValue =
    *  extract is just a shorter literal anyway).  When DB grows full
    *  expression support this whole kind goes away in favour of an
    *  `expr` variant. */
-  | { kind: 'byteExtract'; which: 'lo' | 'hi'; name: string };
+  | { kind: 'byteExtract'; which: 'lo' | 'hi'; name: string }
+  /** An additive expression (`BLOCKA.END - BLOCKA + 1`, `SYS.PARAMS+1`).
+   *  Emits a 2-byte little-endian word (same width convention as
+   *  `sym`); use `<expr` / `>expr` for a single byte.  Only used when
+   *  the value contains a top-level `+`/`-` operator — plain literals
+   *  / identifiers keep their precise existing classification. */
+  | { kind: 'expr'; expr: Expr };
 
 type Statement =
   | { kind: 'empty' }
@@ -845,6 +1036,22 @@ function parseDbValues(text: string): { values: DbValue[] } | { error: string } 
 }
 
 /** Parse a single trimmed `DB` value into its {@link DbValue} form. */
+/** True if the (trimmed, non-string) DB value has a top-level binary
+ *  `+`/`-` — i.e. it's an arithmetic expression, not a plain literal
+ *  with a leading sign.  `'c`-aware (so `'+` is the char, not an op)
+ *  and skips a leading sign / leading byte-extract prefix. */
+function dbValueIsExpr(t: string): boolean {
+  let i = 0;
+  if (t[i] === '<' || t[i] === '>') i++;        // leading byte-extract
+  if (t[i] === '+' || t[i] === '-') i++;        // leading sign of first primary
+  for (; i < t.length; i++) {
+    const c = t[i];
+    if (c === "'") { i++; continue; }           // char literal: skip the char
+    if (c === '+' || c === '-') return true;     // a binary operator
+  }
+  return false;
+}
+
 function parseDbValue(t: string): { value: DbValue } | { error: string } {
   // String literal.
   if (t.startsWith('"')) {
@@ -865,6 +1072,15 @@ function parseDbValue(t: string): { value: DbValue } | { error: string } {
       bytes.push(byte);
     }
     return { value: { kind: 'string', bytes } };
+  }
+  // Arithmetic expression (top-level `+`/`-`) — e.g. `BLOCKA.END -
+  // BLOCKA + 1`.  Routed through the full expression parser; emits a
+  // word.  Plain literals/identifiers fall through to keep their
+  // precise byte/word/signed classification below.
+  if (dbValueIsExpr(t)) {
+    const e = parseExpr(t);
+    if ('error' in e) return { error: e.error };
+    return { value: { kind: 'expr', expr: e } };
   }
   // Hex.
   if (t.startsWith('$')) {
@@ -1297,6 +1513,7 @@ function pass1(
               case 'sym':         size += 2; break;
               case 'string':      size += v.bytes.length; break;
               case 'byteExtract': size += 1; break;
+              case 'expr':        size += 2; break;
             }
           }
           prepared.push({
@@ -1472,6 +1689,33 @@ function pass2(
             dbBytes.push(byte);
             break;
           }
+          case 'expr': {
+            // Additive expression → 2-byte LE word.  Resolve via the
+            // shared resolver; on failure surface the most specific
+            // message (arithmetic combination > SYS > undefined), then
+            // pad 2 zeros to keep later DB offsets stable.
+            const r = resolveExpr(v.expr, symbols);
+            if (r === null) {
+              const msg = arithErrorIn(v.expr, symbols)
+                ?? sysErrorIn(v.expr)
+                ?? `undefined symbol: ${exprLabelName(v.expr)}`;
+              lineState.errors.push({ message: msg });
+              dbBytes.push(0, 0);
+              dbHadError = true;
+              break;
+            }
+            if (r.isLabel && r.anchored === false) {
+              lineState.errors.push({
+                message: `label ${exprLabelName(v.expr)} used in DB but no ORG `
+                       + `was declared for this block of assembler`,
+              });
+              dbBytes.push(0, 0);
+              dbHadError = true;
+              break;
+            }
+            dbBytes.push(r.value & 0xFF, (r.value >> 8) & 0xFF);
+            break;
+          }
         }
       }
       // Sanity: bytes emitted match the size pass 1 committed.
@@ -1504,9 +1748,10 @@ function pass2(
 
     const resolved = resolveExpr(p.op.expr, symbols);
     if (resolved === null) {
-      const sysErr = sysErrorIn(p.op.expr);
+      const sysErr   = sysErrorIn(p.op.expr);
+      const arithErr = arithErrorIn(p.op.expr, symbols);
       lineState.errors.push({
-        message: sysErr ?? `undefined symbol: ${exprLabelName(p.op.expr)}`,
+        message: sysErr ?? arithErr ?? `undefined symbol: ${exprLabelName(p.op.expr)}`,
       });
       continue;
     }

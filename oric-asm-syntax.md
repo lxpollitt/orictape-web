@@ -119,6 +119,24 @@ Byte-extract follows the same anchoring rule as absolute label references: if th
 
 > **Note on `>`**: this operator and the `>BASICEND` decoration on `ORG` lines are different uses of the `>` token, disambiguated by syntactic position.  `>BASICEND` only appears as a trailing decoration after an `ORG` literal and is a contextual keyword; the `>` byte-extract operator appears as a prefix on an expression in operand position.
 
+### Expression arithmetic (`+` and `-`)
+
+Operand and `DB` values may be additive expressions: `primary (('+' | '-') primary)*`, where a *primary* is any literal or label/identifier (including dotted members like `BLOCKA.END` or `SYS.PARAMS`).  **`+` and `-` only**, left-associative, no precedence, no `*`/`/`, no parentheses (those remain deferred).
+
+```basic
+STA SYS.PARAMS+1            ; the Atmos-manual parameter-block idiom
+LDA #<MYDATA+1             ; byte-extract wraps the whole expression: <(MYDATA+1)
+DB  BLOCKA.END - BLOCKA + 1 ; block length (size idiom)
+```
+
+Resolution rules — the result's nature depends on how many *address* terms it has (a *user label* is an address term; literals, equates and built-in `SYS.` symbols are fixed constants):
+
+- **address ± constant → address.** Stays address-like; the label's anchoring (ORG-required / region) propagates, so `JMP LABEL+3` still errors without an `ORG` and ZP/ABS sizing still derives from the result.
+- **address − address → constant.** A PC-independent size (the `END-START` idiom). The two labels must be in the **same assembler block** — a cross-block difference is an error (mirrors the cross-region branch rule).
+- **address + address**, or **constant − address**, → **error** ("expression combines two addresses" / "subtracts an address from a constant").
+
+`<`/`>` byte-extract is a leading **whole-expression** prefix: `<LABEL+1` means `<(LABEL+1)` (the ca65/ACME convention).  Consequently `a + <b` is not expressible (rare; revisit with parentheses if ever needed).  A leading sign on the first primary is part of that literal (`BNE -7` is unchanged); `+`/`-` are only operators *between* primaries, and `'+`/`'-` are still the character literals.  In `DB`, an arithmetic value emits a 2-byte little-endian word (same width convention as a bare label) — use `<expr`/`>expr` for a single byte.
+
 ## Operand Syntax
 
 | Addressing Mode   | Syntax          | Example                          |
@@ -303,9 +321,7 @@ On the FOR line, the two patch sites are the `#9800` (after `=`) and the `#9821`
 
 ## Deferred (if ever needed)
 
-- Expressions with `+ - * /` between literals and labels.
-- Low/high byte operators `<expr` and `>expr`.
-- Label offset references, e.g. `.LABEL+3`.
+- `*` and `/` operators, and parenthesised grouping, in expressions.  (`+`/`-` and label-offset references like `.LABEL+3` are implemented — see *Expression arithmetic*.  `<expr`/`>expr` byte-extract is implemented — see *Byte-extract operators*.)
 
 ## Worked Example
 
