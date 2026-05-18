@@ -317,14 +317,14 @@ test('bad binary literal (LDA #%123)', () => {
 test("bad ASCII literal (LDA #'ab)", () => {
   const err = asmErr("LDA #'ab");
   if (err === null) return 'expected error, got success';
-  if (!/invalid ASCII literal/i.test(err)) return `wrong message: ${err}`;
+  if (!/invalid character literal/i.test(err)) return `wrong message: ${err}`;
   return null;
 });
 
 test("empty ASCII literal (LDA #')", () => {
   const err = asmErr("LDA #'");
   if (err === null) return 'expected error, got success';
-  if (!/invalid ASCII literal/i.test(err)) return `wrong message: ${err}`;
+  if (!/invalid character literal/i.test(err)) return `wrong message: ${err}`;
   return null;
 });
 
@@ -521,8 +521,13 @@ test('equate in immediate (LDA #COLOR)',
 test('equate in indirect indexed (LDA (PTR),Y)',
   () => compareBytes(asm('.PTR = $04 : LDA (PTR),Y'), [0xB1, 0x04]));
 
-test('equate with underscore in name',
-  () => compareBytes(asm('.A_B = 5 : LDA #A_B'), [0xA9, 0x05]));
+test('equate with underscore in name is rejected (0x5F is £ on Oric)',
+  () => {
+    const e = asmErrMulti('.A_B = 5 : LDA #A_B');
+    if (e === null) return 'expected an error — underscore is no longer a valid identifier char';
+    return /invalid declaration|unrecognised operand|not in the Oric/i.test(e)
+      ? null : `wrong message: ${e}`;
+  });
 
 test('equate in indexed X (LDA ARR,X)',
   () => compareBytes(asm('.ARR = $BB80 : LDA ARR,X'), [0xBD, 0x80, 0xBB]));
@@ -851,7 +856,7 @@ test('no-ORG program with JSR to label: errors', () => {
 });
 
 test('no-ORG program with LDA label in ABS form: errors', () => {
-  const r = assembleProgram(['.DATA_AREA : NOP : LDA DATA_AREA']);
+  const r = assembleProgram(['.DATAAREA : NOP : LDA DATAAREA']);
   if (r.perLine[0].errors.length !== 1) return `expected 1 error, got ${r.perLine[0].errors.length}`;
   if (!/no ORG.*declared/i.test(r.perLine[0].errors[0].message)) {
     return `wrong message: ${r.perLine[0].errors[0].message}`;
@@ -1062,7 +1067,7 @@ test('DB string with embedded comma and colon', () =>
   compareBytes(asm('DB "a,b:c"'), [0x61, 0x2C, 0x62, 0x3A, 0x63]));
 
 test('DB string non-printable errors',
-  () => /non-printable/i.test(asmErr('DB "\u0001"') ?? '') ? null : 'wrong/no error');
+  () => /not in the Oric character set/i.test(asmErr('DB "\u0001"') ?? '') ? null : 'wrong/no error');
 
 test('DB mixed types', () =>
   compareBytes(asm('DB 0,0,%101110,%011111,%101110,0,0,0,"hi",0'),

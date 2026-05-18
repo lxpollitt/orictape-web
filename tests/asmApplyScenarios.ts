@@ -1710,13 +1710,13 @@ test('back-patch to anchored label works after PC-break+ORG', () => {
 
 // ── Named assembler blocks (`ORG $xxxx .NAME`) ────────────────────────────
 
-test('named ORG declares NAME = start and NAME_END = last byte', () => {
+test('named ORG declares NAME = start and NAME.END = last byte', () => {
   const p = mkProgram([
     "10 REM ' ORG $9800 .BLOCKA",
     "20 DATA #EA ' NOP",                 // $9800 (1 byte)
     "30 DATA #EA,#EA ' NOP:NOP",         // $9801-$9802 (2 bytes)
     "40 DATA #60 ' RTS",                 // $9803
-    "50 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA_END",
+    "50 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA.END",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1730,7 +1730,7 @@ test('named block ends at next ORG', () => {
     "20 DATA #EA ' NOP",                 // $9800, block ends here (next ORG on line 30)
     "30 REM ' ORG $9900 .BLOCKB",
     "40 DATA #EA ' NOP",                 // $9900
-    "50 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA_END",
+    "50 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA.END",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1745,7 +1745,7 @@ test('named block ends at zero-output DATA line (lenient)', () => {
     "30 DATA #EA ' *not code — PC-break", // ends BLOCKA, unanchors
     "40 REM ' ORG $9900 .BLOCKB",
     "50 DATA #60 ' RTS",
-    "60 CALL #0 ' .BLOCKA_END",
+    "60 CALL #0 ' .BLOCKA.END",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1760,7 +1760,7 @@ test('named block ends at `]]` close marker', () => {
     "30 DATA #EA ' NOP",                  // $9801
     "40 REM ' ]]",                        // closes BLOCKA at $9801
     "50 REM ' [[",                        // re-activate for the back-patch line
-    "60 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA_END",
+    "60 CALL #0:CALL #0 ' .BLOCKA:.BLOCKA.END",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1773,7 +1773,7 @@ test('named block ends at end of program', () => {
     "10 REM ' ORG $9800 .BLOCKA",
     "20 DATA #EA ' NOP",                  // $9800
     "30 DATA #60 ' RTS",                  // $9801; end of program closes BLOCKA
-    "40 CALL #0 ' .BLOCKA_END",
+    "40 CALL #0 ' .BLOCKA.END",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1801,7 +1801,7 @@ test('multiple named blocks, cross-referenced', () => {
     "20 DATA #60 ' RTS",                  // $9800
     "30 REM ' ORG $9900 .BLOCKB",
     "40 DATA #60 ' RTS",                  // $9900
-    "50 CALL #0:CALL #0 ' .BLOCKA_END:.BLOCKB_END",
+    "50 CALL #0:CALL #0 ' .BLOCKA.END:.BLOCKB.END",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1817,7 +1817,7 @@ test('FOR/TO two-site back-patch with named block', () => {
     "20 DATA #EA ' NOP",
     "30 DATA #EA ' NOP",
     "40 DATA #60 ' RTS",                   // $9800-$9802 assembled
-    "50 FOR I=#0 TO #0:READ X:POKE I,X:NEXT ' .BLOCKA:.BLOCKA_END:-",
+    "50 FOR I=#0 TO #0:READ X:POKE I,X:NEXT ' .BLOCKA:.BLOCKA.END:-",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1843,11 +1843,11 @@ test('FOR/TO decimal literal preserves decimal format', () => {
   const p = mkProgram([
     "10 REM ' ORG $9800 .BLOCKA",
     "20 DATA #60 ' RTS",                   // $9800
-    "30 FOR I=0 TO 0:NEXT ' .BLOCKA:.BLOCKA_END",
+    "30 FOR I=0 TO 0:NEXT ' .BLOCKA:.BLOCKA.END",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  // Decimal patch: $9800 = 38912, block is 1 byte so _END = $9800 = 38912.
+  // Decimal patch: $9800 = 38912, block is 1 byte so .END = $9800 = 38912.
   if (!/^30 FOR I=38912 TO 38912/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
   return null;
 });
@@ -2780,11 +2780,11 @@ test('byte-extract: unanchored label in DB errors', () => {
 test('byte-extract: undefined symbol errors with the label name', () => {
   const p = mkProgram([
     "10 REM ' ORG $9800",
-    "20 DATA 0,0 ' LDA #<DOES_NOT_EXIST",
+    "20 DATA 0,0 ' LDA #<DOESNOTEXIST",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length === 0) return 'expected an undefined-symbol error';
-  if (!/undefined symbol: DOES_NOT_EXIST/.test(r.errors[0].message)) {
+  if (!/undefined symbol: DOESNOTEXIST/.test(r.errors[0].message)) {
     return `wrong message: ${r.errors[0].message}`;
   }
   return null;

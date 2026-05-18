@@ -17,8 +17,18 @@
  *   - `.LABEL = <literal>` statement: declares a numeric equate.
  *   - Bare identifier in operand position: reference to label or equate.
  *
- * Identifiers match `[A-Za-z][A-Za-z0-9_]*`.  Label/equate namespace is
- * shared and redeclaration is an error.
+ * Identifier grammar (Oric charset: byte 0x5F is `£`, not `_`, so
+ * underscore is NOT a valid identifier character — see oricCharset.ts):
+ *   - **Declarable** label/equate names: `[A-Za-z][A-Za-z0-9]*` —
+ *     letters and digits only, must start with a letter.  No `_`, no
+ *     `.` (a user cannot declare a dotted name).
+ *   - **References** additionally accept `.`-separated member access
+ *     (`[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*`) so a synthesised
+ *     member like a named block's `NAME.END` can be referenced.  `.END`
+ *     is the only member synthesised today; the dotted reference grammar
+ *     is general so `.START` / `.LEN` etc. can be added without grammar
+ *     changes.
+ * Label/equate namespace is shared and redeclaration is an error.
  *
  * Two-pass resolution:
  *   - Pass 1 walks every statement in input order across all annotations,
@@ -47,6 +57,8 @@
  *   - 3+ digit hex → force ABS.
  *   - Value ≥ 256 → ABS.
  */
+
+import { oricCharToByte } from './oricCharset';
 
 // ── Addressing modes ────────────────────────────────────────────────────────
 
@@ -259,7 +271,17 @@ type Resolved = ResolvedSymbol;
 /** The symbol table: shared across all annotations in one program. */
 export type Symbols = Map<string, ResolvedSymbol>;
 
-const IDENT_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+/** A single declarable identifier segment: letters/digits, must start
+ *  with a letter.  No `_` (it's `£` on the Oric) and no `.` (members
+ *  are tool-synthesised, not user-declarable). */
+const IDENT_SEGMENT = '[A-Za-z][A-Za-z0-9]*';
+
+/** Reference identifier: a declarable segment plus optional
+ *  `.`-separated member segments (`BLOCKA.END`).  Used wherever a
+ *  label/equate is *referenced* (operand position, DB value,
+ *  back-patch directive).  Declarations use {@link IDENT_SEGMENT}
+ *  directly so users can't declare dotted or underscored names. */
+const IDENT_RE = new RegExp(`^${IDENT_SEGMENT}(?:\\.${IDENT_SEGMENT})*$`);
 
 /** Parse a numeric literal — `$HH[HH]` hex, `%…` binary, `'c` ASCII, or
  *  decimal — OR a bare identifier naming a label/equate.  Literals carry
@@ -303,11 +325,17 @@ function parseExpr(text: string): Expr | { error: string } {
     return { kind: 'lit', value: parseInt(bin, 2), forceWide: false, dataFormat: 'hex' };
   }
   if (t.startsWith("'")) {
-    // ASCII maps to decimal on DATA output.  The char literal is one
-    // character; no user-chosen digit width to carry.
+    // Char literal maps to decimal on DATA output.  One character;
+    // no user-chosen digit width to carry.  Routed through the Oric
+    // charset so `'£` yields 0x5F and non-Oric characters error
+    // rather than emitting a bogus Unicode codepoint.
     const rest = t.slice(1);
-    if (rest.length !== 1) return { error: `invalid ASCII literal: ${t}` };
-    return { kind: 'lit', value: rest.charCodeAt(0), forceWide: false, dataFormat: 'decimal' };
+    if (rest.length !== 1) return { error: `invalid character literal: ${t}` };
+    const byte = oricCharToByte(rest);
+    if (byte === null) {
+      return { error: `character not in the Oric character set: ${t}` };
+    }
+    return { kind: 'lit', value: byte, forceWide: false, dataFormat: 'decimal' };
   }
   if (/^[+-]?\d+$/.test(t)) {
     // Decimal digit width is preserved too — `LDY #00` → DATA `00`,
@@ -623,10 +651,12 @@ function parseStatement(raw: string): Statement {
   const t = raw.trim();
   if (t.length === 0) return { kind: 'empty' };
 
-  // `.LABEL` or `.LABEL = <literal>` — declaration.
+  // `.LABEL` or `.LABEL = <literal>` — declaration.  Declarable names
+  // use the strict single-segment alphabet (no `_`, no `.`); a user
+  // cannot declare a dotted member name — those are tool-synthesised.
   if (t.startsWith('.')) {
     // Equate form first: `.IDENT = <literal>`.
-    const eqM = t.match(/^\.([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+    const eqM = t.match(new RegExp(`^\\.(${IDENT_SEGMENT})\\s*=\\s*(.+)$`));
     if (eqM) {
       const name = eqM[1];
       const lit = parseLiteralOnly(eqM[2]);
@@ -634,7 +664,7 @@ function parseStatement(raw: string): Statement {
       return { kind: 'equate', name, value: lit };
     }
     // Bare label: `.IDENT`.
-    const lblM = t.match(/^\.([A-Za-z][A-Za-z0-9_]*)\s*$/);
+    const lblM = t.match(new RegExp(`^\\.(${IDENT_SEGMENT})\\s*$`));
     if (lblM) return { kind: 'label', name: lblM[1] };
     return { kind: 'error', message: `invalid declaration: ${t}` };
   }
@@ -642,7 +672,7 @@ function parseStatement(raw: string): Statement {
   // `ORG <literal> [.BLOCKNAME] [>BASICEND]` — case-insensitive.  Two
   // optional decorations follow the address, in either order:
   //   - `.BLOCKNAME` names the assembler block that begins at this
-  //     ORG: the tool declares `NAME` = start address and `NAME_END`
+  //     ORG: the tool declares `NAME` = start address and `NAME.END`
   //     = inclusive last byte of the block (populated when the block
   //     ends, which happens at the next ORG, a zero-output DATA
   //     line, a `]]` close marker, or end of program).
@@ -671,7 +701,7 @@ function parseStatement(raw: string): Statement {
       // Trailing `.BLOCKNAME` — requires whitespace before the dot
       // so the literal `$1234.5` (if it ever appears) doesn't get
       // misparsed as `$1234` + label `5`.
-      const nameM = operand.match(/^(.*?)\s+\.([A-Za-z][A-Za-z0-9_]*)\s*$/);
+      const nameM = operand.match(new RegExp(`^(.*?)\\s+\\.(${IDENT_SEGMENT})\\s*$`));
       if (nameM) {
         if (blockName !== undefined) {
           return { kind: 'error', message: 'duplicate .BLOCKNAME on ORG' };
@@ -792,11 +822,17 @@ function parseDbValue(t: string): { value: DbValue } | { error: string } {
     const body = t.slice(1, -1);
     const bytes: number[] = [];
     for (let i = 0; i < body.length; i++) {
-      const code = body.charCodeAt(i);
-      if (code < 0x20 || code > 0x7E) {
-        return { error: `non-printable ASCII in string at position ${i} (code 0x${code.toString(16)})` };
+      const ch = body[i];
+      const byte = oricCharToByte(ch);
+      // Reject anything with no Oric representation, and anything that
+      // maps to a control byte (< 0x20) — strings are printable text.
+      if (byte === null || byte < 0x20) {
+        return {
+          error: `character not in the Oric character set at position ${i}: `
+               + `${JSON.stringify(ch)}`,
+        };
       }
-      bytes.push(code);
+      bytes.push(byte);
     }
     return { value: { kind: 'string', bytes } };
   }
@@ -1041,10 +1077,12 @@ function pass1(
   }
 
   // Named-block state.  An `ORG $xxxx .NAME` opens a block; its end
-  // label (`NAME_END`) is declared when the block closes at the next
+  // label (`NAME.END`) is declared when the block closes at the next
   // ORG, PC-break, `]]` close marker, or end of program.  `lastByte`
   // is the inclusive address of the most recent emitted instruction
-  // byte within this block — that's what `NAME_END` resolves to.
+  // byte within this block — that's what `NAME.END` resolves to.
+  // (`.` member separator, not `_`: byte 0x5F is `£` on the Oric so
+  // underscore is not a representable identifier char.)
   // If no instructions have been emitted yet, `lastByte` stays at
   // `startPc - 1` and the closing declares an "empty block" error
   // (users naming a block imply they'll reference its size).
@@ -1083,7 +1121,7 @@ function pass1(
       void stateErrs;
       return;
     }
-    const err = declare(b.lineIdx, `${b.name}_END`, {
+    const err = declare(b.lineIdx, `${b.name}.END`, {
       value:      b.lastByte,
       forceWide:  true,
       isLabel:    true,

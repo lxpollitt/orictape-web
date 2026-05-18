@@ -7,6 +7,7 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 
 import { flagTokenisationMismatches, byteSequenceSyntaxChecker } from './editor';
+import { oricByteToChar } from './oricCharset';
 
 // BitInfo is used by the UI when reading individual bits out of a BitStream.
 export interface BitInfo {
@@ -313,7 +314,7 @@ export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
       else if (syntax.reason === 'invalidNonPrintable') invalidNonPrintableCount++;
       else if (syntax.reason === 'nonPrintableInLiteral') nonPrintableInLiteralCount++;
     } else if (b >= 0x20 && b <= 0x7E) {
-      elements.push(String.fromCharCode(b));
+      elements.push(oricByteToChar(b));
       errors.push(null);
     } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
       elements.push(KEYWORDS[b - 0x80]);
@@ -1501,9 +1502,11 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
       endAddr,
     };
 
-    // Null-terminated program name.
+    // Null-terminated program name.  Oric charset: byte 0x5F renders
+    // as `£`, so route through oricByteToChar for fidelity with the
+    // BASIC line view.
     for (let b = getByte(); b > 0; b = getByte()) {
-      prog.name += String.fromCharCode(b);
+      prog.name += oricByteToChar(b);
     }
 
     // Non-BASIC programs (machine code, etc.) — header fields are populated

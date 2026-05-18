@@ -1130,7 +1130,13 @@ function parseBackPatchDirectives(
     const t = raw.trim();
     if (t === '') continue;
     if (t === '-') { directives.push({ kind: 'skip' }); continue; }
-    const m = t.match(/^\.([A-Za-z][A-Za-z0-9_]*)$/);
+    // `.LABEL` is a *reference* to a declared/synthesised symbol, so
+    // it accepts `.`-separated member access (e.g. `.BLOCKA.END`, a
+    // named block's synthesised end label).  No `_` — byte 0x5F is
+    // `£` on the Oric, so underscore isn't a valid identifier char
+    // (see oricCharset.ts / oric-asm-syntax.md §Labels).  Kept in
+    // sync with assembler6502.ts's IDENT_RE reference grammar.
+    const m = t.match(/^\.([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*)$/);
     if (m) { directives.push({ kind: 'label', name: m[1] }); continue; }
     return { error: `invalid back-patch directive: ${t}` };
   }

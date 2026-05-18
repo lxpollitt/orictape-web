@@ -41,6 +41,7 @@ import {
   flagPointerAndTerminatorIssues, buildLineElements, invalidateLineHealth,
   lineFirstAddr,
 } from './decoder';
+import { oricCharToByte } from './oricCharset';
 
 /**
  * Verbose debug logging for edit-related operations — off by default to keep
@@ -1120,16 +1121,21 @@ function tokenise(content: string): number[] {
       }
     }
 
-    // Characters outside the Oric's 7-bit range — silently drop.
-    if (code > 0x7E) {
+    // Map the typed character to its Oric byte.  Handles the charset
+    // deviation (`£` → 0x5F) and drops anything with no Oric
+    // representation — including ASCII `_`, since byte 0x5F is `£` on
+    // the Oric (see oricCharToByte).  ASCII chars map identity, so
+    // the classification checks below can keep using `code`/`ch`.
+    const oricByte = oricCharToByte(ch);
+    if (oricByte === null) {
       i++;
       continue;
     }
 
     // Literal mode — emit byte as-is.
     if (mode === 'literals') {
-      bytes.push(code);
-      mode = byteSequenceSyntaxChecker(code).expectNext;
+      bytes.push(oricByte);
+      mode = byteSequenceSyntaxChecker(oricByte).expectNext;
       i++;
       continue;
     }
@@ -1147,8 +1153,8 @@ function tokenise(content: string): number[] {
 
     // Spaces, digits, semicolons pass through without keyword matching.
     if (ch === ' ' || (code >= 0x30 && code <= 0x39) || ch === ';') {
-      bytes.push(code);
-      mode = byteSequenceSyntaxChecker(code).expectNext;
+      bytes.push(oricByte);
+      mode = byteSequenceSyntaxChecker(oricByte).expectNext;
       i++;
       continue;
     }
@@ -1168,9 +1174,9 @@ function tokenise(content: string): number[] {
     }
 
     if (!matched) {
-      // No keyword match — output the character as ASCII and advance.
-      bytes.push(code);
-      mode = byteSequenceSyntaxChecker(code).expectNext;
+      // No keyword match — output the character's Oric byte and advance.
+      bytes.push(oricByte);
+      mode = byteSequenceSyntaxChecker(oricByte).expectNext;
       i++;
     }
   }

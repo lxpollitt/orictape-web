@@ -67,7 +67,7 @@ By default, the re-assembler writes assembled bytes back into the originating DA
 
 Two flavours are supported:
 
-- **`[[ DATA <line>`** — collect the region's bytes into a single DATA statement on the given BASIC line number.  Values are rendered as `#XX,#XX,…` (byte-per-value hex), irrespective of the region's WORDS/BYTES setting; a blob of this form is typically read back by a `FOR I=NAME TO NAME_END : READ X : POKE I,X : NEXT` loop that requires one byte per `READ`.  Gaps between non-contiguous `ORG`s inside the region are zero-filled.  Error if the target line number is not found in the program, or if the target line falls inside the region itself.
+- **`[[ DATA <line>`** — collect the region's bytes into a single DATA statement on the given BASIC line number.  Values are rendered as `#XX,#XX,…` (byte-per-value hex), irrespective of the region's WORDS/BYTES setting; a blob of this form is typically read back by a `FOR I=NAME TO NAME.END : READ X : POKE I,X : NEXT` loop that requires one byte per `READ`.  Gaps between non-contiguous `ORG`s inside the region are zero-filled.  Error if the target line number is not found in the program, or if the target line falls inside the region itself.
 
 - **`[[ CSAVE "<name>" [AUTO]`** — package the region's bytes as a machine-code TAP block named `<name>`.  The tool surfaces the result as a new virtual tape in the tape list, identical in treatment to a loaded `.tap` file — the user can click through to its program, inspect it, or include it via *Build TAP…* for emulator testing.  `AUTO` sets the TAP header's autorun flag, so CLOAD auto-executes from the start address.  Each `applyAssembler` run appends new tapes; existing tapes are never overwritten (close and re-run if you want a clean slate).  The TAP's start address defaults to `$501` if the region has no explicit `ORG`; an explicit `ORG $xxxx` (named or bare) at the region's top overrides this and sets the start address directly.  `endAddr` = last assembled byte + 1.  Gaps between non-contiguous `ORG`s are zero-filled.
 
@@ -81,7 +81,7 @@ Two flavours are supported:
 **Common rules for output sinks:**
 
 - Output-sink declarations scope to the `[[` that carries them: the region's end is the matching `]]` (or end of program if unclosed).
-- Named assembler blocks (`ORG $xxxx .NAME`) and their `NAME` / `NAME_END` labels work normally inside an output-sink region.  For DATA sinks, this lets the user's POKE loop auto-patch its `FOR … TO …` bounds.  For CSAVE sinks, the labels may be referenced from BASIC code elsewhere (e.g. a `CALL NAME` after the TAP has been CLOADed into memory).
+- Named assembler blocks (`ORG $xxxx .NAME`) and their `NAME` / `NAME.END` labels work normally inside an output-sink region.  For DATA sinks, this lets the user's POKE loop auto-patch its `FOR … TO …` bounds.  For CSAVE sinks, the labels may be referenced from BASIC code elsewhere (e.g. a `CALL NAME` after the TAP has been CLOADed into memory).
 - A region that produced no assembled bytes is an error ("`[[ region produced no assembled bytes`").
 - For CSAVE specifically, any assembler error **anywhere** in the program suppresses **all** TAP generation for that run — a half-correct machine-code binary is dangerous to run, so we take an all-or-nothing stance.  Per-line type-1 DATA patches are independent of this gate and still apply.
 
@@ -92,7 +92,9 @@ Two flavours are supported:
 | Hex     | `$` prefix          | `$BB`, `$9800`    |
 | Decimal | bare or signed      | `40`, `-10`, `+5` |
 | Binary  | `%` prefix          | `%01111111`       |
-| ASCII   | `'c` (one char)     | `'s`, `'A`        |
+| Char    | `'c` (one char)     | `'s`, `'A`, `'£`  |
+
+Char literals map through the Oric character set (see *Character set* under *Labels*): `'£` → 0x5F, `'©` → 0x60; a character with no Oric representation (e.g. `'_`, `` '` ``) is an error.
 
 An explicit leading `+` on decimal literals is accepted (equivalent to the bare positive form) and is useful for branches where a signed literal like `+5` or `-7` reads as an explicit offset.
 
@@ -136,7 +138,29 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 
 - **Declaration:** `.LABEL` at the start of a statement.
 - **Reference** (in assembler code): bare `LABEL`.
-- Characters: letters, digits, underscore. Must start with a letter.
+- **Declarable name characters:** letters and digits only; must start with a letter (`[A-Za-z][A-Za-z0-9]*`). **No underscore** — see *Character set* below — and no `.` (the dot is reserved for tool-synthesised members, not user-declarable).
+- **Member references:** a reference may use `.`-separated member access — `NAME.END` resolves the synthesised end label of a named block (see `ORG $xxxx .NAME`).  The reference grammar is general (`NAME.MEMBER`), so further synthesised members (`.START`, `.LEN`, …) can be added later without a grammar change.  `.END` is the only one defined today.  Users cannot *declare* dotted names; only the tool synthesises them.
+
+### Character set
+
+The Oric-1 / Atmos text character set is standard 7-bit ASCII for codes 0x20–0x7E with **two semantic deviations** (verified against the Oric-1 manual's A.S.C.I.I. table):
+
+| Byte | Oric glyph | Standard ASCII |
+|------|------------|----------------|
+| 0x5F (95) | `£` (pound) | `_` (underscore) |
+| 0x60 (96) | `©` (copyright) | `` ` `` (grave / backtick) |
+
+The tool renders these bytes as `£` / `©` everywhere (BASIC line view, program name) and accepts `£` / `©` on input (mapping them to 0x5F / 0x60).  The *displaced* ASCII glyphs (`_`, `` ` ``) have no Oric representation and are rejected on input — the `«0xNN»` byte-escape remains the universal way to enter any byte directly.
+
+**Modelled vs not — the principle:** we model *semantic* character deviations, not font/glyph-style differences.
+
+- 0x5E is drawn as an up-arrow by the Oric ROM but is the same logical character as ASCII `^` (the caret key) — a font difference, **not modelled** (`^` round-trips as itself).
+- 0x7E is a hatched block in the ROM, but the Oric-1 and Atmos manuals disagree (unspecified vs "blank"), so it's treated as the ASCII `~` font-bucket — **not modelled**.
+- 0x5B is confirmed standard `[`.
+
+`£` was a real Oric keyboard key; `©` was not keyboard-typeable on the Oric (it could only reach a program via `POKE`/`CHR$`).  We model `©` regardless: the cost is one map entry, and as a recovery/inspection tool the BASIC view should show the truth (`©`) on the rare occasion byte 0x60 lands in displayed text.  Modelling it also *adds* an authoring path the real Oric lacked (`'©`, `DB "©"`), consistent with `£`.
+
+Consequence for this DSL: **underscore is not a valid identifier character** (it isn't an Oric glyph).  This is why the auto-synthesised block-end label is `NAME.END` (a `.` member) rather than the conventional `NAME_END` — `_` simply can't be typed or displayed faithfully on an Oric.  Character/string *values* (`'£`, `'©`, `DB "© 1983"`) go through the same charset mapping, so they assemble to the correct bytes and genuinely non-Oric characters error rather than emitting a bogus codepoint.
 
 ## Equates
 
@@ -147,7 +171,7 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
 ## Directives
 
 - `ORG $xxxx` — set assembly address. May appear multiple times for non-contiguous code.  Two ORG-anchored ranges that occupy overlapping memory bytes are an error (the later ORG's bytes would clobber the earlier block's at runtime); the tool reports the clash on the later of the two ORG lines.
-- `ORG $xxxx .NAME` — set assembly address **and** open a named assembler block.  Declares two labels: `NAME` (= start address = `$xxxx`) and `NAME_END` (= inclusive last byte emitted in the block).  The block closes — and `NAME_END` gets its value — when the next `ORG` (with or without a name), a zero-output DATA line, a `]]` close marker, or the end of the program is reached.  Useful for `FOR`-loop back-patching (`FOR I=NAME TO NAME_END`) so POKE/DOKE loops stay in sync with the assembled code.  The `.NAME` suffix is case-sensitive (labels are case-sensitive generally).
+- `ORG $xxxx .NAME` — set assembly address **and** open a named assembler block.  Declares two labels: `NAME` (= start address = `$xxxx`) and `NAME.END` (= inclusive last byte emitted in the block).  The block closes — and `NAME.END` gets its value — when the next `ORG` (with or without a name), a zero-output DATA line, a `]]` close marker, or the end of the program is reached.  Useful for `FOR`-loop back-patching (`FOR I=NAME TO NAME.END`) so POKE/DOKE loops stay in sync with the assembled code.  The `.NAME` suffix is case-sensitive (labels are case-sensitive generally).
 - `ORG $xxxx >BASICEND` — runtime-overlap assertion for machine code that's intended to be CLOAD'd at runtime alongside the BASIC program that contains the assembler annotations.  After re-assembly settles the final BASIC program size, the tool checks that `$xxxx` is **strictly greater** than the address of the BASIC program's last byte (inclusive of the `0x00` line terminator on the last line and the `0x00 0x00` end-of-program terminator).  If the BASIC program has grown into the space the user reserved for the machine code, the check fails with `ORG $xxxx >BASICEND assertion failed: BASICEND is $yyyy` and TAP emission is suppressed (via the global all-or-nothing gate).  Optional — programs whose machine code doesn't need to coexist with the BASIC program (for example, machine code intended to *replace* it after CLOAD) can omit the assertion.  `BASICEND` is a contextual keyword recognised only in this `>BASICEND` position; it is not a general symbol and cannot be used in expressions.  Whitespace around `>` is optional (`>BASICEND` and `> BASICEND` both accepted).
 - `ORG $xxxx .NAME >BASICEND` (or `>BASICEND .NAME`) — both decorations may be combined on a single ORG, in either order.
 - `ORG` is required if any label is referenced in an absolute addressing context (`JMP LABEL`, `JSR LABEL`, `LDA LABEL` in ABS form, etc.) or by a back-patch directive. Programs that use only equates, relative branches, and REL-only label references may omit `ORG`.
@@ -156,7 +180,7 @@ Zero-page vs. absolute is chosen automatically from operand size (fits in one by
   - **Decimal** unsigned (`123`): 1 byte if value ≤ 255 AND ≤ 3 digits; otherwise 2 bytes little-endian.  Leading zero (`0120`, `0001`) forces 2 bytes — matches the hex digit-count convention.
   - **Decimal** signed (`+5`, `-1`): 1 byte if value in `-128..127` AND ≤ 3 digits (excluding sign), encoded 2's-complement; otherwise 2 bytes little-endian, range `-32768..32767`.  Use `+255` to opt into "signed and therefore must be a word".
   - **Binary** `%01011` → 1 byte.  1–8 bits accepted (shorter just zero-pads); more than 8 bits is an error.
-  - **String** `"hello"` → one byte per char.  Printable ASCII only (`0x20..0x7E`); non-printable characters are an error.  No escape sequences, no terminator.  Strings can contain `:`, `;`, `,`, `'`, `*` as ordinary chars (the splitter is string-aware).
+  - **String** `"hello"` → one byte per char, mapped through the Oric character set (so `"£5"` emits `5F 35`).  Printable Oric characters only; control bytes and characters with no Oric representation are an error.  No escape sequences, no terminator.  Strings can contain `:`, `;`, `,`, `'`, `*` as ordinary chars (the splitter is string-aware).
   - **Identifier** `LABEL` → 2 bytes little-endian word, resolved at the second pass.  Same anchoring rule as ABS instruction operands — the label's block must have an `ORG`.
 
   The DATA-line renderer always emits each `DB` byte as its own `#XX` value regardless of the region's WORDS/BYTES setting (DB output is byte-oriented and one-POKE-per-value compatible).
@@ -228,10 +252,10 @@ On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, 
 ...
  90 REM ' ORG $9900 .BLOCKB       * closes BLOCKA
  ...
-500 FOR I=#9800 TO #9821 : READ X : POKE I,X : NEXT ' .BLOCKA:.BLOCKA_END:-
+500 FOR I=#9800 TO #9821 : READ X : POKE I,X : NEXT ' .BLOCKA:.BLOCKA.END:-
 ```
 
-On the FOR line, the two patch sites are the `#9800` (after `=`) and the `#9821` (after `TO`); the three directives (`.BLOCKA`, `.BLOCKA_END`, `-`) pair with FOR-start, TO-end, and the POKE's address (skipped because `I` is a variable, not a literal).
+On the FOR line, the two patch sites are the `#9800` (after `=`) and the `#9821` (after `TO`); the three directives (`.BLOCKA`, `.BLOCKA.END`, `-`) pair with FOR-start, TO-end, and the POKE's address (skipped because `I` is a variable, not a literal).
 
 ## Identifier Rules
 
