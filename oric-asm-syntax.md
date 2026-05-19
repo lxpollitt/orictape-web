@@ -7,7 +7,7 @@ Conventions for assembler annotations and tool directives embedded in Oric BASIC
 - All annotations follow Oric BASIC `'`.  What counts as the annotation-opening `'` depends on the host line kind (see Host Line Eligibility below); apostrophes that don't match the host's required shape are ordinary literal characters, not annotation markers.
 - Assembler code annotations pair with a `DATA` statement on the same line — the DATA's values are what the annotation assembles to.
 - Declarations (`ORG`, labels, equates) may live on `REM` lines with no DATA attached.
-- BASIC back-patch directives live on `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` / `FOR` / `TO` / `DEF USR` lines.
+- BASIC back-patch directives live on any non-`REM`/`DATA` line carrying a back-patch-shaped annotation; the patch sites are the line's `#…` hex literals (verb-independent — see *BASIC Back-Patch Directives*).
 
 ## Host Line Eligibility
 
@@ -15,7 +15,7 @@ Annotations are only interpreted as assembler input when they appear on a line w
 
 - `REM` — the line is recognised as an assembler host only when the body directly after the `REM` keyword starts with `'` (allowing any whitespace between), i.e. exactly the shape `<line number> REM ' …`.  REM lines whose body starts with anything else — including ordinary comments containing apostrophes like `REM UDG's` or `REM don't touch` — are plain BASIC comments and are left untouched.  When the line is a host, the annotation (everything after the opening `'`) must consist of valid assembly fragments only (declarations like `ORG`, labels, and equates, separated by `:`); human comments are permitted only at the very end via `;`.  Single statement per line.
 - `DATA` — single statement per line.  The annotation's assembled bytes overwrite the DATA's values in full — any pre-existing values on the DATA (in any count or format) are replaced by the assembled output.  Annotation must consist of valid assembly fragments only (instructions, and/or `:`-separated local label declarations); trailing `;` comments are permitted.
-- `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` / `FOR` / `TO` / `DEF USR` — any line containing one or more of these tokens or token-sequences (as statements, or as function calls inside expressions).  `DEF USR` is a two-token sequence (`DEF` followed by `USR`); bare `DEF` and bare `USR` are not patch hosts.  The annotation is interpreted as back-patch directives only when its first non-whitespace token is `.` or `-:`.
+- **Any other line** — a line that is neither a `REM`/`DATA` assembler host (above) nor a type-2 bare-assembler line is a **back-patch host** when its annotation is back-patch-shaped, i.e. (after bounded-region markers are stripped) its first non-whitespace token is `.` or `-:`.  This is **verb-independent**: there is no `CALL`/`POKE`/`DOKE`/`PEEK`/`DEEK`/`FOR`/`TO`/`DEF USR` table — the annotation alone designates the host, and the patch sites are the line's `#…` hex literals (`STA`-style verbs, `IF` tests, expressions and all).  A back-patch annotation on a line with **no** `#…` literal is a hard error (see *BASIC Back-Patch Directives*).  An annotation that is not back-patch-shaped (an ordinary human comment) is ignored, as before.
 
 Annotations on lines of any other kind (e.g. `PRINT`, `LET`, `GOTO`) — and REM/DATA lines that violate the single-statement rule above — are treated as human comments and ignored outright.
 
@@ -41,7 +41,7 @@ Marker mechanics:
 - Mark a region as assembler-only (opt into strict checking): `[[` at the start, `]]` at the end.  DATA lines inside that produce no assembled bytes will error; outside, lenient.
 - Multiple regions: alternate `[[` and `]]` markers to cover several non-contiguous strict ranges.
 
-**Where markers may appear.**  Anywhere an annotation is accepted — i.e. `REM`, `DATA`, or `CALL`/`POKE`/`DOKE`/`PEEK`/`DEEK` lines per the Host Line Eligibility rules.  Markers may be combined with other valid annotation statements on the same line (`' [[:LDX #0`, `' .LOOPA:]]`, etc.).
+**Where markers may appear.**  Anywhere an annotation is accepted — i.e. `REM`, `DATA`, or any back-patch host line per the Host Line Eligibility rules.  Markers may be combined with other valid annotation statements on the same line (`' [[:LDX #0`, `' .LOOPA:]]`, etc.).
 
 ### Parameters on `[[`
 
@@ -249,7 +249,7 @@ The re-assembler treats the annotated lines of a program as one or more **assemb
 **ORG is required for.**  Any use of a block's labels in:
 
 - An absolute addressing context — `JMP LABEL`, `JSR LABEL`, `LDA LABEL` (ABS form), etc.
-- A back-patch directive — `.LABEL` on a `CALL` / `POKE` / `DOKE` / `PEEK` / `DEEK` line.
+- A back-patch directive — `.LABEL` patching a `#…` literal on a back-patch host line.
 
 Using a label whose block has no `ORG` in either of these contexts is an error.  Blocks that use only equates, relative branches, and REL-only label references may omit `ORG` entirely.
 
@@ -288,14 +288,13 @@ The tool accepts `:` on DATA-line annotations as input without complaint, and pr
 
 ## BASIC Back-Patch Directives
 
-On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, `TO`, or `DEF USR` patch sites, the annotation carries back-patch directives: `.LABEL` replaces the address literal at a patch site with the resolved label address; `-` is a placeholder meaning "don't patch this site".
+On a back-patch host line (any non-`REM`/`DATA`/type-2 line whose marker-stripped annotation begins with `.` or `-:`), the annotation carries back-patch directives: `.LABEL` replaces the `#…` hex literal at a patch site with the resolved label address; `-` is a placeholder meaning "don't patch this site".
 
-- **Patch sites.**  Each occurrence of `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, or `TO` on the line is a patch site, in BASIC-source order.  The site's literal is the first numeric constant immediately following the verb token (after the opening `(` for `PEEK`/`DEEK`, or after the `=` for `FOR`), terminated by the first `,`, `)`, `:`, BASIC operator, or end-of-line.  A `FOR var=<start> TO <end>` loop therefore contributes **two** patch sites — one for the start address (paired with the FOR's literal) and one for the end address (paired with the TO's literal).
-- **`DEF USR` sites.**  The two-token sequence `DEF USR` (with any whitespace between them) is also a patch site — the literal immediately after `=` is the user-function entry address, patched as a 16-bit value.  Detection is contextual: bare `DEF` (e.g. `DEF FNX(I)=I*2`) and bare `USR` (e.g. `PRINT USR(arg)`) are **not** patch sites, only the full `DEF USR` form.
-- **Positional pairing.**  Directives pair 1:1 with patch sites, using `:` as the separator (mirroring BASIC's `:`).  A count mismatch is an error — use `-` to skip positions.
+- **Patch sites.**  Every `#…` hex literal in the line's BASIC code (outside string literals, before the annotation `'`) is a patch site, in BASIC-source order — **verb-independent**.  So `DOKE #1234,#5678` has **two** sites (address *and* value); `R=DEEK(#FFFC):IF R=#F42D ...` has two (the `DEEK` arg and the `IF` comparand); `FOR I=#9800 TO #9821` has two (the loop bounds).  There is no verb table and no "first literal after a keyword" rule — a `#` immediately followed by ≥1 hex digit is a site wherever it appears.  Decimal constants are **not** patch sites (bare decimals — line numbers, indices, loop counts — pervade BASIC; the `#` sigil is the intentional marker).  A bare `#` with no hex digit after it is not a site.
+- **No site is an error.**  A back-patch-shaped annotation on a line with **no** `#…` literal is a hard error, not a silent no-op.  This most often means a program written against the old decimal back-patch behaviour (e.g. `POKE 0,3 ' .LIVES`); rewrite the target as a `#…` literal (`POKE #0,3 ' .LIVES`).  Failing loudly surfaces the breakage the next time the program is assembled.
+- **Positional pairing.**  Directives pair 1:1 with patch sites, using `:` (or `;`) as the separator (mirroring BASIC's `:`).  A count mismatch is an error — use `-` to skip positions.  Variables/expressions are simply not sites (they have no `#…` literal), so no `-` placeholder is needed for them, unlike under the old verb-anchored model.
 - **Size.**  Every patch site holds a 16-bit address.
-- **Non-literal sites.**  If a patch site's argument is a variable or expression (not a numeric constant), only `-` is valid; `.LABEL` on such a site is an error.
-- **Format preservation.**  If the original literal was hex (e.g. `#04`, `#9800`), the patched value is written back as hex in `#XXXX` form (uppercase, 4 digits).  If the original literal was decimal, the patched value is written as decimal with no leading zeros.
+- **Format preservation (width — Option 1).**  Every site is a `#…` hex literal; the patched value is written back as uppercase hex with a leading `#`.  The digit count is the **minimum needed to represent the value, with the original literal's width as a floor** — i.e. `max(minHexDigits(value), originalDigits)`.  So `#0`→`$1` = `#1`, `#0`→`$10` = `#10`, `#0`→`$1234` = `#1234`, `#0`→`$123` = `#123`, `#26A`→`$26A` = `#26A` (preserved exactly, *not* widened to `#026A`), and `#0123`→`$5` = `#0005` (a deliberately wide slot is honoured as a floor).  This is faithful to hand-written 1983 source (where Oric BASIC's line-length cap, and the speed gain from shorter lines, made minimal-width literals common) and is idempotent: once widened, re-assembly keeps the same width.
 
 **Typical `FOR` pattern.**  POKE loops that transfer machine code from DATA into memory pair neatly with named assembler blocks (see `ORG $xxxx .NAME`):
 
@@ -305,10 +304,10 @@ On a line containing one or more `CALL`, `POKE`, `DOKE`, `PEEK`, `DEEK`, `FOR`, 
 ...
  90 REM ' ORG $9900 .BLOCKB       * closes BLOCKA
  ...
-500 FOR I=#9800 TO #9821 : READ X : POKE I,X : NEXT ' .BLOCKA:.BLOCKA.END:-
+500 FOR I=#9800 TO #9821 : READ X : POKE I,X : NEXT ' .BLOCKA:.BLOCKA.END
 ```
 
-On the FOR line, the two patch sites are the `#9800` (after `=`) and the `#9821` (after `TO`); the three directives (`.BLOCKA`, `.BLOCKA.END`, `-`) pair with FOR-start, TO-end, and the POKE's address (skipped because `I` is a variable, not a literal).
+On the FOR line the only `#…` literals are `#9800` and `#9821`, so there are exactly two patch sites; the two directives `.BLOCKA` / `.BLOCKA.END` pair with them in order.  `POKE I,X` has no `#…` literal so it is not a site at all — no `-` placeholder is needed for it.
 
 ## Identifier Rules
 

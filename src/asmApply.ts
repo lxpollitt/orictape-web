@@ -37,9 +37,6 @@
 import type { Program } from './decoder';
 import {
   TOKEN_DATA, TOKEN_REM,
-  TOKEN_CALL, TOKEN_POKE, TOKEN_DOKE, TOKEN_PEEK, TOKEN_DEEK,
-  TOKEN_FOR,  TOKEN_TO,  TOKEN_EQ,
-  TOKEN_DEF,  TOKEN_USR,
   KEYWORDS,
 } from './decoder';
 import { applyLineEdit } from './editor';
@@ -591,20 +588,20 @@ export function applyAssembler(
     linesPatched.push(p.lineIdx);
   }
 
-  // 5. Phase 6: walk every line and apply back-patch directives.  Uses the
-  //    filtered annotation so bracket-region markers embedded in the
-  //    annotation are transparent (under option-2 semantics, non-marker
-  //    statements are always processed regardless of bracket state).
-  //    Type-2 body / open / close lines are skipped entirely: inside a
-  //    `[[ ... ]]` bare-assembler region, the whole line is assembler
-  //    source, not BASIC with a back-patch annotation.  The byte-wise
-  //    token scan in `countBackPatchTokens` would otherwise get fooled
-  //    by BASIC keyword tokens embedded in label names (e.g. `.SFORWT`
-  //    stores as [`.`][`S`][FOR-token][`W`][`T`], which would make the
-  //    scanner mistake the FOR token for a patch site).
+  // 5. Phase 6: walk every back-patch host line and apply directives.
+  //    Uses the filtered annotation so bracket-region markers embedded
+  //    in the annotation are transparent (under option-2 semantics,
+  //    non-marker statements are always processed regardless of bracket
+  //    state).  Only `callfamily` lines are visited: `annotationHostKind`
+  //    classifies a line as `callfamily` iff it is non-REM/DATA/type-2
+  //    *and* carries a back-patch-shaped annotation (`.`/`-:`).  This
+  //    keeps REM/DATA assembler-source annotations (where a leading `.`
+  //    is a label/equate declaration, handled by Phase 5) out of the
+  //    back-patch path, so the "annotation but no `#` site" hard error
+  //    below fires only for genuine back-patch hosts.
   for (let i = 0; i < prog.lines.length; i++) {
     const k = hostKinds[i];
-    if (k === 'type2-open' || k === 'type2-close' || k === 'type2-body') continue;
+    if (k !== 'callfamily') continue;
     const res = applyBackPatchesToLine(prog, i, symbols, filteredAnnots[i]);
     errors.push(...res.errors);
     if (res.patched) linesPatched.push(i);
@@ -714,24 +711,6 @@ function lineContentStartsWithAscii(prog: Program, lineIdx: number, marker: stri
   return true;
 }
 
-/** Quick check: does a line contain any back-patch verb token in its
- *  BASIC code body (outside strings, stopping at the `'` annotation
- *  marker)?  Used to classify CALL-family hosts without paying the
- *  full `countBackPatchTokens` cost when we only care about presence. */
-function hasAnyBackPatchToken(prog: Program, lineIdx: number): boolean {
-  const line = prog.lines[lineIdx];
-  let inString = false;
-  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
-    const b = prog.bytes[i].v;
-    if (b === 0) break;
-    if (inString) { if (b === 0x22) inString = false; continue; }
-    if (b === 0x22) { inString = true; continue; }
-    if (b === 0x27) break;
-    if (isBackPatchSiteAt(prog, i, line.lastByte)) return true;
-  }
-  return false;
-}
-
 function annotationHostKind(prog: Program, lineIdx: number): AnnotationHostKind {
   // Type-2 open/close markers are detected by ASCII prefix on the
   // line content — these sit outside the token-based REM/DATA hosts.
@@ -741,7 +720,23 @@ function annotationHostKind(prog: Program, lineIdx: number): AnnotationHostKind 
   if (lineContentStartsWithAscii(prog, lineIdx, ']]')) return 'type2-close';
   const hk = hostKind(prog, lineIdx);
   if (hk === 'rem' || hk === 'data') return hk;
-  if (hasAnyBackPatchToken(prog, lineIdx)) return 'callfamily';
+  // Back-patch hosts are verb-independent: any non-REM/DATA/type-2
+  // line carrying an annotation is a *candidate* back-patch host.  We
+  // deliberately do NOT test the back-patch prefix (`.`/`-:`) here,
+  // because the prefix sits on the *filtered* annotation (bounded-
+  // region markers like `[[`/`]]` may precede it, e.g. `' [[:.LOOPA`)
+  // and filtering happens after host classification.  The actual
+  // `.`/`-:` discrimination — and the "annotation but no `#…` site"
+  // hard error — is made downstream in `applyBackPatchesToLine` on
+  // the marker-stripped annotation; non-back-patch annotations (plain
+  // human comments) no-op there harmlessly.  REM/DATA are returned
+  // above so a leading `.` there (a label/equate declaration in
+  // assembler-source context) is never misread as a back-patch
+  // directive.  Patch sites within the line are every `#…` hex
+  // literal (see `countBackPatchSites`); there is no verb table.
+  if (extractAnnotation(prog.lines[lineIdx].v, 'callfamily') !== '') {
+    return 'callfamily';
+  }
   return 'other';
 }
 
@@ -1057,38 +1052,29 @@ type BackPatchDirective =
   | { kind: 'label'; name: string }
   | { kind: 'skip' };
 
-/** True when `b` is one of the single-token back-patch verb bytes.  A
- *  `FOR` / `TO` pair on one line contributes two patch sites (start
- *  address, end address); each token is counted separately.  This
- *  helper is the single-byte test only — callers that need to handle
- *  the multi-token `DEF USR` sequence use {@link isBackPatchSiteAt}
- *  instead, which wraps this and adds the two-token peek-ahead. */
-function isBackPatchToken(b: number): boolean {
-  return b === TOKEN_CALL || b === TOKEN_POKE || b === TOKEN_DOKE
-      || b === TOKEN_PEEK || b === TOKEN_DEEK
-      || b === TOKEN_FOR  || b === TOKEN_TO;
+/** True when `b` is an ASCII hex-digit byte (`0`–`9`, `A`–`F`, `a`–`f`). */
+function isHexDigitByte(b: number): boolean {
+  return (b >= 0x30 && b <= 0x39)   // 0-9
+      || (b >= 0x41 && b <= 0x46)   // A-F
+      || (b >= 0x61 && b <= 0x66);  // a-f
 }
 
-/** True when the byte at `prog.bytes[i]` starts a back-patch site,
- *  considering byte-sequence context for multi-token verbs.  Wraps
- *  {@link isBackPatchToken} and additionally recognises `DEF` when
- *  immediately followed (possibly via whitespace) by `USR` — the
- *  `DEF USR = <addr>` form for setting Oric BASIC's user-function
- *  pointer.  Bare `DEF` (e.g. `DEF FNX(...)`) and bare `USR` (e.g.
- *  `PRINT USR(arg)`) are correctly not sites: DEF without a USR
- *  follower fails the peek-ahead, and USR not preceded by DEF is
- *  never tested here because the outer scan only invokes this on
- *  bytes that could plausibly start a verb. */
+/** True when the byte at `prog.bytes[i]` begins a back-patch site: a
+ *  `#` (0x23) immediately followed by at least one hex digit, i.e. an
+ *  Oric `#…` hex literal.  Patch sites are verb-independent — *every*
+ *  `#…` literal in a back-patch-annotated line's BASIC code is a site
+ *  (so `DOKE #1234,#5678` has two, and `IF R=#F42D` has one), with the
+ *  directive list pairing 1:1 in source order and `-` skipping a site.
+ *  A bare `#` with no hex digit after it is not a site (left
+ *  untouched).  Decimal constants are deliberately *not* patch sites:
+ *  bare decimals pervade BASIC (line numbers, indices, loop bounds) so
+ *  scanning them would over-match wildly — the `#` sigil is the
+ *  intentional, rare marker.  See oric-asm-syntax.md §"BASIC
+ *  Back-Patch Directives". */
 function isBackPatchSiteAt(prog: Program, i: number, lineEnd: number): boolean {
-  const b = prog.bytes[i].v;
-  if (isBackPatchToken(b)) return true;
-  if (b === TOKEN_DEF) {
-    // Skip whitespace and confirm the next non-space byte is USR.
-    let j = i + 1;
-    while (j <= lineEnd && prog.bytes[j].v === 0x20) j++;
-    return j <= lineEnd && prog.bytes[j].v === TOKEN_USR;
-  }
-  return false;
+  return prog.bytes[i].v === 0x23
+      && i + 1 <= lineEnd
+      && isHexDigitByte(prog.bytes[i + 1].v);
 }
 
 /** Test whether an annotation's prefix marks it as back-patch directives —
@@ -1144,11 +1130,11 @@ function parseBackPatchDirectives(
   return { directives };
 }
 
-/** Count back-patch verb sites on a line, respecting string-literal
- *  context and stopping at the first `'` annotation marker.  Uses the
- *  context-aware {@link isBackPatchSiteAt} so a `DEF USR` two-token
- *  sequence contributes one site, not two. */
-function countBackPatchTokens(prog: Program, lineIdx: number): number {
+/** Count `#…` hex-literal patch sites on a line, respecting string-
+ *  literal context and stopping at the first `'` annotation marker.
+ *  Each `#…` literal counts once; the inner hex digits can never be
+ *  mistaken for another site since a site must start with `#`. */
+function countBackPatchSites(prog: Program, lineIdx: number): number {
   const line = prog.lines[lineIdx];
   let count = 0;
   let inString = false;
@@ -1173,13 +1159,27 @@ function renderByte(b: number): string {
   return `«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`;
 }
 
-/** Format a resolved symbol value as a back-patch literal, matching the
- *  original literal's format.  Hex → `#XXXX` uppercase 4 digits; decimal
- *  → base-10 no leading zeros. */
+/** Format a resolved symbol value as a back-patch `#…` hex literal.
+ *
+ *  Width rule (Option 1 — strict minimum, original width as a floor):
+ *  use the minimum number of uppercase hex digits needed to represent
+ *  the value, but never fewer than the original literal already had.
+ *  So `#0`→`$1` = `#1`, `#0`→`$10` = `#10`, `#0`→`$123` = `#123`,
+ *  `#26A`→`$26A` = `#26A` (preserved exactly), `#0123`→`$5` = `#0005`
+ *  (the author's wider slot is honoured as a floor).  This is faithful
+ *  to hand-written source — common in 1983 where Oric BASIC line
+ *  length was capped and shorter lines also ran faster — and is
+ *  idempotent: once widened, re-running keeps the same width because
+ *  the floor has ratcheted up to where the value already sits.
+ *
+ *  `originalLiteral` is the source text including the leading `#`
+ *  (every patch site is a `#…` literal now — decimal sites were
+ *  removed). */
 function formatBackPatchValue(value: number, originalLiteral: string): string {
-  const isHex = originalLiteral.startsWith('#');
-  if (isHex) return '#' + (value & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-  return (value & 0xFFFF).toString(10);
+  const hex = (value & 0xFFFF).toString(16).toUpperCase();   // "0" when value 0
+  const originalDigits = originalLiteral.replace(/^#/, '').length;
+  const digits = Math.max(hex.length, originalDigits);
+  return '#' + hex.padStart(digits, '0');
 }
 
 /** Reconstruct the line's BASIC text with back-patch substitutions
@@ -1238,8 +1238,8 @@ function rewriteLineForBackPatch(
     if (b === 0) break;
 
     // Once the annotation starts, everything else is passthrough — we
-    // don't want to "patch" occurrences of verb tokens that the BASIC
-    // tokeniser may have stamped inside the annotation's text.
+    // don't want to "patch" `#…` literals that may appear inside the
+    // annotation's text.
     if (!inAnnotation && !inString && b === 0x27) inAnnotation = true;
     if (inAnnotation) { emitByte(renderByte(b)); i++; continue; }
 
@@ -1252,54 +1252,16 @@ function rewriteLineForBackPatch(
     }
     if (b === 0x22) { emitByte('"'); inString = true; i++; continue; }
 
-    // Patch-site verb token.
+    // Patch-site: a `#…` hex literal.  Every such literal in the
+    // BASIC code is a site; surrounding bytes (verb keywords, parens,
+    // commas, `=`, whitespace) need no special handling — they fall
+    // through to the default passthrough below.
     if (isBackPatchSiteAt(prog, i, line.lastByte)) {
-      const verbToken = b;
-      emitByte(KEYWORDS[b - 0x80]);
+      // Collect the literal: `#` followed by its run of hex digits.
+      let literal = String.fromCharCode(prog.bytes[i].v);   // '#'
       i++;
-
-      // For `FOR var=<literal>` and `DEF USR=<literal>` we need to
-      // pass through the bytes between the verb and the literal,
-      // ending at the `=` sign.  Walk chars up to and including the
-      // first `=` (emitting each as-is).  Oric BASIC tokenises `=`
-      // into `TOKEN_EQ`, so we break on that; a raw `0x3D` is also
-      // accepted in case some source form ever leaves it untokenised.
-      // Bail out early on annotation markers or end-of-content to
-      // stay safe on malformed input.  For DEF specifically, the
-      // bytes consumed here will include the USR token and any
-      // intervening whitespace before `=`.
-      if (verbToken === TOKEN_FOR || verbToken === TOKEN_DEF) {
-        while (i <= line.lastByte) {
-          const bj = prog.bytes[i].v;
-          if (bj === 0) break;
-          if (bj === 0x27) break;                        // annotation marker
-          emitByte(renderByte(bj));
-          i++;
-          if (bj === 0x3D || bj === TOKEN_EQ) break;     // `=` (raw or tokenised)
-        }
-      }
-
-      // Emit any whitespace and an optional opening paren before the literal.
-      while (i <= line.lastByte) {
-        const bj = prog.bytes[i].v;
-        if (bj === 0) break;
-        if (bj === 0x20 || bj === 0x28) { emitByte(String.fromCharCode(bj)); i++; continue; }
-        break;
-      }
-
-      // Collect the literal's raw ASCII text, if present.  A literal is
-      // `#` followed by hex chars, or a run of decimal digits.
-      let literal = '';
-      while (i <= line.lastByte) {
-        const bk = prog.bytes[i].v;
-        if (bk === 0) break;
-        const cont =
-          (bk === 0x23 && literal.length === 0)           // leading #
-          || (bk >= 0x30 && bk <= 0x39)                   // 0-9
-          || (bk >= 0x41 && bk <= 0x46)                   // A-F
-          || (bk >= 0x61 && bk <= 0x66);                  // a-f
-        if (!cont) break;
-        literal += String.fromCharCode(bk);
+      while (i <= line.lastByte && isHexDigitByte(prog.bytes[i].v)) {
+        literal += String.fromCharCode(prog.bytes[i].v);
         i++;
       }
 
@@ -1313,19 +1275,6 @@ function rewriteLineForBackPatch(
       }
 
       // directive.kind === 'label'.
-      if (literal === '' || literal === '#') {
-        // For DEF USR, the verb is conceptually two keywords; spell it
-        // out so the diagnostic points the user at the actual phrase
-        // they wrote rather than just "DEF".
-        const verbName = verbToken === TOKEN_DEF
-          ? 'DEF USR'
-          : KEYWORDS[b - 0x80];
-        errors.push(
-          `back-patch at '${verbName}' has no numeric literal argument`,
-        );
-        emitAsciiRun(literal, false);    // emit original on error; not owned
-        continue;
-      }
       // Built-in `SYS.` ROM symbols resolve before user symbols and
       // skip the anchoring check below (a fixed ROM address is always
       // "anchored").  `error` surfaces the precise built-in
@@ -1389,12 +1338,29 @@ function applyBackPatchesToLine(
   const line    = prog.lines[lineIdx];
   const lineNum = prog.bytes[line.firstByte + 2].v + prog.bytes[line.firstByte + 3].v * 256;
 
-  // Gate: annotation must carry a back-patch-shaped prefix (`.` or `-:`)
-  // after filtering, and the line must contain at least one back-patch
-  // token in its BASIC statements.
+  // Invariant: callers (the Phase 6 loop) only pass `callfamily`
+  // lines, so the annotation is back-patch-shaped by construction.
+  // Re-check defensively, then require at least one `#…` patch site.
+  // A back-patch annotation with **no** `#…` site is a hard error,
+  // not a silent no-op: it most commonly means an old program that
+  // relied on the now-removed *decimal* back-patch sites (e.g.
+  // `POKE 0,3 ' .LIVES`), which must be rewritten with `#` literals
+  // (`POKE #0,3 ' .LIVES`).  Failing loudly surfaces that breakage
+  // explicitly the next time the program is assembled.
   if (!isBackPatchAnnotation(annotation)) return { patched: false, errors: [] };
-  const siteCount = countBackPatchTokens(prog, lineIdx);
-  if (siteCount === 0) return { patched: false, errors: [] };
+  const siteCount = countBackPatchSites(prog, lineIdx);
+  if (siteCount === 0) {
+    return {
+      patched: false,
+      errors: [{
+        lineIdx, lineNum,
+        message:
+          'back-patch annotation but no `#…` hex literal to patch on ' +
+          'this line (decimal literals are not patch sites — write the ' +
+          'target as `#nnnn`)',
+      }],
+    };
+  }
 
   // Parse the directive list.
   const parsed = parseBackPatchDirectives(annotation);

@@ -539,14 +539,19 @@ test('DEF USR back-patch with hex literal', () => {
   return null;
 });
 
-test('DEF USR back-patch with decimal literal preserves decimal format', () => {
+test('DEF USR back-patch with decimal literal is a no-site error', () => {
+  // Decimal literals are no longer patch sites — only `#…` hex.  A
+  // back-patch annotation with no `#…` site is now a hard error
+  // (catches programs that relied on the removed decimal behaviour).
   const p = mkProgram([
     "10 REM ' .ENTRY = $9800",
-    "20 DEF USR=0 ' .ENTRY",        // original literal "0" is decimal
+    "20 DEF USR=0 ' .ENTRY",        // decimal "0" is not a patch site
   ]);
   const r = applyAssembler(p);
-  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  if (!/^20 DEF USR=38912/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  if (!/no .#.* hex literal to patch/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
   return null;
 });
 
@@ -626,15 +631,62 @@ test('DEF USR back-patch: unanchored label errors clearly', () => {
   return null;
 });
 
-test('POKE back-patch with decimal literal preserves decimal format', () => {
+test('POKE back-patch Option-1 width: #0 + $04 → #4', () => {
+  // The migrated form of the old decimal example: `POKE #0,3`.
+  // Option-1 width rule — minimum hex digits, original width as a
+  // floor.  `#0` is 1 digit; $04 needs 1 hex digit; max(1,1)=1 → #4.
   const p = mkProgram([
     "10 REM ' .LIVES = $04",
-    "20 POKE 0,3 ' .LIVES",   // original literal "0" is decimal → emit decimal
+    "20 POKE #0,3 ' .LIVES",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
   if (!r.linesPatched.includes(1)) return `line 1 should be patched`;
-  if (!/^20 POKE 4,/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  if (!/^20 POKE #4,3/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('Option-1 width: original literal width is a floor; value can widen it', () => {
+  // `#26A` (3 digits) + value $26A → preserved exactly as `#26A`
+  // (NOT widened to `#026A`).  `#0` (1 digit) + value $10 → widens
+  // to `#10`.  `#0123` (4 digits) + value $5 → floor keeps it `#0005`.
+  const p = mkProgram([
+    "10 REM ' .A = $26A:.B = $10:.C = $5",
+    "20 DOKE #26A,#0 ' .A:.B",
+    "30 POKE #0123,1 ' .C",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DOKE #26A,#10 /.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  if (!/^30 POKE #0005,1 /.test(p.lines[2].v)) return `line 2 text: ${p.lines[2].v}`;
+  return null;
+});
+
+test('DOKE back-patches both address and value', () => {
+  // The motivating case: `DOKE #addr,#val` — two `#…` sites on one
+  // line, paired 1:1 with two directives in source order.
+  const p = mkProgram([
+    "10 REM ' .DST = $C000:.SRC = $9800",
+    "20 DOKE #0000,#0000 ' .DST:.SRC",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/^20 DOKE #C000,#9800 /.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  return null;
+});
+
+test('IF test literal is a back-patch site (verb-independent)', () => {
+  // ROM-detection idiom: `R=DEEK(#FFFC):IF R=#F42D ...`.  Two `#…`
+  // sites — the DEEK arg and the IF comparand — neither requiring a
+  // dedicated verb.  Skip the DEEK arg, patch the IF comparand.
+  const p = mkProgram([
+    "10 REM ' .V10RST = $F42D",
+    '20 R=DEEK(#FFFC):IF R=#0000 THEN PRINT "V1.0" \' -:.V10RST',
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
+  if (!/IF R=#F42D THEN/.test(p.lines[1].v)) return `line 1 text: ${p.lines[1].v}`;
+  if (!/DEEK\(#FFFC\)/.test(p.lines[1].v)) return `DEEK arg changed: ${p.lines[1].v}`;
   return null;
 });
 
@@ -720,11 +772,28 @@ test('line with CALL but non-backpatch annotation is ignored', () => {
   return null;
 });
 
-test('line without any back-patch token is ignored even with back-patch annotation', () => {
-  // PRINT line with a dot-prefixed annotation — no patch-site tokens,
-  // so the line contributes nothing and no errors fire.
+test('back-patch annotation with no # site is a hard error', () => {
+  // PRINT line with a dot-prefixed back-patch annotation but no `#…`
+  // literal anywhere.  Verb-independent: the annotation alone makes
+  // it a back-patch host, and the absence of a site is a hard error
+  // (not a silent no-op) so removed-decimal back-compat breaks loudly.
   const p = mkProgram([
     "10 PRINT \"HI\" ' .FOO",
+  ]);
+  const r = applyAssembler(p);
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  if (!/no .#.* hex literal to patch/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
+  if (r.linesPatched.length !== 0) return `unexpectedly patched`;
+  return null;
+});
+
+test('plain human comment on a non-REM/DATA line still no-ops', () => {
+  // Not a back-patch annotation (doesn't start with `.`/`-:`), so it
+  // is left entirely alone — no error, no patch.
+  const p = mkProgram([
+    "10 PRINT \"HI\" ' just a note, nothing to patch",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -758,25 +827,28 @@ test('undefined back-patch label errors', () => {
   return null;
 });
 
-test('non-literal argument with .LABEL directive errors', () => {
-  // CALL X — variable arg, no literal to patch.  Directive is `.BASE`.
+test('directive on a line whose only arg is a variable errors (no # site)', () => {
+  // CALL X — variable arg, no `#…` literal anywhere.  Verb no longer
+  // creates a site, so this is the generic "no # site" hard error.
   const p = mkProgram([
     "10 REM ' .BASE = $9800",
     "20 CALL X ' .BASE",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
-  if (!/has no numeric literal argument/i.test(r.errors[0].message)) {
+  if (!/no .#.* hex literal to patch/i.test(r.errors[0].message)) {
     return `wrong message: ${r.errors[0].message}`;
   }
   return null;
 });
 
-test('non-literal argument with "-" placeholder is fine', () => {
-  // CALL X — no literal, but directive is `-`.  No error, no change.
+test('variable args are simply not sites (no placeholder needed)', () => {
+  // `CALL X` contributes no site at all (no `#…`), so the directive
+  // list pairs only with the real `#…` site — no `-` placeholder is
+  // needed for the variable, unlike the old verb-anchored model.
   const p = mkProgram([
     "10 REM ' .BASE = $9800",
-    "20 CALL X:CALL #0000 ' -:.BASE",
+    "20 CALL X:CALL #0000 ' .BASE",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1684,7 +1756,7 @@ test('back-patch with unanchored label errors', () => {
     "10 REM ' .TGT = $0",                // declares an equate (not a label) — different case
     "20 DATA #EA ' *break",              // PC-break (lenient mode: no markers in this program)
     "30 DATA #60 ' .LATE:RTS",           // LATE: unanchored
-    "40 CALL 0 ' .LATE",                 // back-patch to unanchored label → error
+    "40 CALL #0 ' .LATE",                // back-patch to unanchored label → error
   ]);
   const r = applyAssembler(p);
   if (r.errors.length === 0) return 'expected an error';
@@ -1817,7 +1889,9 @@ test('FOR/TO two-site back-patch with named block', () => {
     "20 DATA #EA ' NOP",
     "30 DATA #EA ' NOP",
     "40 DATA #60 ' RTS",                   // $9800-$9802 assembled
-    "50 FOR I=#0 TO #0:READ X:POKE I,X:NEXT ' .BLOCKA:.BLOCKA.END:-",
+    // POKE I,X has no `#…` literal, so it is not a site — only the
+    // two `#0` loop bounds are.  Two sites, two directives.
+    "50 FOR I=#0 TO #0:READ X:POKE I,X:NEXT ' .BLOCKA:.BLOCKA.END",
   ]);
   const r = applyAssembler(p);
   if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
@@ -1839,16 +1913,20 @@ test('FOR/TO directive count mismatch errors', () => {
   return null;
 });
 
-test('FOR/TO decimal literal preserves decimal format', () => {
+test('FOR/TO with decimal loop bounds is a no-site error', () => {
+  // Decimal `FOR I=0 TO 0` has no `#…` sites — a back-patch
+  // annotation with no site is now a hard error (decimal back-patch
+  // was removed; the migrated form is `FOR I=#0 TO #0`).
   const p = mkProgram([
     "10 REM ' ORG $9800 .BLOCKA",
     "20 DATA #60 ' RTS",                   // $9800
     "30 FOR I=0 TO 0:NEXT ' .BLOCKA:.BLOCKA.END",
   ]);
   const r = applyAssembler(p);
-  if (r.errors.length !== 0) return `unexpected errors: ${r.errors[0].message}`;
-  // Decimal patch: $9800 = 38912, block is 1 byte so .END = $9800 = 38912.
-  if (!/^30 FOR I=38912 TO 38912/.test(p.lines[2].v)) return `line 2: ${p.lines[2].v}`;
+  if (r.errors.length !== 1) return `expected 1 error, got ${r.errors.length}`;
+  if (!/no .#.* hex literal to patch/i.test(r.errors[0].message)) {
+    return `wrong message: ${r.errors[0].message}`;
+  }
   return null;
 });
 
