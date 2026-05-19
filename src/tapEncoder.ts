@@ -143,7 +143,13 @@ export function encodeTapFile(entries: TapEntry[]): Uint8Array {
   const out: number[] = [];
   for (const entry of entries) {
     const blockBytes = encodeTapBlock(entry.prog, entry.autorun, entry.fixEndAddr);
-    out.push(...blockBytes);
+    // NB: element-wise append, NOT `out.push(...blockBytes)`.  The spread
+    // form passes every array element as a separate call argument, which
+    // overflows V8's argument-count limit for large programs and throws
+    // `RangeError: Maximum call stack size exceeded` (looks like runaway
+    // recursion but isn't).  A heavily-edited program is big enough to
+    // trip it; element-wise append is O(n) with no argument ceiling.
+    for (const b of blockBytes) out.push(b);
     if (entry.includeMetadata) {
       let trailingZeros = 0;
       while (trailingZeros < 3
@@ -152,7 +158,10 @@ export function encodeTapFile(entries: TapEntry[]): Uint8Array {
         trailingZeros++;
       }
       for (let i = trailingZeros; i < 3; i++) out.push(0x00);
-      out.push(...encodeTapMetadata(entry.prog));
+      // Element-wise append (see the spread caveat on the block bytes
+      // above) — the metadata array scales with edit history and is the
+      // first to overflow `push(...)` on a heavily-edited program.
+      for (const b of encodeTapMetadata(entry.prog)) out.push(b);
     }
   }
   return new Uint8Array(out);
