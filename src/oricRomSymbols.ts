@@ -43,7 +43,7 @@
 type SysEntry =
   | { addr: number }                        // invariant
   | { v10?: number; v11?: number }          // ROM-version axis (.V10/.V11)
-  | { text: number; hires: number };        // video-mode axis (.TEXTMODE/.HIRESMODE)
+  | { text: number; hires: number };        // video-mode axis (.TEXT/.HIRES)
 
 /** Multi-byte symbols (16-bit pointers / vectors) resolve to the
  *  low-byte address (e.g. `USRVEC` → $21, the location you DOKE).
@@ -234,8 +234,8 @@ export type SysLookup =
  *  Recognised forms:
  *    SYS.NAME              invariant symbol (no suffix)
  *    SYS.NAME.V10/.V11     ROM-version-variant symbol
- *    SYS.NAME.TEXTMODE     video-mode-variant symbol (text screen/charset)
- *    SYS.NAME.HIRESMODE    video-mode-variant symbol (hires)
+ *    SYS.NAME.TEXT         video-mode-variant symbol (text screen/charset)
+ *    SYS.NAME.HIRES        video-mode-variant symbol (hires)
  *
  *  Two independent variant axes (ROM version, video mode), each with
  *  the same rule shape: a symbol that varies on an axis *requires*
@@ -259,12 +259,12 @@ export function lookupSysSymbol(name: string): SysLookup {
 
   // Classify the suffix (if any) onto its axis up front.
   const romSfx  = sfx === 'V10' || sfx === 'V11';
-  const modeSfx = sfx === 'TEXTMODE' || sfx === 'HIRESMODE';
+  const modeSfx = sfx === 'TEXT' || sfx === 'HIRES';
   if (sfx !== undefined && !romSfx && !modeSfx) {
     return {
       kind: 'error',
       message: `unknown suffix '.${parts[2]}' on SYS.${parts[1]} `
-             + `(expected .V10, .V11, .TEXTMODE or .HIRESMODE)`,
+             + `(expected .V10, .V11, .TEXT or .HIRES)`,
     };
   }
 
@@ -291,17 +291,17 @@ export function lookupSysSymbol(name: string): SysLookup {
       return {
         kind: 'error',
         message: `SYS.${sym} varies by video mode, not ROM — `
-               + `use SYS.${sym}.TEXTMODE or SYS.${sym}.HIRESMODE`,
+               + `use SYS.${sym}.TEXT or SYS.${sym}.HIRES`,
       };
     }
     if (sfx === undefined) {
       return {
         kind: 'error',
         message: `SYS.${sym} depends on the video mode — `
-               + `use SYS.${sym}.TEXTMODE or SYS.${sym}.HIRESMODE`,
+               + `use SYS.${sym}.TEXT or SYS.${sym}.HIRES`,
       };
     }
-    return { kind: 'ok', value: sfx === 'TEXTMODE' ? entry.text : entry.hires };
+    return { kind: 'ok', value: sfx === 'TEXT' ? entry.text : entry.hires };
   }
 
   // ROM-version-variant symbol.

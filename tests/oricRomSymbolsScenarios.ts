@@ -124,9 +124,9 @@ test('CHARSET / KEYCODETAB are ROM-variant (validated different per ROM)', () =>
 
 test('video-mode-variant: SCREEN/STDCHARSET/ALTCHARSET resolve per mode', () => {
   const cases: [string, number][] = [
-    ['SYS.SCREEN.TEXTMODE', 0xBB80], ['SYS.SCREEN.HIRESMODE', 0xA000],
-    ['SYS.STDCHARSET.TEXTMODE', 0xB400], ['SYS.STDCHARSET.HIRESMODE', 0x9C00],
-    ['SYS.ALTCHARSET.TEXTMODE', 0xB800], ['SYS.ALTCHARSET.HIRESMODE', 0x9800],
+    ['SYS.SCREEN.TEXT', 0xBB80], ['SYS.SCREEN.HIRES', 0xA000],
+    ['SYS.STDCHARSET.TEXT', 0xB400], ['SYS.STDCHARSET.HIRES', 0x9C00],
+    ['SYS.ALTCHARSET.TEXT', 0xB800], ['SYS.ALTCHARSET.HIRES', 0x9800],
   ];
   for (const [n, want] of cases) {
     const r = lookupSysSymbol(n);
@@ -138,7 +138,7 @@ test('video-mode-variant: SCREEN/STDCHARSET/ALTCHARSET resolve per mode', () => 
 test('mode-variant bare reference errors (mode required)', () => {
   const r = lookupSysSymbol('SYS.SCREEN');
   return r.kind === 'error' && /depends on the video mode/.test(r.message)
-    && /TEXTMODE/.test(r.message) && /HIRESMODE/.test(r.message)
+    && /TEXT/.test(r.message) && /HIRES/.test(r.message)
     ? null : `got ${JSON.stringify(r)}`;
 });
 
@@ -149,14 +149,14 @@ test('wrong-axis suffixes error helpfully', () => {
     return `SCREEN.V11: ${JSON.stringify(a)}`;
   }
   // Mode suffix on a ROM-variant symbol.
-  const b = lookupSysSymbol('SYS.MUSIC.HIRESMODE');
+  const b = lookupSysSymbol('SYS.MUSIC.HIRES');
   if (b.kind !== 'error' || !/varies by ROM, not video mode/.test(b.message)) {
-    return `MUSIC.HIRESMODE: ${JSON.stringify(b)}`;
+    return `MUSIC.HIRES: ${JSON.stringify(b)}`;
   }
   // Mode suffix on an invariant symbol.
-  const c = lookupSysSymbol('SYS.PARAMS.TEXTMODE');
+  const c = lookupSysSymbol('SYS.PARAMS.TEXT');
   if (c.kind !== 'error' || !/same on both ROMs and video modes/.test(c.message)) {
-    return `PARAMS.TEXTMODE: ${JSON.stringify(c)}`;
+    return `PARAMS.TEXT: ${JSON.stringify(c)}`;
   }
   return null;
 });
@@ -180,7 +180,7 @@ test('arithmetic on a bare ROM-variant symbol still errors first', () => {
 });
 
 test('mode-variant assembles in operand position', () => {
-  const b = asmBytes('LDA SYS.SCREEN.HIRESMODE');   // AD 00 A0 (ABS)
+  const b = asmBytes('LDA SYS.SCREEN.HIRES');   // AD 00 A0 (ABS)
   return (b.length === 3 && b[0] === 0xAD && b[1] === 0x00 && b[2] === 0xA0)
     ? null : `got [${b.map(x => x.toString(16)).join(' ')}]`;
 });
@@ -194,7 +194,7 @@ test('unknown SYS name is an error', () => {
 test('bad version suffix is an error', () => {
   const r = lookupSysSymbol('SYS.MUSIC.V12');
   return r.kind === 'error' && /unknown suffix/.test(r.message)
-    && /\.TEXTMODE or \.HIRESMODE/.test(r.message)
+    && /\.TEXT or \.HIRES/.test(r.message)
     ? null : `got ${JSON.stringify(r)}`;
 });
 

@@ -80,7 +80,7 @@ Authoritative sources for inclusion in this section:
 
 Grouped by function. Addresses without a separate column entry are the same on both ROMs.
 
-**Built-in assembler (`SYS.`) names.** The tool exposes these as `SYS.<NAME>` (invariant), `SYS.<NAME>.V10` / `.V11` (address differs per ROM), or `SYS.<NAME>.TEXTMODE` / `.HIRESMODE` (address differs per video mode — §5.10 screen/charset areas). `<NAME>` is the name in the tables below **verbatim, upper-cased** (`HiresMode` → `SYS.HIRESMODE`, `FAC2Int` → `SYS.FAC2INT`); matching is case-insensitive, so the table keeps its readable mixed case. Three indirect-jump vectors are *renamed* because their reference names aren't legal identifiers — these renames are not mechanical, so they're tagged inline below:
+**Built-in assembler (`SYS.`) names.** The tool exposes these as `SYS.<NAME>` (invariant), `SYS.<NAME>.V10` / `.V11` (address differs per ROM), or `SYS.<NAME>.TEXT` / `.HIRES` (address differs per video mode — §5.10 screen/charset areas). `<NAME>` is the name in the tables below **verbatim, upper-cased** (`HiresMode` → `SYS.HIRESMODE`, `FAC2Int` → `SYS.FAC2INT`); matching is case-insensitive, so the table keeps its readable mixed case. Three indirect-jump vectors are *renamed* because their reference names aren't legal identifiers — these renames are not mechanical, so they're tagged inline below:
 
 | Reference name | `SYS.` name |
 |---|---|
@@ -399,7 +399,7 @@ Note on PLOT: the BASIC keyword `PLOT` uses a different column convention on V1.
 | Standard charset (writable) | `$B400` | `$9C00` |
 | Alternate charset (writable) | `$B800` | `$9800` |
 
-The assembler exposes these as `SYS.` labels with a video-mode suffix (`SYS.SCREEN.TEXTMODE` / `SYS.SCREEN.HIRESMODE` etc.) 
+The assembler exposes these as `SYS.` labels with a video-mode suffix (`SYS.SCREEN.TEXT` / `SYS.SCREEN.HIRES` etc.) 
 
 **16K vs 48K.** The screen and writable-charset RAM addresses above are for the **48K** Oric. On a 16K machine they are all `−$8000` (e.g. screen `$3B80`, hires `$2000`). The assumbler defines **48K value based labels only**.
 

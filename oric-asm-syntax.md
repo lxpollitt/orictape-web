@@ -200,20 +200,20 @@ A symbol's address may vary on one of **two independent axes**, each with its ow
 | **Invariant** | none | `SYS.PARAMS`, `SYS.TIMER3`, `SYS.VERIFY` | resolves |
 | **ROM-variant** | ROM: `.V10` / `.V11` | `SYS.MUSIC.V10` | **error** — must pick a ROM |
 | **Single-ROM** | ROM (one side only) | `SYS.CHECKKBD.V11` | **error** — suffix still required (no auto-default) |
-| **Video-mode-variant** | mode: `.TEXTMODE` / `.HIRESMODE` | `SYS.SCREEN.HIRESMODE` | **error** — must pick a mode |
+| **Video-mode-variant** | mode: `.TEXT` / `.HIRES` | `SYS.SCREEN.HIRES` | **error** — must pick a mode |
 
 Error behaviours (all surfaced as normal assembler errors):
 
 - Bare reference to a ROM-variant symbol → *"SYS.MUSIC differs between BASIC V1.0 and V1.1b — use SYS.MUSIC.V10 or SYS.MUSIC.V11"*.
-- Bare reference to a mode-variant symbol → *"SYS.SCREEN depends on the video mode — use SYS.SCREEN.TEXTMODE or SYS.SCREEN.HIRESMODE"*.
-- Wrong axis's suffix → *"SYS.SCREEN varies by video mode, not ROM — use SYS.SCREEN.TEXTMODE or SYS.SCREEN.HIRESMODE"* (and the converse for a mode suffix on a ROM-variant symbol).
+- Bare reference to a mode-variant symbol → *"SYS.SCREEN depends on the video mode — use SYS.SCREEN.TEXT or SYS.SCREEN.HIRES"*.
+- Wrong axis's suffix → *"SYS.SCREEN varies by video mode, not ROM — use SYS.SCREEN.TEXT or SYS.SCREEN.HIRES"* (and the converse for a mode suffix on a ROM-variant symbol).
 - A version the symbol doesn't have → *"SYS.CHECKKBD is not available on BASIC V1.0 (Oric-1)"*.
 - Any suffix on an invariant symbol → *"SYS.PARAMS is the same on both ROMs and video modes — drop the .V11 suffix"* (keeps "suffix ⇔ varies" reliable).
 - Unknown name → *"unknown built-in symbol SYS.FOO"*.
 
 Names are matched **case-insensitively** and are the reference/manual names verbatim, upper-cased.  The only renames (where the manual name isn't a legal identifier) are the three indirect-jump vectors: `PTR_USR` → `SYS.USRVEC`, `!VEC` → `SYS.BANGVEC`, `&VEC` → `SYS.AMPVEC` (named `*VEC` — ROM JMPs through them — distinct from data pointers like `SYS.TXTPTR`).  Multi-byte pointers/vectors resolve to the low-byte address (the location you `DOKE`).  `SYS` itself is reserved and cannot be a user label/equate/block name.
 
-The CPU hardware vectors (`SYS.NMIVEC` `$FFFA`, `SYS.RESETVEC` `$FFFC`, `SYS.IRQVEC` `$FFFE`) and the ROM cold-start entry (`SYS.RESET.V10` / `.V11`) are included.  The clean-named 6522 VIA registers (`SYS.ORB`, `SYS.ORA`, `SYS.DDRB`, `SYS.DDRA`, `SYS.SR`, `SYS.ACR`, `SYS.PCR`, `SYS.IFR`, `SYS.IER`) and a `SYS.VIA` block base are included.  `SYS.CHARSET` and `SYS.KEYCODETAB` are the ROM charset/keymap copies and are `.V10`/`.V11` variant (validated different per ROM).  The video-mode-variant areas are included: `SYS.SCREEN`, `SYS.STDCHARSET`, `SYS.ALTCHARSET` (each `.TEXTMODE` / `.HIRESMODE`).
+The CPU hardware vectors (`SYS.NMIVEC` `$FFFA`, `SYS.RESETVEC` `$FFFC`, `SYS.IRQVEC` `$FFFE`) and the ROM cold-start entry (`SYS.RESET.V10` / `.V11`) are included.  The clean-named 6522 VIA registers (`SYS.ORB`, `SYS.ORA`, `SYS.DDRB`, `SYS.DDRA`, `SYS.SR`, `SYS.ACR`, `SYS.PCR`, `SYS.IFR`, `SYS.IER`) and a `SYS.VIA` block base are included.  `SYS.CHARSET` and `SYS.KEYCODETAB` are the ROM charset/keymap copies and are `.V10`/`.V11` variant (validated different per ROM).  The video-mode-variant areas are included: `SYS.SCREEN`, `SYS.STDCHARSET`, `SYS.ALTCHARSET` (each `.TEXT` / `.HIRES`).
 
 Not yet included: the per-byte FAC zero-page cells; the page-2 NMI/IRQ "vector target" rows (overlap `NMIJP`/`INTFS`); the user-ML scratch area; "signed FAC→int"; and the dash-named VIA timer-latch registers.
 
