@@ -80,13 +80,14 @@ Authoritative sources for inclusion in this section:
 
 Grouped by function. Addresses without a separate column entry are the same on both ROMs.
 
-**Built-in assembler (`SYS.`) names.** The tool exposes these as `SYS.<NAME>` (invariant), `SYS.<NAME>.V10` / `.V11` (address differs per ROM), or `SYS.<NAME>.TEXT` / `.HIRES` (address differs per video mode — §5.10 screen/charset areas). `<NAME>` is the name in the tables below **verbatim, upper-cased** (`HiresMode` → `SYS.HIRESMODE`, `FAC2Int` → `SYS.FAC2INT`); matching is case-insensitive, so the table keeps its readable mixed case. Three indirect-jump vectors are *renamed* because their reference names aren't legal identifiers — these renames are not mechanical, so they're tagged inline below:
+**Built-in assembler (`SYS.`) names.** The tool exposes these as `SYS.<NAME>` (invariant), `SYS.<NAME>.V10` / `.V11` (address differs per ROM), or `SYS.<NAME>.TEXT` / `.HIRES` (address differs per video mode — §5.10 screen/charset areas). `<NAME>` is the name in the tables below **verbatim, upper-cased** (`HiresMode` → `SYS.HIRESMODE`, `FAC2Int` → `SYS.FAC2INT`); matching is case-insensitive, so the table keeps its readable mixed case. Names containing characters that aren't legal identifier chars are adapted: dashes are mechanically dropped (`T1C-L` → `SYS.T1CL`, etc., per the §5.10 VIA-timer rows), and four names that can't be repaired mechanically are *renamed* — these are tagged inline below:
 
 | Reference name | `SYS.` name |
 |---|---|
 | `PTR_USR` | `SYS.USRVEC` |
 | `!VEC` | `SYS.BANGVEC` |
 | `&VEC` | `SYS.AMPVEC` |
+| `ORA (no handshake)` | `SYS.ORANH` |
 
 (`*VEC` because the ROM JMPs *through* them, distinct from data pointers like `TXTPTR`.) See [`oric-asm-syntax.md`](./oric-asm-syntax.md) "Built-in ROM symbols" for the full rule set (the suffix ⇔ ROM-specific invariant, error behaviours, the deferred-symbols list).
 
@@ -407,24 +408,26 @@ The assembler exposes these as `SYS.` labels with a video-mode suffix (`SYS.SCRE
 
 Per Atmos manual Appendix 5 (memory map). Used for printer, keyboard scan, sound chip access, and data transfer control. These are hardware addresses fixed by the 6522 chip — identical on both ROMs.
 
-| Address | Name | Function |
-|---|---|---|
-| `$0300` | ORB | Port B output register |
-| `$0301` | ORA | Port A output register |
-| `$0302` | DDRB | Port B data direction register |
-| `$0303` | DDRA | Port A data direction register |
-| `$0304` | T1C-L / T1L-L | Timer 1 counter / latch low byte |
-| `$0305` | T1C-H | Timer 1 counter high byte |
-| `$0306` | T1L-L | Timer 1 latch low byte |
-| `$0307` | T1L-H | Timer 1 latch high byte |
-| `$0308` | T2C-L / T2L-L | Timer 2 counter / latch low byte |
-| `$0309` | T2C-H | Timer 2 counter high byte |
-| `$030A` | SR | Shift register |
-| `$030B` | ACR | Auxiliary control register |
-| `$030C` | PCR | Peripheral control register |
-| `$030D` | IFR | Interrupt flag register |
-| `$030E` | IER | Interrupt enable register |
-| `$030F` | ORA (no handshake) | Port A output, no handshake |
+The block base address is exposed as `SYS.VIA` ($0300) for code that wants to address registers by offset.
+
+| Address | Name | Function | Assembler |
+|---|---|---|---|
+| `$0300` | ORB | Port B output register | `SYS.ORB` |
+| `$0301` | ORA | Port A output register | `SYS.ORA` |
+| `$0302` | DDRB | Port B data direction register | `SYS.DDRB` |
+| `$0303` | DDRA | Port A data direction register | `SYS.DDRA` |
+| `$0304` | T1C-L / T1L-L | Timer 1 counter / latch low byte | `SYS.T1CL` (dash dropped) |
+| `$0305` | T1C-H | Timer 1 counter high byte | `SYS.T1CH` |
+| `$0306` | T1L-L | Timer 1 latch low byte | `SYS.T1LL` |
+| `$0307` | T1L-H | Timer 1 latch high byte | `SYS.T1LH` |
+| `$0308` | T2C-L / T2L-L | Timer 2 counter / latch low byte (T2 has no separate latch port — same address, dual role) | `SYS.T2CL` **and** `SYS.T2LL` (both → $0308) |
+| `$0309` | T2C-H | Timer 2 counter high byte | `SYS.T2CH` |
+| `$030A` | SR | Shift register | `SYS.SR` |
+| `$030B` | ACR | Auxiliary control register | `SYS.ACR` |
+| `$030C` | PCR | Peripheral control register | `SYS.PCR` |
+| `$030D` | IFR | Interrupt flag register | `SYS.IFR` |
+| `$030E` | IER | Interrupt enable register | `SYS.IER` |
+| `$030F` | ORA (no handshake) | Port A output, no handshake | `SYS.ORANH` (invented short form) |
 
 Note: the BASIC ROM uses these heavily for IRQ-driven keyboard scan, sound chip register access (via Port A), and printer output. Direct manipulation by user code can interfere with ROM operation — typically only read for diagnostic purposes or written when bypassing the ROM's keyboard/sound subsystems entirely.
 

@@ -31,8 +31,7 @@
  *
  * Deferred to a follow-up (would need invented names): per-byte FAC
  * zero-page ($D0–$DD), screen/hires/charset RAM bases, cold-start /
- * NMI / IRQ "vector target" rows, user-ML scratch, "signed FAC→int",
- * and the dash-named VIA timer-latch registers ($0304–$0309, $030F).
+ * NMI / IRQ "vector target" rows, user-ML scratch, "signed FAC→int".
  */
 
 /** Resolved address(es) for one built-in symbol.  Shape selects the
@@ -195,11 +194,37 @@ const SYS_SYMBOLS: ReadonlyMap<string, SysEntry> = new Map([
   ['ORA',  { addr: 0x0301 }],
   ['DDRB', { addr: 0x0302 }],
   ['DDRA', { addr: 0x0303 }],
+  // Timer 1: dedicated counter ($0304/$0305) and latch ($0306/$0307)
+  // ports.  Names are the datasheet's with the illegal dash dropped.
+  // Read/write asymmetry on $0304: read = T1 low counter (clears T1
+  // IFR), write = stages T1 low latch (identical write effect to
+  // $0306 — so STA T1CL and STA T1LL are interchangeable, but LDA
+  // T1CL vs LDA T1LL are not).
+  ['T1CL', { addr: 0x0304 }],
+  ['T1CH', { addr: 0x0305 }],
+  ['T1LL', { addr: 0x0306 }],
+  ['T1LH', { addr: 0x0307 }],
+  // Timer 2: shared counter/latch address at $0308.  T2 has NO
+  // separate latch port (unlike T1), so the manual labels it
+  // dually as "T2C-L / T2L-L".  We honour that by exposing both
+  // SYS.T2CL and SYS.T2LL at the same address — pick the label
+  // that matches your intent at the call site (read=counter,
+  // write=latch).  $0309 (T2CH) has no dual; writing it transfers
+  // latches → counter and starts T2.
+  ['T2CL', { addr: 0x0308 }],
+  ['T2LL', { addr: 0x0308 }],   // alias of T2CL — read/write dual
+  ['T2CH', { addr: 0x0309 }],
   ['SR',   { addr: 0x030A }],
   ['ACR',  { addr: 0x030B }],
   ['PCR',  { addr: 0x030C }],
   ['IFR',  { addr: 0x030D }],
   ['IER',  { addr: 0x030E }],
+  // Port A "no handshake" alternate port at $030F.  Same register
+  // semantically as ORA at $0301, but reads/writes don't trigger
+  // the handshake side effects on CA1/CA2.  "NH" suffix invented
+  // (no datasheet-canonical short form); the deferred-names list
+  // in the file header used to flag this as needing a name.
+  ['ORANH', { addr: 0x030F }],
 
   // ── §5.10 Video-mode-dependent areas (mode axis) ────────────────
   // One block each; base address moves with the video mode (the

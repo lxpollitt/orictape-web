@@ -94,6 +94,60 @@ test('§5.9 CPU vectors invariant; RESET is variant', () => {
   return null;
 });
 
+test('§5.10 6522 VIA: timer registers and ORANH resolve to their port addresses', () => {
+  // Pre-existing entries (sanity that the test reaches this block):
+  const orb = lookupSysSymbol('SYS.ORB');
+  if (orb.kind !== 'ok' || orb.value !== 0x0300) return `ORB: ${JSON.stringify(orb)}`;
+  const via = lookupSysSymbol('SYS.VIA');
+  if (via.kind !== 'ok' || via.value !== 0x0300) return `VIA: ${JSON.stringify(via)}`;
+
+  // Newly added: T1 counter/latch ports each get a single label.
+  const t1Cases: [string, number][] = [
+    ['SYS.T1CL', 0x0304], ['SYS.T1CH', 0x0305],
+    ['SYS.T1LL', 0x0306], ['SYS.T1LH', 0x0307],
+  ];
+  for (const [n, want] of t1Cases) {
+    const r = lookupSysSymbol(n);
+    if (r.kind !== 'ok' || r.value !== want) {
+      return `${n} → ${JSON.stringify(r)}, want $${want.toString(16)}`;
+    }
+  }
+
+  // T2 shares $0308 between counter-read and latch-write — both
+  // labels resolve to the same address, mirroring the Atmos manual's
+  // dual "T2C-L / T2L-L" notation.
+  const t2cl = lookupSysSymbol('SYS.T2CL');
+  if (t2cl.kind !== 'ok' || t2cl.value !== 0x0308) return `T2CL: ${JSON.stringify(t2cl)}`;
+  const t2ll = lookupSysSymbol('SYS.T2LL');
+  if (t2ll.kind !== 'ok' || t2ll.value !== 0x0308) return `T2LL: ${JSON.stringify(t2ll)}`;
+  if (t2cl.value !== t2ll.value) return `T2CL/T2LL dual-label desynced`;
+  const t2ch = lookupSysSymbol('SYS.T2CH');
+  if (t2ch.kind !== 'ok' || t2ch.value !== 0x0309) return `T2CH: ${JSON.stringify(t2ch)}`;
+
+  // $030F (ORA, no handshake) — the one register with a renamed SYS
+  // label (`ORA (no handshake)` isn't a legal identifier).
+  const oranh = lookupSysSymbol('SYS.ORANH');
+  if (oranh.kind !== 'ok' || oranh.value !== 0x030F) return `ORANH: ${JSON.stringify(oranh)}`;
+  return null;
+});
+
+test('§5.10 6522 VIA: T2 dual labels assemble to the same operand bytes', () => {
+  // Operand-position end-to-end: `STA SYS.T2LL` and `STA SYS.T2CL`
+  // must produce identical 3-byte ABS encodings (8D 08 03).  Catches
+  // a future regression where one of the dual labels drifts off
+  // $0308 — the lookup test above wouldn't notice if both moved
+  // together, but the assemble path would still expose a divergence.
+  const a = asmBytes('STA SYS.T2CL');
+  const b = asmBytes('STA SYS.T2LL');
+  if (a.length !== 3 || a[0] !== 0x8D || a[1] !== 0x08 || a[2] !== 0x03) {
+    return `T2CL operand: [${a.map(x => x.toString(16)).join(' ')}]`;
+  }
+  if (b.length !== 3 || b[0] !== 0x8D || b[1] !== 0x08 || b[2] !== 0x03) {
+    return `T2LL operand: [${b.map(x => x.toString(16)).join(' ')}]`;
+  }
+  return null;
+});
+
 test('single-ROM symbol: .V11 resolves, .V10 errors, bare errors', () => {
   const v11 = lookupSysSymbol('SYS.CHECKKBD.V11');
   if (v11.kind !== 'ok' || v11.value !== 0xEB78) return `V11: ${JSON.stringify(v11)}`;
