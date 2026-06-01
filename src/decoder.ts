@@ -1452,22 +1452,65 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
   let startAddr = START_ADDR;
 
   if (skipHeader) {
-    // Force decode: skip sync/header/name, assume BASIC.
-    // Scan forward for a 0x00 (previous line's terminator) so we start on a
-    // clean line boundary.  Fall back to byte 0 if none found within first 256 bytes.
-    let startOffset = 0;
-    for (let i = 0; i < Math.min(prog.bytes.length, 256); i++) {
-      if (prog.bytes[i].v === 0x00) { startOffset = i + 1; break; }
+    // Force decode as BASIC.  Two cases, distinguished by whether a
+    // header was previously parsed (sync+header+name read successfully
+    // by an earlier non-skipHeader pass — `byteIndex > 0` is the
+    // codebase's established signal for that, see decoder.ts:~1212).
+    if (prog.header.byteIndex > 0) {
+      // A.  Header WAS parsed.  Typical trigger: a BASIC program saved
+      //     as a memory block (fileType = 0x80) so the normal pass
+      //     bailed at the "if (headerBytes[2] !== 0) return" gate.
+      //     The header tells us where the body lives in memory; we
+      //     trust it.  Skip past the 9-byte header + null-terminated
+      //     name in `prog.bytes` to find the body's start position;
+      //     the body's first byte sits at memory address =
+      //     `prog.header.startAddr`.  Then scan within the body for
+      //     the first 0x00 — the previous-line-terminator / sentinel
+      //     byte that the BASIC interpreter writes immediately before
+      //     the first real line — and anchor line 1 at
+      //     `startAddr + sentinelOffset + 1`.  All address math falls
+      //     out of the header; no canonical $0501 fallback.  The
+      //     existing `prog.header` is left untouched so save-back-to-
+      //     TAP round-trips the file byte-perfectly (fileType, the
+      //     original startAddr, and endAddr are all preserved).
+      let bodyStart = prog.header.byteIndex + 9;
+      while (bodyStart < prog.bytes.length && prog.bytes[bodyStart].v !== 0) bodyStart++;
+      if (bodyStart < prog.bytes.length) bodyStart++;   // step past the name terminator
+      let sentinelOffset = -1;
+      for (let i = bodyStart; i < Math.min(prog.bytes.length, bodyStart + 256); i++) {
+        if (prog.bytes[i].v === 0x00) { sentinelOffset = i - bodyStart; break; }
+      }
+      if (sentinelOffset === -1) {
+        // No sentinel found in the first 256 body bytes — assume
+        // BASIC begins at the body's first byte directly.
+        nextByte  = bodyStart;
+        startAddr = prog.header.startAddr;
+      } else {
+        nextByte  = bodyStart + sentinelOffset + 1;
+        startAddr = prog.header.startAddr + sentinelOffset + 1;
+      }
+    } else {
+      // B.  Header was NOT parsed (no sync found by the earlier pass).
+      //     We don't know what bytes are header vs body vs name, so
+      //     the heuristic scans the whole stream: find the first 0x00
+      //     within 256 bytes and assume that's a previous-line-
+      //     terminator immediately before BASIC.  Anchor at the
+      //     canonical Oric TXTTAB ($0501) since we have no header to
+      //     tell us the real memory address.
+      let startOffset = 0;
+      for (let i = 0; i < Math.min(prog.bytes.length, 256); i++) {
+        if (prog.bytes[i].v === 0x00) { startOffset = i + 1; break; }
+      }
+      nextByte = startOffset;
+      prog.header = {
+        byteIndex: startOffset,
+        fileType:  0,
+        autorun:   false,
+        startAddr: START_ADDR,
+        endAddr:   START_ADDR + prog.bytes.length - startOffset,
+      };
+      prog.name = '(force decoded)';
     }
-    nextByte = startOffset;
-    prog.header = {
-      byteIndex: startOffset,
-      fileType:  0,
-      autorun:   false,
-      startAddr: START_ADDR,
-      endAddr:   START_ADDR + prog.bytes.length - startOffset,
-    };
-    prog.name = '(force decoded)';
   } else {
     // Find sync: 4+ × 0x16 bytes followed by 0x24.
     let syncCount = 0;
