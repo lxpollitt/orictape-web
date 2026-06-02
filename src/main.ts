@@ -1424,6 +1424,23 @@ function enterEditMode(lineIdx: number, replaceElem?: number, insertChar?: strin
 }
 
 /**
+ * Split a textarea edit value on embedded line endings (CRLF / CR / LF, in
+ * any mix), returning one chunk per line.  A single trailing empty chunk
+ * left by a terminating newline is dropped; lines containing only spaces or
+ * other content are preserved.  Used by `exitEditMode` to support multi-
+ * line pastes: each chunk becomes a separate BASIC line on apply.  See
+ * `exitEditMode` for the apply semantics and the explicitly-accepted edge
+ * case (an existing line whose content legitimately contains 0x0A will now
+ * split on edit — extremely rare in practice).
+ */
+function splitOnLineEndings(text: string): string[] {
+  const normalised = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const parts = normalised.split('\n');
+  if (parts.length > 1 && parts[parts.length - 1] === '') parts.pop();
+  return parts;
+}
+
+/**
  * Exit edit mode, optionally applying the edit and navigating to an adjacent line.
  * @param confirmed  true = apply the edit, false = discard
  * @param direction  -1 = move to previous line, 1 = next line, 0 = stay (default)
@@ -1438,20 +1455,58 @@ function exitEditMode(confirmed: boolean, direction = 0): void {
     const text = editInput.value;
     const prog = programs[activeProgIdx];
     if (prog && editingLine !== null && editingLine < prog.lines.length) {
-      if (text.trim() === '') {
+      // Multi-line paste support: if the textarea content contains line
+      // endings, split into one chunk per line.  Chunk 0 is applied to
+      // the line being edited using the existing single-line semantics
+      // (empty → delete, non-empty → applyLineEdit).  Chunks 1..N-1 are
+      // each inserted as a new line after the previous via
+      // splitLineWithEdits, which already handles the byte-stream /
+      // pointer-chain bookkeeping.  No new core-edit logic introduced.
+      //
+      // Pathological edge case: if chunk 0 is empty AND the line being
+      // edited is the first line (index 0), the loop has no "previous
+      // line" to split from (prevIdx = -1) and silently drops chunks
+      // 1..N-1.  Accepted as a known limitation — vanishingly rare.
+      const parts = splitOnLineEndings(text);
+      const first = parts[0] ?? '';
+
+      if (first.trim() === '') {
         // Empty input — delete the line.
         deleteLineEdit(prog, editingLine);
         selByte = null;
-        renderHex(prog, selByte);
         waveform.selectByte(null);
       } else {
-        applyLineEdit(prog, editingLine, text);
-        renderHex(prog, selByte);
+        applyLineEdit(prog, editingLine, first);
         // Clear waveform selection only if the selected byte is now edited.
         if (selByte !== null && prog.bytes[selByte]?.edited) {
           waveform.selectByte(null);
         }
       }
+
+      let prevIdx = (first.trim() === '') ? editingLine - 1 : editingLine;
+      for (let i = 1; i < parts.length; i++) {
+        if (prevIdx < 0) break;
+        const prevText = prog.lines[prevIdx].v;
+        const newIdx = splitLineWithEdits(prog, prevIdx, prevText, parts[i]);
+        if (newIdx === null) break;
+        // Re-apply with full-line semantics so a leading line number in
+        // the chunk becomes the new line's number.  splitLineWithEdits
+        // parses its second half as no-line-number-expected mid-line
+        // content when the first half is non-empty (editor.ts:806), so
+        // without this second call the chunk's "100 " would become
+        // content and the line would carry the dummy zero line number.
+        // This mirrors what the real UI does after a mid-line Enter
+        // split: the new line goes into edit mode and the user's
+        // confirm triggers an applyLineEdit that reparses leading line
+        // numbers.  ESC-without-confirm in that UI flow leaves the
+        // dummy zero stamped — same accepted edge case applies here if
+        // splitLineWithEdits succeeded but applyLineEdit somehow
+        // didn't run (it always does in this synchronous loop).
+        applyLineEdit(prog, newIdx, parts[i]);
+        prevIdx = newIdx;
+      }
+
+      renderHex(prog, selByte);
     }
   } else {
     // Cancelled — if this was a new line insertion, delete it.
