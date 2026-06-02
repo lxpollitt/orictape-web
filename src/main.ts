@@ -271,6 +271,67 @@ function closeProgram(tapeIdx: number, progIdx: number): void {
   renderAll();
 }
 
+/**
+ * Close a merged-output tab (the close-button "x" on a merged tab in
+ * the tab bar).  Mirrors {@link closeProgram} for parity:
+ *
+ *   - Removes the entry from `userMerges`.
+ *   - Re-anchors `activeProgIdx` so the active selection lands on
+ *     something sensible: if other merges remain, snap to a neighbour;
+ *     if this was the last merge and we were viewing it, switch back
+ *     to tape view (clamping `activeProgIdx` to the current tape's
+ *     program range — `activeProgIdx` is shared between tape and merge
+ *     view, and could otherwise hold a stale merge index after the
+ *     view-mode flip).
+ *   - Clears merge-specific selection state if the closed merge was
+ *     the active one (matches the `selByte` clear in `closeProgram`).
+ *
+ * No confirmation dialog — the yellow close-button border on
+ * `merge.result.output.unsaved` is the pre-warning, same convention
+ * as source tabs.
+ *
+ * Doesn't touch source tapes — merges snapshot their bytes at create
+ * time, so closing a merge doesn't invalidate any source tape state.
+ */
+function closeMerge(mergeIdx: number): void {
+  if (mergeIdx < 0 || mergeIdx >= userMerges.length) return;
+
+  const closedActive = viewMode === 'merged' && activeProgIdx === mergeIdx;
+
+  userMerges.splice(mergeIdx, 1);
+
+  if (closedActive) {
+    if (userMerges.length > 0) {
+      // Snap to a neighbouring merge: previous slot if it existed
+      // (the closed one was at the rightmost position), else the
+      // same slot (which now holds the next merge).
+      activeProgIdx = Math.min(mergeIdx, userMerges.length - 1);
+    } else {
+      // No merges left — fall back to tape view.  activeProgIdx is
+      // shared between the two view modes, so we need to clamp it to
+      // a valid tape program index before the switch (the merge index
+      // we had could exceed the current tape's program count).
+      viewMode = 'tape';
+      const tape = tapes[activeTapeIdx];
+      activeProgIdx = tape ? Math.min(activeProgIdx, Math.max(0, tape.programs.length - 1)) : 0;
+    }
+    // Same selection cleanup as closeProgram: the closed view's
+    // selections refer to bytes / lines that no longer exist.
+    selByte         = null;
+    selMergeLine    = null;
+    selMergeCol     = null;
+    selMergeElem    = null;
+    showDisassembly = false;
+  } else if (viewMode === 'merged' && activeProgIdx > mergeIdx) {
+    // Closed a merge to the left of the active one — shift left.
+    activeProgIdx--;
+  }
+  // viewMode === 'tape' case: no activeProgIdx change needed (the
+  // index refers to a tape program slot, unrelated to merge indices).
+
+  renderAll();
+}
+
 /** Reset the waveform to overview 100% fit for the currently active
  *  program.  Called from actions that should reset the zoom to
  *  "show me the whole program" — currently just the tab-bar click,
@@ -484,11 +545,17 @@ progTabs.addEventListener('click', (e) => {
   // Resolve the close target first and short-circuit.  No
   // confirmation dialog: the yellow border on unsaved tabs is the
   // pre-warning the user agreed to in the design discussion.
-  const closeBtn = (e.target as Element).closest<HTMLElement>('[data-close-ti]');
+  // Two flavours: source-tab close (`data-close-ti` + `data-close-pi`)
+  // and merged-tab close (`data-close-mi`).
+  const closeBtn = (e.target as Element).closest<HTMLElement>('[data-close-ti],[data-close-mi]');
   if (closeBtn) {
-    const ti = +(closeBtn.dataset.closeTi ?? '');
-    const pi = +(closeBtn.dataset.closePi ?? '');
-    closeProgram(ti, pi);
+    if (closeBtn.dataset.closeMi !== undefined) {
+      closeMerge(+closeBtn.dataset.closeMi);
+    } else {
+      const ti = +(closeBtn.dataset.closeTi ?? '');
+      const pi = +(closeBtn.dataset.closePi ?? '');
+      closeProgram(ti, pi);
+    }
     return;
   }
 
@@ -657,6 +724,20 @@ function renderTabs(): void {
         `<span class="prog-num">${pn0}</span>` +
         `<span class="prog-num">${pn1}</span>Merged` +
         badge;
+      // Close button — parity with source tabs.  Reuses the same
+      // `prog-tab-close` class (and the `unsaved` variant when the
+      // merged *output* has unsaved edits) so the existing CSS and
+      // hover behaviour apply unchanged.  Click is dispatched by the
+      // `progTabs` delegate above, branched on `data-close-mi` vs
+      // `data-close-ti`.
+      const mergeUnsaved = merge.result.output.unsaved === true;
+      const closeBtn = document.createElement('button');
+      closeBtn.className       = `prog-tab-close${mergeUnsaved ? ' unsaved' : ''}`;
+      closeBtn.textContent     = '×';
+      closeBtn.dataset.closeMi = String(mi);
+      closeBtn.tabIndex        = -1;
+      closeBtn.title           = mergeUnsaved ? 'Close (unsaved changes)' : 'Close';
+      btn.appendChild(closeBtn);
       progTabs.appendChild(btn);
     });
   }
