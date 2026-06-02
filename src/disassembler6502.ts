@@ -10,6 +10,21 @@
  *     decoded as nonsense instructions.
  *   - Illegal/unofficial opcodes are marked as "???".
  *   - Doesn't follow jumps/branches — just linear decode.
+ *
+ * Symbol substitution: address-bearing operands (ZP, ZPX, ZPY, ABS, ABX,
+ * ABY, IND, IZX, IZY, REL) are looked up against the curated `SYS.` table
+ * and substituted with the symbolic form when an address matches.  IMM
+ * operands are values, not addresses, and are never substituted.  When an
+ * address matches multiple SYS entries (e.g. `$0300` = `SYS.ORB` and the
+ * block base `SYS.VIA`), the most specific wins as the primary
+ * substitution and the alias is emitted as a trailing `*`-comment on the
+ * line.  `SYS.PARAMS+N` offset substitution is supported for `N` in the
+ * documented `+0..+8` range; nothing above that is attested in the
+ * reference doc.  Substitution syntax matches what `assembler6502.ts`
+ * accepts, so disassembled output is round-trippable through the
+ * assembler (modulo the line-prefix debug info — address and hex bytes —
+ * which is not assembler-syntax-valid and would need stripping for
+ * round-trip).
  */
 
 // ── Addressing modes ────────────────────────────────────────────────────────
@@ -146,28 +161,53 @@ set(0xFD, 'SBC', 'ABX'); set(0xFE, 'INC', 'ABX');
 
 // ── Formatting helpers ──────────────────────────────────────────────────────
 
+import { lookupSysSymbolsByAddress, lookupSysParamsOffset } from './oricRomSymbols';
+
 const hex2 = (n: number) => n.toString(16).toUpperCase().padStart(2, '0');
 const hex4 = (n: number) => n.toString(16).toUpperCase().padStart(4, '0');
 
-function formatOperand(mode: Mode, operands: number[], pc: number): string {
+/** Resolve an address operand to its display form: either a `SYS.` label
+ *  (when the address matches the curated table or falls in `PARAMS+N`'s
+ *  documented range) or the raw `$XXXX` / `$XX` hex literal at the
+ *  caller-specified width.  Returns `{ text, aliases }` — aliases is the
+ *  list of additional `SYS.` matches at the same address (typically just
+ *  the block-base alias like `SYS.VIA`); the caller surfaces them as a
+ *  trailing `*` comment on the line. */
+function addressLabel(addr: number, width: 2 | 4): { text: string; aliases: string[] } {
+  const exact = lookupSysSymbolsByAddress(addr);
+  if (exact.length > 0) {
+    return { text: exact[0], aliases: exact.slice(1) };
+  }
+  const offset = lookupSysParamsOffset(addr);
+  if (offset !== null) {
+    return { text: offset, aliases: [] };
+  }
+  return { text: `$${width === 4 ? hex4(addr) : hex2(addr)}`, aliases: [] };
+}
+
+function formatOperand(mode: Mode, operands: number[], pc: number): { text: string; aliases: string[] } {
   switch (mode) {
-    case 'IMP': return '';
-    case 'ACC': return 'A';
-    case 'IMM': return `#$${hex2(operands[0])}`;
-    case 'ZP':  return `$${hex2(operands[0])}`;
-    case 'ZPX': return `$${hex2(operands[0])},X`;
-    case 'ZPY': return `$${hex2(operands[0])},Y`;
-    case 'ABS': return `$${hex4(operands[0] | (operands[1] << 8))}`;
-    case 'ABX': return `$${hex4(operands[0] | (operands[1] << 8))},X`;
-    case 'ABY': return `$${hex4(operands[0] | (operands[1] << 8))},Y`;
-    case 'IND': return `($${hex4(operands[0] | (operands[1] << 8))})`;
-    case 'IZX': return `($${hex2(operands[0])},X)`;
-    case 'IZY': return `($${hex2(operands[0])}),Y`;
+    case 'IMP': return { text: '',  aliases: [] };
+    case 'ACC': return { text: 'A', aliases: [] };
+    // IMM is a value, not an address — never substituted.  Coincidental
+    // value-to-address matches (e.g. `LDA #$33` happening to equal a ZP
+    // label) would be misleading, not informative.
+    case 'IMM': return { text: `#$${hex2(operands[0])}`, aliases: [] };
+    case 'ZP':  { const a = addressLabel(operands[0], 2); return { text: a.text,            aliases: a.aliases }; }
+    case 'ZPX': { const a = addressLabel(operands[0], 2); return { text: `${a.text},X`,     aliases: a.aliases }; }
+    case 'ZPY': { const a = addressLabel(operands[0], 2); return { text: `${a.text},Y`,     aliases: a.aliases }; }
+    case 'ABS': { const a = addressLabel(operands[0] | (operands[1] << 8), 4); return { text: a.text,        aliases: a.aliases }; }
+    case 'ABX': { const a = addressLabel(operands[0] | (operands[1] << 8), 4); return { text: `${a.text},X`, aliases: a.aliases }; }
+    case 'ABY': { const a = addressLabel(operands[0] | (operands[1] << 8), 4); return { text: `${a.text},Y`, aliases: a.aliases }; }
+    case 'IND': { const a = addressLabel(operands[0] | (operands[1] << 8), 4); return { text: `(${a.text})`, aliases: a.aliases }; }
+    case 'IZX': { const a = addressLabel(operands[0], 2); return { text: `(${a.text},X)`,   aliases: a.aliases }; }
+    case 'IZY': { const a = addressLabel(operands[0], 2); return { text: `(${a.text}),Y`,   aliases: a.aliases }; }
     case 'REL': {
       // Relative is signed 8-bit offset from the byte after the instruction.
       const offset = operands[0] < 0x80 ? operands[0] : operands[0] - 0x100;
       const target = (pc + 2 + offset) & 0xFFFF;
-      return `$${hex4(target)}`;
+      const a = addressLabel(target, 4);
+      return { text: a.text, aliases: a.aliases };
     }
   }
 }
@@ -208,9 +248,14 @@ export function disassemble(bytes: number[], startAddr: number): string[] {
     }
 
     const hexBytes = [op, ...operands].map(hex2).join(' ');
-    const operandStr = formatOperand(entry.mode, operands, pc);
+    const { text: operandStr, aliases } = formatOperand(entry.mode, operands, pc);
     const instr = operandStr ? `${entry.mnemonic} ${operandStr}` : entry.mnemonic;
-    out.push(`$${hex4(pc)}: ${hexBytes.padEnd(8)}  ${instr}`);
+    // Multi-match aliases (e.g. `SYS.VIA` at `$0300` when `SYS.ORB` won
+    // as the primary) are surfaced as a trailing `*`-comment so the
+    // reader still sees the alternative reading.  Most lines have no
+    // aliases and emit no trailing comment.
+    const aliasComment = aliases.length > 0 ? `     * ${aliases.join(' ')}` : '';
+    out.push(`$${hex4(pc)}: ${hexBytes.padEnd(8)}  ${instr}${aliasComment}`);
 
     i += 1 + n;
   }

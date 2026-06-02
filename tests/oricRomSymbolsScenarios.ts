@@ -13,7 +13,7 @@
  * Not part of CI — run: npx tsx tests/oricRomSymbolsScenarios.ts
  */
 
-import { lookupSysSymbol, isReservedSysName } from '../src/oricRomSymbols';
+import { lookupSysSymbol, lookupSysSymbolsByAddress, lookupSysParamsOffset, isReservedSysName } from '../src/oricRomSymbols';
 import { assemble, assembleProgram } from '../src/assembler6502';
 import type { ByteInfo, LineInfo, Program } from '../src/decoder';
 import { emptyBitStream, buildLineElements } from '../src/decoder';
@@ -266,6 +266,65 @@ test('isReservedSysName', () => {
   if (!isReservedSysName('SYS')) return 'SYS should be reserved';
   if (!isReservedSysName('sys')) return 'sys should be reserved (case-insensitive)';
   if (isReservedSysName('SYSTEM')) return 'SYSTEM should NOT be reserved';
+  return null;
+});
+
+// ── Reverse lookup (disassembler) ───────────────────────────────────────────
+
+test('reverse lookup: invariant address → bare SYS.NAME', () => {
+  const m = lookupSysSymbolsByAddress(0x02E0);
+  return m.length === 1 && m[0] === 'SYS.PARAMS' ? null : `got ${JSON.stringify(m)}`;
+});
+
+test('reverse lookup: ROM-variant address → suffixed label', () => {
+  const v11 = lookupSysSymbolsByAddress(0xFB40);   // SOUND.V11
+  if (!(v11.length === 1 && v11[0] === 'SYS.SOUND.V11')) return `V11: ${JSON.stringify(v11)}`;
+  const v10 = lookupSysSymbolsByAddress(0xFB26);   // SOUND.V10
+  if (!(v10.length === 1 && v10[0] === 'SYS.SOUND.V10')) return `V10: ${JSON.stringify(v10)}`;
+  return null;
+});
+
+test('reverse lookup: video-mode-variant address → .TEXT / .HIRES', () => {
+  const t = lookupSysSymbolsByAddress(0xBB80);   // SCREEN.TEXT
+  if (!(t.length === 1 && t[0] === 'SYS.SCREEN.TEXT')) return `text: ${JSON.stringify(t)}`;
+  const h = lookupSysSymbolsByAddress(0xA000);   // SCREEN.HIRES
+  if (!(h.length === 1 && h[0] === 'SYS.SCREEN.HIRES')) return `hires: ${JSON.stringify(h)}`;
+  return null;
+});
+
+test('reverse lookup: block-base alias deprioritised below specific symbol', () => {
+  // $0300 is both SYS.VIA (block base) and SYS.ORB.  Specific symbol
+  // wins as the primary; block base appears as an alias.
+  const m = lookupSysSymbolsByAddress(0x0300);
+  if (m.length !== 2)        return `expected 2 matches, got ${JSON.stringify(m)}`;
+  if (m[0] !== 'SYS.ORB')    return `primary should be SYS.ORB, got ${m[0]}`;
+  if (m[1] !== 'SYS.VIA')    return `alias should be SYS.VIA, got ${m[1]}`;
+  return null;
+});
+
+test('reverse lookup: no match returns empty array', () => {
+  const m = lookupSysSymbolsByAddress(0x1234);
+  return m.length === 0 ? null : `expected [], got ${JSON.stringify(m)}`;
+});
+
+test('PARAMS offset: +0 returns bare SYS.PARAMS', () => {
+  const r = lookupSysParamsOffset(0x02E0);
+  return r === 'SYS.PARAMS' ? null : `got ${JSON.stringify(r)}`;
+});
+
+test('PARAMS offset: +1 through +8 within the documented cap', () => {
+  for (let off = 1; off <= 8; off++) {
+    const r = lookupSysParamsOffset(0x02E0 + off);
+    const want = `SYS.PARAMS+${off}`;
+    if (r !== want) return `+${off}: got ${JSON.stringify(r)}, want ${want}`;
+  }
+  return null;
+});
+
+test('PARAMS offset: +9 (above cap) and below-base return null', () => {
+  if (lookupSysParamsOffset(0x02E9) !== null) return `+9 should be null`;
+  if (lookupSysParamsOffset(0x02DF) !== null) return `-1 should be null`;
+  if (lookupSysParamsOffset(0x0300) !== null) return `+0x20 should be null`;
   return null;
 });
 

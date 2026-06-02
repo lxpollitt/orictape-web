@@ -358,6 +358,83 @@ export function lookupSysSymbol(name: string): SysLookup {
   return { kind: 'ok', value: addr };
 }
 
+// ── Reverse lookup (used by the disassembler) ─────────────────────────────
+
+/** Names that are "block bases" — aliases for the first specific symbol
+ *  in a contiguous register block.  When a reverse-lookup match collides
+ *  with a more specific symbol at the same address (e.g. `SYS.VIA` at
+ *  `$0300` collides with `SYS.ORB`), the specific symbol wins as the
+ *  primary and the block base is surfaced as an alias.  See
+ *  {@link lookupSysSymbolsByAddress} for the priority rule. */
+const BLOCK_BASE_NAMES: ReadonlySet<string> = new Set(['VIA']);
+
+/** Reverse-lookup an address to one or more SYS labels.  Returns a list
+ *  of fully-formed labels (e.g. `SYS.SOUND.V11`, `SYS.SCREEN.HIRES`,
+ *  bare `SYS.PARAMS`) ordered by specificity: non-block-base entries
+ *  precede block-base entries.  Used by the disassembler to substitute
+ *  raw `$XXXX` operands with their symbolic form — the first entry is
+ *  the "primary" substitution, any further entries are surfaced as
+ *  trailing `*`-comment aliases on the disassembled line.
+ *
+ *  All three axes are searched:
+ *    - invariant entries `{ addr }`            → `SYS.NAME`
+ *    - ROM-variant entries `{ v10?, v11? }`    → `SYS.NAME.V10` / `.V11`
+ *    - video-mode-variant entries `{ text, hires }` → `SYS.NAME.TEXT` / `.HIRES`
+ *
+ *  A single ROM-variant entry can contribute *both* `.V10` and `.V11`
+ *  forms if (against current expectations) the two ROMs happen to share
+ *  an address for the same routine — they'd both appear in the result
+ *  list.  Likewise video-mode if `text === hires` (also not expected). */
+export function lookupSysSymbolsByAddress(addr: number): string[] {
+  const matches: { label: string; isBlockBase: boolean }[] = [];
+  for (const [name, entry] of SYS_SYMBOLS) {
+    const isBlockBase = BLOCK_BASE_NAMES.has(name);
+    if ('addr' in entry) {
+      if (entry.addr === addr) matches.push({ label: `SYS.${name}`, isBlockBase });
+    } else if ('text' in entry) {
+      if (entry.text  === addr) matches.push({ label: `SYS.${name}.TEXT`,  isBlockBase });
+      if (entry.hires === addr) matches.push({ label: `SYS.${name}.HIRES`, isBlockBase });
+    } else {
+      // ROM-version axis: `v10`/`v11` both optional (single-ROM
+      // symbols have only one side defined).  An undefined side
+      // can't match `addr` (number), so the check is also a
+      // discriminant — both branches harmlessly skip undefined.
+      if (entry.v10 === addr) matches.push({ label: `SYS.${name}.V10`, isBlockBase });
+      if (entry.v11 === addr) matches.push({ label: `SYS.${name}.V11`, isBlockBase });
+    }
+  }
+  // Stable: non-block-base entries first; within each group, table order
+  // is preserved.  matches[0] is the primary substitution; the rest are
+  // aliases.
+  matches.sort((a, b) => (a.isBlockBase ? 1 : 0) - (b.isBlockBase ? 1 : 0));
+  return matches.map(m => m.label);
+}
+
+/** `SYS.PARAMS` block base, exposed for reverse-lookup callers that need
+ *  the address (the disassembler uses this for the offset cap). */
+const PARAMS_BASE = 0x02E0;
+/** Max documented `PARAMS+N` offset.  Comes from `PLAY` (parameter list
+ *  uses `+1`, `+3`, `+5`, `+7`, `+8` — the high byte of the 2-byte
+ *  duration at `+7`/`+8`).  Nothing above `+8` is attested in the
+ *  reference doc, so we stop there — going further would produce
+ *  speculative matches for any random byte in the unattested
+ *  `$02E9..$02F4` region. */
+const PARAMS_MAX_OFFSET = 8;
+
+/** If `addr` is `SYS.PARAMS` itself or `SYS.PARAMS+N` within the
+ *  documented offset range (`+0..+8`), return the assembler-syntax
+ *  label string.  Otherwise return `null`.  The exact-`PARAMS` case
+ *  (`+0`) is normally caught by {@link lookupSysSymbolsByAddress} via
+ *  the invariant `PARAMS` entry — this function is a *fallback* for
+ *  the offset case, called only when the exact-match lookup returned
+ *  nothing.  We include the `+0` case here too as a safety net for
+ *  callers that want a single entry point. */
+export function lookupSysParamsOffset(addr: number): string | null {
+  const offset = addr - PARAMS_BASE;
+  if (offset < 0 || offset > PARAMS_MAX_OFFSET) return null;
+  return offset === 0 ? 'SYS.PARAMS' : `SYS.PARAMS+${offset}`;
+}
+
 /** True if `name` (case-insensitively) is exactly `SYS` — the
  *  reserved built-in namespace token.  Used to reject user
  *  declarations that would shadow the namespace. */
