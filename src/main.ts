@@ -883,8 +883,15 @@ function runSearch(query: string): void {
     searchMatchIdx = -1;
   } else {
     const q = query.toLowerCase();
-    searchMatches  = prog.lines.reduce<number[]>((acc, line, i) => {
-      if (line.v.toLowerCase().includes(q)) acc.push(i);
+    // Source: disassembled instruction lines when the disassembly view
+    // is active, otherwise the BASIC line texts.  Both index spaces
+    // map to `data-li` attributes on the rendered DOM nodes, so the
+    // existing scroll-to-match / current-highlight logic Just Works.
+    const lines = inDisassemblyView(prog)
+      ? computeDisassembly(prog)
+      : prog.lines.map(l => l.v);
+    searchMatches = lines.reduce<number[]>((acc, text, i) => {
+      if (text.toLowerCase().includes(q)) acc.push(i);
       return acc;
     }, []);
     searchMatchIdx = searchMatches.length > 0 ? 0 : -1;
@@ -972,6 +979,26 @@ function elementEditClass(status: 'explicit' | 'automatic' | null): string {
        : '';
 }
 
+/** True when the current view of `prog` is the disassembly variant of
+ *  the BASIC panel (machine-code program + the user has opted into the
+ *  "Show as assembler" view).  Used by `runSearch` to pick the right
+ *  searchable-lines source (`computeDisassembly` vs `prog.lines`).
+ *  Mirrors the gating used in `renderBasic` itself so the search and
+ *  render paths stay in sync. */
+function inDisassemblyView(prog: Program): boolean {
+  return prog.header.fileType !== 0 && prog.lines.length === 0 && showDisassembly;
+}
+
+/** Run the disassembler on the program's body bytes.  Cheap +
+ *  deterministic, so we recompute each time rather than caching.
+ *  Used by both the disassembly render path in `renderBasic` and the
+ *  search-source picker in `runSearch`. */
+function computeDisassembly(prog: Program): string[] {
+  const { firstContent, lastContent } = getBodyRange(prog);
+  const body = prog.bytes.slice(firstContent, lastContent).map(b => b.v);
+  return disassemble(body, prog.header.startAddr);
+}
+
 function renderBasic(prog: Program): void {
   // Keep the fix-pointers-and-terminators toggle in sync with the
   // program's current pointerAndTerminatorIssues flag.  Running this on
@@ -1005,13 +1032,32 @@ function renderBasic(prog: Program): void {
       // button returns to the summary.  Force-decode options aren't
       // reachable from this view — user can switch back to summary to
       // access them.
-      const { firstContent, lastContent } = getBodyRange(prog);
-      const body = prog.bytes.slice(firstContent, lastContent).map(b => b.v);
-      const lines = disassemble(body, prog.header.startAddr);
+      //
+      // Rendered as one `<div class="disasm-line">` per instruction
+      // (rather than a single `<pre>`) so the existing search-match
+      // / scroll-to infrastructure — keyed off `data-li` attributes,
+      // shared with the BASIC line render path below — works in this
+      // view too.  See `runSearch` for the matching search-source
+      // branch and `inDisassemblyView` for the predicate they share.
+      const lines = computeDisassembly(prog);
+      const matchSet = new Set(searchMatches);
+      const linesHtml = lines.map((l, i) => {
+        const isMatch   = matchSet.has(i);
+        const isCurrent = isMatch && searchMatchIdx >= 0 && searchMatches[searchMatchIdx] === i;
+        const cls = [
+          'disasm-line',
+          ...(isMatch   ? ['search-match']         : []),
+          ...(isCurrent ? ['search-match-current'] : []),
+        ].join(' ');
+        return `<div class="${cls}" data-li="${i}">${escHtml(l)}</div>`;
+      }).join('');
       basicPanel.innerHTML =
         '<p class="hint"><button id="back-to-summary-btn" class="zoom-btn">← Back to summary</button></p>' +
-        `<pre class="disassembly">${escHtml(lines.join('\n'))}</pre>`;
+        `<div class="disassembly">${linesHtml}</div>`;
       document.getElementById('back-to-summary-btn')?.addEventListener('click', () => {
+        // Reset search before leaving — existing matches reference
+        // disassembly-line indices that don't exist in the summary view.
+        resetSearch();
         showDisassembly = false;
         renderBasic(prog);
       });

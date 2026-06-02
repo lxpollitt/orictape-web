@@ -308,7 +308,11 @@ header h1 {
 /* 6502 disassembly view rendered in the BASIC panel for machine-code
    programs when the user clicks "Show as assembler".  Monospace +
    preserve whitespace so the fixed-column layout produced by
-   disassembler6502 stays readable. */
+   disassembler6502 stays readable.  Rendered as one `<div
+   class="disasm-line">` per instruction (rather than a single `<pre>`
+   block) so the BASIC panel's existing search-match infrastructure —
+   shared `data-li` attributes, `.search-match` / `.search-match-current`
+   classes — works in this view too. */
 .disassembly {
   font-family: var(--mono);
   font-size: 12px;
@@ -318,6 +322,10 @@ header h1 {
   white-space: pre;
   overflow: auto;
 }
+.disasm-line                       { display: block; }
+.disasm-line.search-match          { background: rgba(201, 164, 40, 0.10); }
+.disasm-line.search-match-current  { background: rgba(201, 164, 40, 0.30);
+                                     outline: 1px solid rgba(201, 164, 40, 0.45); }
 
 /* Tape mode: basic-view is the scrollable content container. */
 #basic-panel {
