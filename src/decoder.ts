@@ -361,6 +361,19 @@ export function flagElementErrors(prog: Program): void {
     const errors: ('error' | 'warning' | null)[] = line.elementErrors
       ? [...line.elementErrors]
       : new Array(line.elements.length).fill(null);
+    // The line-number element (errors[0]) is purely flag-derived — see
+    // buildLineElements where it's always pushed as `null` ("syntax
+    // checker doesn't cover this").  The only sources of `'error'`
+    // here are `line.nonMonotonic` and chkErr on the line-number
+    // bytes, both recomputed below from current state.  Inheriting
+    // the prior value would keep stale `'error'` after the underlying
+    // flag is cleared by another line's edit (e.g. fixing the line
+    // number that made *this* line non-monotonic by editing a
+    // neighbour) — flagNonMonotonicLines correctly clears the flag,
+    // but the stale element severity would still render red until the
+    // bytes of this line were also touched.  Reset to null so the
+    // re-derivation below sees a clean slate.
+    errors[0] = null;
     let hasAny = errors.some(e => e !== null);
 
     for (let ei = 0; ei < line.elements.length; ei++) {
