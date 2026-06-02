@@ -162,6 +162,7 @@ set(0xFD, 'SBC', 'ABX'); set(0xFE, 'INC', 'ABX');
 // ── Formatting helpers ──────────────────────────────────────────────────────
 
 import { lookupSysSymbolsByAddress, lookupSysParamsOffset } from './oricRomSymbols';
+import { lookupOrixAnnotation } from './oricRomOrixSymbols';
 
 const hex2 = (n: number) => n.toString(16).toUpperCase().padStart(2, '0');
 const hex4 = (n: number) => n.toString(16).toUpperCase().padStart(4, '0');
@@ -182,7 +183,18 @@ function addressLabel(addr: number, width: 2 | 4): { text: string; aliases: stri
   if (offset !== null) {
     return { text: offset, aliases: [] };
   }
-  return { text: `$${width === 4 ? hex4(addr) : hex2(addr)}`, aliases: [] };
+  // Phase 2: orix .sym fallback for addresses not covered by Phase 1.
+  // Emits the orix label as a trailing `*` comment with confidence
+  // markers (`?` for V1.1b, `??` for V1.0).  Per the design decision,
+  // Phase 1 substitutions short-circuit this lookup entirely — by the
+  // time we get here the address has no SYS match and no PARAMS+N
+  // interpretation, so an orix label (if any) is the most informative
+  // thing we can show without modifying the operand itself.
+  const orix = lookupOrixAnnotation(addr);
+  return {
+    text: `$${width === 4 ? hex4(addr) : hex2(addr)}`,
+    aliases: orix !== null ? [orix] : [],
+  };
 }
 
 function formatOperand(mode: Mode, operands: number[], pc: number): { text: string; aliases: string[] } {

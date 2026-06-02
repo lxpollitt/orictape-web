@@ -14,6 +14,7 @@
  */
 
 import { lookupSysSymbol, lookupSysSymbolsByAddress, lookupSysParamsOffset, isReservedSysName } from '../src/oricRomSymbols';
+import { lookupOrixAnnotation } from '../src/oricRomOrixSymbols';
 import { assemble, assembleProgram } from '../src/assembler6502';
 import type { ByteInfo, LineInfo, Program } from '../src/decoder';
 import { emptyBitStream, buildLineElements } from '../src/decoder';
@@ -326,6 +327,62 @@ test('PARAMS offset: +9 (above cap) and below-base return null', () => {
   if (lookupSysParamsOffset(0x02DF) !== null) return `-1 should be null`;
   if (lookupSysParamsOffset(0x0300) !== null) return `+0x20 should be null`;
   return null;
+});
+
+// ── Orix .sym fallback annotations (Phase 2) ────────────────────────────────
+
+test('orix: V1.1b-only address → `Name?`', () => {
+  // WriteFileHeader at $E607 is in basic11b.sym only (V1.1b ran the
+  // routine at this address; V1.0 has nothing here).
+  const r = lookupOrixAnnotation(0xE607);
+  return r === 'WriteFileHeader?' ? null : `got ${JSON.stringify(r)}`;
+});
+
+test('orix: V1.0-only address → `Name??`', () => {
+  // GetTapeParams at $E725 is in basic10.sym only (V1.1b moved this
+  // routine to $E7B2).
+  const r = lookupOrixAnnotation(0xE725);
+  return r === 'GetTapeParams??' ? null : `got ${JSON.stringify(r)}`;
+});
+
+test('orix: same label both ROMs → emit once at higher tier', () => {
+  // JumpTab at $C006 is an invariant entry — same label on both ROMs.
+  // Should collapse to a single `Name?` rather than `Name? Name??`.
+  const r = lookupOrixAnnotation(0xC006);
+  return r === 'JumpTab?' ? null : `got ${JSON.stringify(r)}`;
+});
+
+test('orix: different labels at same address → `V11? / V10??`', () => {
+  // $FACB is labelled `EXPLODE` on V1.1b and `ExplodeData` on V1.0 —
+  // the routines genuinely shifted between ROMs and the same address
+  // serves different purposes.  Emit both, V1.1b first (higher tier).
+  const r = lookupOrixAnnotation(0xFACB);
+  return r === 'EXPLODE? / ExplodeData??' ? null : `got ${JSON.stringify(r)}`;
+});
+
+test('orix: documented V1.0 mislabels are excluded at source', () => {
+  // $F88F: V1.0 .sym mislabels this as `Reset` (correct V1.0 Reset is
+  // $F42D — exposed via SYS.RESET.V10).  We omit the bad V1.0 entry,
+  // but V1.1b genuinely has Reset at $F88F so the V1.1b match still
+  // surfaces.  Confirms the filter doesn't accidentally strip the
+  // correct cross-ROM match.
+  const r88F = lookupOrixAnnotation(0xF88F);
+  if (r88F !== 'Reset?') return `$F88F: ${JSON.stringify(r88F)}`;
+
+  // $E0AD: V1.0 .sym mislabels this as `Delay` (correct V1.0 Delay is
+  // $EDAD — likely a digit-transposition typo upstream).  V1.1b has
+  // nothing at $E0AD.  After filtering, neither ROM contributes —
+  // result should be null.
+  const rE0AD = lookupOrixAnnotation(0xE0AD);
+  if (rE0AD !== null) return `$E0AD should be null after filter, got ${JSON.stringify(rE0AD)}`;
+  return null;
+});
+
+test('orix: no match returns null', () => {
+  // $F41E: the unattested address the user surfaced as a real-world
+  // example — neither ROM's .sym labels it.  Regression guard.
+  const r = lookupOrixAnnotation(0xF41E);
+  return r === null ? null : `got ${JSON.stringify(r)}`;
 });
 
 // ── Assembler integration ───────────────────────────────────────────────────
