@@ -209,3 +209,18 @@ export function encodeProgramSamples(prog: Program, autorun?: boolean): Int16Arr
 export function encodeProgramWav(prog: Program, autorun?: boolean): Uint8Array {
   return encodeWavFile(encodeProgramSamples(prog, autorun), SAMPLE_RATE);
 }
+
+/**
+ * Encode several programs into one WAV file (mono, 16-bit, SAMPLE_RATE): each
+ * program's samples (with its own lead-in / trailing silence) concatenated in
+ * order, the silences forming the inter-program gaps.  Mirrors the multi-program
+ * bundling of a TAP save; the audio loads one program at a time (CLOAD each).
+ */
+export function encodeProgramsWav(progs: { prog: Program; autorun?: boolean }[]): Uint8Array {
+  const chunks = progs.map(p => encodeProgramSamples(p.prog, p.autorun));
+  const total  = chunks.reduce((n, c) => n + c.length, 0);
+  const all    = new Int16Array(total);
+  let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.length; }
+  return encodeWavFile(all, SAMPLE_RATE);
+}

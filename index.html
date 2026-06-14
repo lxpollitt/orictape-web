@@ -10,9 +10,9 @@
       <header>
         <h1>ORICTAPE</h1>
         <input type="file" id="file-input" accept=".wav,.tap" multiple hidden />
-        <label for="file-input" id="file-label">Load files…</label>
+        <label for="file-input" id="file-label">Load…</label>
         <button id="merge-btn" hidden>Merge programs…</button>
-        <button id="build-tap" hidden>Build TAP…</button>
+        <button id="build-tap" hidden>Save…</button>
         <p id="status">Load a WAV file to begin.</p>
       </header>
       <nav id="prog-tabs"></nav>
@@ -88,6 +88,10 @@
             Include ORICTAPE metadata
           </label>
           <button id="tap-cancel">Cancel</button>
+          <select id="tap-format" aria-label="Save format">
+            <option value="tap">.tap</option>
+            <option value="wav">.wav</option>
+          </select>
           <button id="tap-download" disabled>Download .tap</button>
         </div>
       </div>

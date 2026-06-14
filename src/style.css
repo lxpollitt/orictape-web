@@ -961,6 +961,8 @@ header h1 {
   margin-right: auto;
 }
 #tap-meta-label:hover { opacity: 1; }
+#tap-meta-label.disabled,
+#tap-meta-label.disabled:hover { opacity: 0.3; cursor: default; }
 
 .tap-modal-footer button {
   padding: 4px 14px;
@@ -980,6 +982,19 @@ header h1 {
   color: var(--green);
 }
 #tap-download:not(:disabled):hover { background: rgba(78,201,78,0.12); }
+
+#tap-format {
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  cursor: pointer;
+}
+#tap-format:hover  { border-color: var(--bright); }
+#tap-format:focus  { outline: none; border-color: var(--bright); }
 
 /* ── Merge modal ─────────────────────────────────────────────────────────────── */
 .merge-modal-box {

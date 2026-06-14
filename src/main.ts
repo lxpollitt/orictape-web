@@ -13,6 +13,7 @@ import {
   type MergedProgram,
 } from './merger';
 import { encodeTapFile, downloadTap, type TapEntry } from './tapEncoder';
+import { encodeProgramsWav } from './audioEncoder';
 import { parseTapFile } from './tapDecoder';
 import { disassemble } from './disassembler6502';
 
@@ -48,6 +49,8 @@ const tapAutoEl    = document.getElementById('tap-auto')        as HTMLElement;
 const tapCancelBtn = document.getElementById('tap-cancel')      as HTMLButtonElement;
 const tapDlBtn     = document.getElementById('tap-download')    as HTMLButtonElement;
 const tapMetaToggle = document.getElementById('tap-meta-toggle') as HTMLInputElement;
+const tapMetaLabel  = document.getElementById('tap-meta-label')  as HTMLLabelElement;
+const tapFormatSel  = document.getElementById('tap-format')      as HTMLSelectElement;
 const searchBar    = document.getElementById('search-bar')      as HTMLElement;
 const searchInput  = document.getElementById('search-input')    as HTMLInputElement;
 const searchCount  = document.getElementById('search-count')    as HTMLElement;
@@ -123,6 +126,10 @@ interface TapQueueEntry {
 }
 
 let tapQueue: TapQueueEntry[] = [];
+
+/** Remembered "Include ORICTAPE metadata" choice for .tap, restored when the
+ *  save-format select switches back to .tap from .wav.  In-dialog only. */
+let tapMetaPref = true;
 
 // Convenience mirrors of the active tape — updated by activateTape().
 // All existing per-tape rendering code reads these without change.
@@ -1944,8 +1951,32 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !tapModal.hidden) closeTapBuilder();
 });
 
+tapFormatSel.addEventListener('change', updateFormatUI);
+tapMetaToggle.addEventListener('change', () => {
+  if (!tapMetaToggle.disabled) tapMetaPref = tapMetaToggle.checked;
+});
+
+/** Reflect the selected save format: the Download button label, and the
+ *  ORICTAPE-metadata checkbox.  `.wav` carries no metadata, so the checkbox is
+ *  disabled + unchecked; `.tap` enables it and restores the remembered choice. */
+function updateFormatUI(): void {
+  const wav = tapFormatSel.value === 'wav';
+  tapDlBtn.textContent = wav ? 'Download .wav' : 'Download .tap';
+  if (wav) {
+    if (!tapMetaToggle.disabled) tapMetaPref = tapMetaToggle.checked;  // remember the .tap choice
+    tapMetaToggle.checked  = false;
+    tapMetaToggle.disabled = true;
+  } else {
+    tapMetaToggle.checked  = tapMetaPref;
+    tapMetaToggle.disabled = false;
+  }
+  tapMetaLabel.classList.toggle('disabled', wav);   // dim the label text to match
+}
+
 function openTapBuilder(): void {
   tapQueue = [];
+  tapFormatSel.value = 'tap';   // default to .tap on each open
+  updateFormatUI();
   renderTapBuilder();
   tapModal.hidden = false;
 }
@@ -2089,52 +2120,40 @@ tapDlBtn.addEventListener('click', doDownloadTap);
 
 function doDownloadTap(): void {
   if (tapQueue.length === 0) return;
+  const wav = tapFormatSel.value === 'wav';
 
-  const includeMeta = tapMetaToggle.checked;
-  const entries: TapEntry[] = [];
-
+  // Resolve each queue entry to a concrete program + autorun.  For a merged
+  // entry we serialise the merge's own pre-built byte-level output (a Program
+  // like any other): metadata / edit flags then line up with the merged content,
+  // and it stays independent of later source edits or tab closures.  (A source
+  // Program would mis-place flags / lineDeltas whenever bestSource picked
+  // different sources for different lines.)
+  const items: { prog: Program; autorun: boolean }[] = [];
   for (const entry of tapQueue) {
-    if (entry.kind === 'tape') {
-      const prog = tapes[entry.tapeIdx]?.programs[entry.progIdx];
-      if (!prog) continue;
-      entries.push({
-        prog,
-        autorun:         entry.autorun,
-        includeMetadata: includeMeta,
-      });
-    } else {
-      const um = userMerges[entry.progIdx];
-      if (!um) continue;
-      const merged = um.result;
-      // Serialize the merge's own pre-built byte-level output — a Program
-      // like any other.  Independent of live source edits / tab closures.
-      // Metadata (generated inside encodeTapFile) reflects merged.output's
-      // error/edit state, including any fixEndAddr edits applied at save
-      // time.  Using a source Program here would produce flags and
-      // lineDeltas at offsets that don't match the merged content whenever
-      // bestSource picked different sources for different lines.
-      entries.push({
-        prog:            merged.output,
-        autorun:         entry.autorun,
-        includeMetadata: includeMeta,
-      });
-    }
+    const prog = entry.kind === 'tape'
+      ? tapes[entry.tapeIdx]?.programs[entry.progIdx]
+      : userMerges[entry.progIdx]?.result.output;
+    if (!prog) continue;
+    items.push({ prog, autorun: entry.autorun });
+  }
+  if (items.length === 0) return;
+
+  const base = items[0].prog.name || 'tape';
+  if (wav) {
+    downloadTap(encodeProgramsWav(items), `${base}.wav`);
+  } else {
+    const includeMeta = tapMetaToggle.checked;
+    const entries: TapEntry[] = items.map(it => ({
+      prog: it.prog, autorun: it.autorun, includeMetadata: includeMeta,
+    }));
+    downloadTap(encodeTapFile(entries), `${base}.tap`);
   }
 
-  if (entries.length === 0) return;
-
-  // Derive filename from the first entry's program name.
-  const filename = `${entries[0].prog.name || 'tape'}.tap`;
-  const bytes    = encodeTapFile(entries);
-  downloadTap(bytes, filename);
-  // Every program written into this TAP is now persisted on disk
-  // — clear its dirty flag so the beforeunload warning doesn't
-  // trip on this run's contents until the user makes another edit.
-  // (Programs not included in this build remain dirty.)
-  for (const entry of entries) entry.prog.unsaved = false;
-  // Refresh tabs so close-button colours reflect the cleared
-  // state immediately.
-  renderTabs();
+  // Every program written out is now persisted on disk — clear its dirty flag so
+  // the beforeunload warning doesn't trip on this run's contents until the user
+  // edits again.  (Programs not included in this save remain dirty.)
+  for (const it of items) it.prog.unsaved = false;
+  renderTabs();          // refresh tab close-button colours
   closeTapBuilder();
 }
 
