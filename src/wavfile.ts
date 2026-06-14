@@ -82,3 +82,54 @@ export function parseWavFile(buffer: ArrayBuffer): WavData {
 
   return { left, right, sampleRate, sampleCount };
 }
+
+/**
+ * Encode mono 16-bit PCM samples as a canonical RIFF/WAVE file — the
+ * inverse of parseWavFile for the audio orictape-web emits when saving a
+ * program as Oric tape audio (PCM, 1 channel, 16-bit, little-endian).
+ *
+ * Layout is the textbook 44-byte header (RIFF / fmt / data) followed by
+ * the sample data, so it parses back through parseWavFile byte-for-byte.
+ */
+export function encodeWavFile(samples: Int16Array, sampleRate: number): Uint8Array {
+  if (!Number.isInteger(sampleRate) || sampleRate <= 0)
+    throw new Error(`Invalid sample rate: ${sampleRate}`);
+
+  const channels       = 1;
+  const bitsPerSample  = 16;
+  const bytesPerSample = bitsPerSample >> 3;
+  const blockAlign     = channels * bytesPerSample;
+  const byteRate       = sampleRate * blockAlign;
+  const dataSize       = samples.length * bytesPerSample;
+
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view   = new DataView(buffer);
+
+  const writeId = (off: number, id: string) => {
+    for (let i = 0; i < 4; i++) view.setUint8(off + i, id.charCodeAt(i));
+  };
+
+  // ── RIFF / WAVE container ──────────────────────────────────────────────────
+  writeId(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true); // size of everything after this field
+  writeId(8, 'WAVE');
+
+  // ── fmt chunk (PCM) ────────────────────────────────────────────────────────
+  writeId(12, 'fmt ');
+  view.setUint32(16, 16, true);           // fmt chunk size (16 for PCM)
+  view.setUint16(20, 1, true);            // audio format: 1 = PCM
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+
+  // ── data chunk ─────────────────────────────────────────────────────────────
+  writeId(36, 'data');
+  view.setUint32(40, dataSize, true);
+  for (let i = 0; i < samples.length; i++) {
+    view.setInt16(44 + i * bytesPerSample, samples[i], true);
+  }
+
+  return new Uint8Array(buffer);
+}
