@@ -12,8 +12,8 @@
  * (start/data/parity) of bytes the encoder deliberately changes (the TAP-save
  * paradigm normalises the autorun byte and the endAddr); those are detected
  * byte-aware via a value difference and must still keep matching stop bits.
- * This validates framing, parity AND the 3/4 cadence + name->data gap against
- * ground truth.
+ * This validates framing, parity, the 3/4 cadence + name->data gap, AND the
+ * per-byte long-half phase against ground truth.
  *
  * The comparison is purely byte/bit level: the program's extent comes from the
  * header (endAddr - startAddr), not from BASIC line structure, so it works for
@@ -71,6 +71,17 @@ export function stopRun(s: BitStream, firstBit: number): number {
   return n;
 }
 
+/**
+ * A 0-cell's phase: true if its long half is the HIGH half ("long-half-high").
+ * readCycle splits each cycle at the rising edge, so bitL1 is the high portion;
+ * for a 0-cell (short+long) the high portion is the long half iff it is more than
+ * half the whole cell.  This asks which *half* is long, not which way the signal
+ * swung, so the original recording and our (mirror-shaped) re-encode are measured
+ * on the same footing - see oric-tape-format.md §4.
+ */
+export const phaseHigh = (s: BitStream, bi: number): boolean =>
+  2 * s.bitL1[bi] > s.bitLastSample[bi] - s.bitFirstSample[bi] + 1;
+
 export interface ProgramWindow {
   ai:      number;   // byte index of the 0x24 marker (start of the compared region)
   dataEnd: number;   // byte index one past the last program byte (the $52 extra byte sits here)
@@ -111,6 +122,11 @@ export function programWindow(prog: Program): ProgramWindow | string {
  * re-decode against the original's bits.  Returns null on a (normalisation-
  * tolerant) bit-exact match, else a human-readable mismatch description (byte
  * indices in the UI convention: byte 0 = first header byte).
+ *
+ * Per byte it also checks the start-bit *phase* (which half of the 0-cell is the
+ * long one) against the recording.  The bit *values* are phase-blind, so this is
+ * the only check that the encoder placed each long half-cycle the same side the
+ * real Oric did - i.e. that we stay in phase with a genuine save (§4).
  *
  * Mutates `orig`'s header via the encoder's TAP-paradigm normalisation, so the
  * original byte values are snapshotted up front; the original *bits*
@@ -160,6 +176,15 @@ export function roundTripMismatch(orig: Program): string | null {
         return `bit mismatch in ${uiByte(k)} (recording ${hex(a.v)}, ours ${hex(bB.v)}) ${where}: recording=${av} ours=${bv}`;
       }
     }
+
+    // Phase (§4): the start bit (first frame bit) is always a 0-cell, and its
+    // phase is the byte's cadence phase - value-independent, so it holds for
+    // normalised bytes too.  The bit *values* above are polarity/phase-blind, so
+    // this is the only check that the encoder placed each long half-cycle the
+    // same side (low/high) the real Oric did.
+    const op = phaseHigh(orig.stream, a.firstBit + frameStart);
+    const rp = phaseHigh(reenc.stream, bB.firstBit + frameStart);
+    if (op !== rp) return `${uiByte(k)} (${hex(want)}): start-bit phase long-${op ? 'high' : 'low'} (recording) vs long-${rp ? 'high' : 'low'} (ours)`;
   }
   return null;
 }

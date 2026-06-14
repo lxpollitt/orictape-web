@@ -113,25 +113,35 @@ There is no checksum and no end-of-file marker - the loader reads exactly
 
 ---
 
-## 4. Stop-bit cadence: the 3/4 alternation
+## 4. The inter-byte half-cycle: 3/4 cadence and phase
 
-Although the ROM only emits 3 explicit stop bits, the number of `1`-cells seen
-between bytes alternates **3, 4, 3, 4 ...** along the whole stream.
+Although the ROM writes only 3 explicit stop bits, the number of `1`-cells the
+loader sees between bytes alternates **3, 4, 3, 4 ...** all the way along the
+stream. That, and the long-half phase in §7, are the same single fact: **the
+inter-byte gap is an odd number of half-cycles.**
 
-The timer free-runs continuously. After a byte's stop bits the latch is still
-"short", so the timer keeps toggling PB7 - emitting idle `1`-cells - while the
-CPU runs the short inter-byte loop, until the next byte's `PutTapeByte` re-syncs
-to a timer timeout. The visible stop run is therefore **3 explicit stops + the
-idle cells that fit the inter-byte CPU gap**.
+It comes to effectively **3.5 "sync bits" - 7 half-cycles**: the 3 stop bits the
+ROM writes, plus one half-cycle left over. (The timer free-runs continuously,
+emitting idle `1`-cells, while the CPU runs a fixed inter-byte loop before the
+next `PutTapeByte` re-syncs; that loop is not a whole number of cells, so half a
+cycle is always left over.)
 
-Every byte frame spans an *odd* number of half-periods, so each byte shifts the
-free-running tone's phase by exactly half a cycle. That per-byte half-cycle flip
-makes the inter-byte idle resolve to 0 or 1 extra cell alternately - the clean
-3/4 pattern. (It also explains why the count is *length*-dependent but
-*content*-independent: identical-length names yield identical cadence.)
+This has **nothing to do with absolute polarity.** The save side is polarity-
+agnostic, and the loader - exactly like our own decoder - reads each cycle by its
+*length*, ignoring sign. What the leftover half-cycle does is shift the **phase**
+by half a cycle every byte, which the loader sees two ways:
+
+- the inter-byte gap rounds to **3 or 4** whole `1`-cells, alternately - the 3/4
+  cadence; and
+- a `0`-bit's long half-cycle falls **low or high**, alternately from one byte to
+  the next (§7).
+
+Same half-cycle, seen twice: once as a length, once as an alignment. (It also
+explains why the run count is *length*-dependent but *content*-independent -
+identical-length names give identical cadence.)
 
 The alternation is **anchored: the run immediately before the `0x24` marker is
-always 3** (confirmed across many genuine saves). orictape-web reproduces this by
+always 3** (confirmed across many genuine saves). orictape-web reproduces it by
 toggling 3/4 per byte and choosing the start phase - from the parity of its
 hard-coded sync-byte count - so the `0x24` lands on 3.
 
@@ -247,11 +257,18 @@ No difference was found between the Oric-1 and Atmos analogue stages.
 
 - bit cells at the 10/20-sample half-periods of §1, then the whole stream run
   through the §6 output-stage one-pole low-pass (~6.9 kHz mic-load corner,
-  normalised to ±20000) - a mild corner-softening, the authentic Oric output;
-  the tape colouring is deliberately not modelled;
+  normalised to ±16384 = -6 dBFS, ~6 dB of headroom) - a mild corner-softening,
+  the authentic Oric output; the tape colouring is deliberately not modelled;
 - the §2 framing, with the `NOT(popcount & 1)` parity;
 - a 256-byte `0x16` leader + one `0x24`;
 - the §4 3/4 cadence, with the §5 name->data gap formula;
+- **the §4 phase**: a `0`-bit's long half-cycle is placed low or high to match a
+  real save - **high iff the byte's sync run is even**, except the first data
+  byte, which takes the *opposite* of the (normal) 2nd data byte (its own run is
+  the anomalous gap value). We render "long-half-high" by emitting the long half
+  first; since a cycle is read by total length, that is invisible to the loader
+  and to our decoder (both read by length, never sign) - it only makes the
+  waveform match what a real Oric wrote;
 - the `$52` extra byte (§3), then a terminating `0` and ~50 ms of trailing
   silence so the receiver latches the final bit;
 - header handling identical to a TAP save (autorun byte normalised, end address
@@ -260,4 +277,7 @@ No difference was found between the Oric-1 and Atmos analogue stages.
 It is validated by a **bit-exact round-trip** test: decode a genuine recording,
 re-encode it, decode that, and confirm the bit streams match the original
 byte-for-byte (bar the documented header normalisation) - cadence, framing,
-parity, and the name->data gap all included.
+parity, and the name->data gap all included.  It also checks each byte's
+**phase** (which half of the 0-cell is the long one) against the recording -
+the byte values are phase-blind, so this is what proves the re-encode stays in
+phase with what a real Oric wrote.

@@ -52,21 +52,27 @@ const LEAD_IN_SILENCE  = 480;   // 10 ms
 const TRAILING_SILENCE = 2400;  // 50 ms
 
 /**
- * Emit one bit-cell as square samples: a short HIGH leading half, then a LOW
- * trailing half that is short for a 1-bit (one 2400 Hz cycle) or long for a
- * 0-bit (the asymmetric short+long cell).  Every cell starts HIGH.
+ * Emit one bit-cell as square samples.  The leading half is always HIGH (+), the
+ * trailing half LOW (-): a 1-bit is short+short, a 0-bit is short+long (if
+ * longFirst is false) or long+short (if longFirst is true).
  *
- * The real Oric's PB7 is a continuous hardware toggle, so its half-period
- * polarity is the running parity of all half-periods and flips roughly once per
- * byte (each byte spans an odd count — the ROM's extra inter-byte wait).  We do
- * NOT reproduce that: it's purely cosmetic (the decoder and the Oric input are
- * both polarity-blind), and injecting the odd half-period shifts the decoder's
- * cycle pairing and breaks the cadence match.  See oric-tape-format.md §6.
+ * That renders the real Oric's phase alternation: on tape a 0-bit's long
+ * half-cycle is sometimes low, sometimes high (the per-byte rule driving 
+ * `longFirst` is in encodeProgramSamples / oric-tape-format.md §6).  In either
+ * case the cell is still one cycle of the same length, led by the same 
+ * positive-going edge the decoder splits on, so it decodes identically and 
+ * the round-trip is unaffected. But we replicate these phase changes
+ * when encoding our audio to be authentic to what a real Oric would generate.
  */
-function pushCell(out: number[], bit: 0 | 1): void {
-  for (let i = 0; i < SHORT_HALF; i++) out.push(AMPLITUDE);
-  const trail = bit ? SHORT_HALF : LONG_HALF;
-  for (let i = 0; i < trail; i++) out.push(-AMPLITUDE);
+function pushCell(out: number[], bit: 0 | 1, longFirst = false): void {
+  if (bit === 0 && longFirst) {
+    for (let i = 0; i < LONG_HALF;  i++) out.push(AMPLITUDE);   // long half HIGH (leading)
+    for (let i = 0; i < SHORT_HALF; i++) out.push(-AMPLITUDE);  // short half LOW (trailing)
+  } else {
+    for (let i = 0; i < SHORT_HALF; i++) out.push(AMPLITUDE);
+    const trail = bit ? SHORT_HALF : LONG_HALF;
+    for (let i = 0; i < trail; i++) out.push(-AMPLITUDE);
+  }
 }
 
 /**
@@ -75,15 +81,15 @@ function pushCell(out: number[], bit: 0 | 1): void {
  * the ROM's `EOR #$01` / `LSR A`).  Stop bits belong to the inter-byte cadence
  * and are emitted by the caller.
  */
-function pushFrame(out: number[], byte: number): void {
-  pushCell(out, 0);
+function pushFrame(out: number[], byte: number, longFirst = false): void {
+  pushCell(out, 0, longFirst);
   let ones = 0;
   for (let i = 0; i < 8; i++) {
     const b = ((byte >> i) & 1) as 0 | 1;
-    pushCell(out, b);
+    pushCell(out, b, longFirst);
     ones += b;
   }
-  pushCell(out, ((ones & 1) ^ 1) as 0 | 1);
+  pushCell(out, ((ones & 1) ^ 1) as 0 | 1, longFirst);
 }
 
 /**
@@ -195,15 +201,24 @@ export function encodeProgramSamples(prog: Program, autorun?: boolean): Int16Arr
   let stop = (SYNC_BYTES % 2 === 0) ? 3 : 4;   // 3/4 toggle, seeded so 0x24 = 3
   for (let i = 0; i < bytes.length; i++) {
     let run: number;
+    let longFirst: boolean;
     if (i === firstData) {
       run  = first;          // the name->data gap
       stop = second;         // data body resumes the toggle from `second`
+      // The gap byte's own run is anomalous, so its polarity can't be read from
+      // it - it's the opposite of the (normal) 2nd data byte: long-first iff
+      // `second` is odd (3).
+      longFirst = (second & 1) === 1;
     } else {
       run  = stop;
       stop = stop === 3 ? 4 : 3;
+      // long-first (long half high) iff the run is even (4), else low (3): the
+      // run's parity and the polarity phase track together (both follow the
+      // running half-period parity).  First data byte is the exception (above).
+      longFirst = (run & 1) === 0;
     }
     for (let s = 0; s < run; s++) pushCell(out, 1);
-    pushFrame(out, bytes[i]);
+    pushFrame(out, bytes[i], longFirst);
   }
   // Final byte's stop run, then a terminating 0 as the last bit, then silence
   // so the receiver latches it.  (Exact tail confirmed by the capture round-trip.)
