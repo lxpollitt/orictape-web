@@ -6,8 +6,10 @@ import { encodeWavFile } from './wavfile';
 //
 // Encodes a Program as authentic Oric-1 cassette audio — the inverse of the
 // decode pipeline in decoder.ts.  See oric-tape-format.md for the ROM-derived
-// spec this implements.  This increment emits a pure square wave; the
-// output-stage "U-wave" shaping is folded in by a later increment.
+// spec this implements.  The ideal square cell stream is shaped by the Oric
+// output-stage one-pole low-pass (shapeOutputStage); the deep "U" / droop seen
+// in real recordings is the cassette tape channel, which we deliberately do NOT
+// model (it's tape physics, not the Oric — see oric-tape-format.md §6).
 
 /** WAV sample rate.  48 kHz gives exact integer half-cycle lengths. */
 export const SAMPLE_RATE = 48000;
@@ -24,6 +26,17 @@ const LONG_HALF  = 20;
 
 /** Square amplitude (~ -6 dBFS), emitted symmetric about zero. */
 const AMPLITUDE = 20000;
+
+/** Output-stage low-pass corner (Hz).  The Oric tape-out is a one-pole RC:
+ *  `PB7 -> R12 (22K) -> tape-out`, with `R13 (1K)` and `C7 (47nF)` both to
+ *  ground at the tape-out node (R12/R13 divide to ~150 mV; C7 shunts).  Corner
+ *  = 1/(2π·R·C7) with R = R12∥R13∥Z_load.  Unloaded, R12∥R13 ≈ 957Ω -> 3.5 kHz
+ *  (the floor); the recorder's mic input (Z_load, in parallel) RAISES it — a
+ *  ~1kΩ mic load gives ~6.9 kHz.  That's well above the 2400 Hz carrier, so this
+ *  only softens the square's corners by a sample or two: the authentic Oric
+ *  *output*.  The deep tape "U" is NOT this stage — see oric-tape-format.md §6.
+ *  Tunable. */
+const OUTPUT_STAGE_FC = 6900;
 
 /** The Oric's write loop is inclusive of the (exclusive) endAddr, so it puts
  *  one byte past the program terminator on tape — RAM garbage on real hardware.
@@ -122,8 +135,34 @@ function gapCadence(nameLen: number): { first: number; second: number } {
 }
 
 /**
- * Encode a single program as Oric fast-format tape audio (square wave),
- * returning 16-bit PCM samples at SAMPLE_RATE.
+ * Shape the ideal square cell stream into the Oric output-stage waveform: a
+ * one-pole RC low-pass at OUTPUT_STAGE_FC, then normalise the peak to AMPLITUDE.
+ * This is the pluggable waveform-renderer seam — swap for a different output
+ * model later.  The filter runs over the whole buffer (silence included; its
+ * state starts at 0, matching the lead-in silence) and, being well above the
+ * carrier, preserves the cell edge timings the decoder keys off, so the
+ * round-trip is unaffected.
+ */
+function shapeOutputStage(square: number[]): Int16Array {
+  const alpha = 1 - Math.exp(-2 * Math.PI * OUTPUT_STAGE_FC / SAMPLE_RATE);
+  const y = new Float64Array(square.length);
+  let prev = 0, peak = 0;
+  for (let i = 0; i < square.length; i++) {
+    prev += alpha * (square[i] - prev);
+    y[i] = prev;
+    const m = prev < 0 ? -prev : prev;
+    if (m > peak) peak = m;
+  }
+  const scale = peak > 0 ? AMPLITUDE / peak : 1;
+  const out = new Int16Array(square.length);
+  for (let i = 0; i < square.length; i++) out[i] = Math.round(y[i] * scale);
+  return out;
+}
+
+/**
+ * Encode a single program as Oric fast-format tape audio, returning 16-bit PCM
+ * samples at SAMPLE_RATE.  Builds the ideal square cell stream, then runs it
+ * through shapeOutputStage (the output-stage low-pass) for the final waveform.
  *
  * Cadence: the stop run before each byte alternates 3/4, seeded so the run
  * before the 0x24 (byte index SYNC_BYTES) is 3 - real Oric saves always show 3
@@ -163,7 +202,7 @@ export function encodeProgramSamples(prog: Program, autorun?: boolean): Int16Arr
   pushCell(out, 0);
   for (let i = 0; i < TRAILING_SILENCE; i++) out.push(0);
 
-  return Int16Array.from(out);
+  return shapeOutputStage(out);
 }
 
 /** Encode a single program as a complete WAV file (mono, 16-bit, SAMPLE_RATE). */
