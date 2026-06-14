@@ -1,0 +1,172 @@
+import type { Program } from './decoder';
+import { encodeTapBlock } from './tapEncoder';
+import { encodeWavFile } from './wavfile';
+
+// ── Oric fast-format tape-audio synthesis ─────────────────────────────────────
+//
+// Encodes a Program as authentic Oric-1 cassette audio — the inverse of the
+// decode pipeline in decoder.ts.  See oric-tape-format.md for the ROM-derived
+// spec this implements.  This increment emits a pure square wave; the
+// output-stage "U-wave" shaping is folded in by a later increment.
+
+/** WAV sample rate.  48 kHz gives exact integer half-cycle lengths. */
+export const SAMPLE_RATE = 48000;
+
+/** Leader length: `SYNC_BYTES` framed 0x16 bytes before the 0x24.  Deliberate
+ *  and documented — the ROM emits only 6, too short for line-out lock-in and
+ *  below the decoder's ~200-cycle minimum; 256 matches tap2wav's reference. */
+export const SYNC_BYTES = 256;
+
+/** Half-cycle lengths in samples at 48 kHz: a 2400 Hz half-period is 10 samples
+ *  (the always-short leading half); a 1200 Hz half-period is 20. */
+const SHORT_HALF = 10;
+const LONG_HALF  = 20;
+
+/** Square amplitude (~ -6 dBFS), emitted symmetric about zero. */
+const AMPLITUDE = 20000;
+
+/** The Oric's write loop is inclusive of the (exclusive) endAddr, so it puts
+ *  one byte past the program terminator on tape — RAM garbage on real hardware.
+ *  We emit a fixed filler so output is deterministic.  See oric-tape-format.md. */
+const EXTRA_BYTE = 0x52;
+
+/** Lead-in / trailing silence (samples).  Trailing silence (not a hard cut)
+ *  gives the receiver time to latch the final bit. */
+const LEAD_IN_SILENCE  = 480;   // 10 ms
+const TRAILING_SILENCE = 2400;  // 50 ms
+
+/**
+ * Emit one bit-cell as square samples: a short HIGH leading half, then a LOW
+ * trailing half that is short for a 1-bit (one 2400 Hz cycle) or long for a
+ * 0-bit (the asymmetric short+long cell).  Every cell starts HIGH (consistent
+ * polarity; the edge-triggered Oric input is insensitive to absolute polarity).
+ */
+function pushCell(out: number[], bit: 0 | 1): void {
+  for (let i = 0; i < SHORT_HALF; i++) out.push(AMPLITUDE);
+  const trail = bit ? SHORT_HALF : LONG_HALF;
+  for (let i = 0; i < trail; i++) out.push(-AMPLITUDE);
+}
+
+/**
+ * Frame one byte: start bit (0), 8 data bits LSB-first, then the parity bit.
+ * Parity = NOT(popcount & 1) — the value the decoder treats as non-error (and
+ * the ROM's `EOR #$01` / `LSR A`).  Stop bits belong to the inter-byte cadence
+ * and are emitted by the caller.
+ */
+function pushFrame(out: number[], byte: number): void {
+  pushCell(out, 0);
+  let ones = 0;
+  for (let i = 0; i < 8; i++) {
+    const b = ((byte >> i) & 1) as 0 | 1;
+    pushCell(out, b);
+    ones += b;
+  }
+  pushCell(out, ((ones & 1) ^ 1) as 0 | 1);
+}
+
+/**
+ * The byte stream to put on tape: a long sync leader + 0x24 + header + name +
+ * data + the one trailing filler byte the ROM emits past endAddr.
+ *
+ * Uses the same paradigm as a TAP save (encodeTapBlock with fixEndAddr=true):
+ * the header end-address gets the same automatic correction, the autorun byte
+ * is normalised, and the program body is emitted as-is (no auto-repair — the
+ * user applies "Fix pointers & terminators" first if they want that).  So a WAV
+ * and a TAP of the same program carry identical content (bar the longer leader).
+ * Exported for the round-trip test.
+ */
+export function buildByteStream(prog: Program, autorun?: boolean): number[] {
+  return [...encodeTapBlock(prog, autorun, true, SYNC_BYTES), EXTRA_BYTE];
+}
+
+/**
+ * Stop-bit cadence across the name->data gap (Oric-1 1.0 ROM, forward-derived).
+ *
+ * Between the name and the program data the ROM does non-tape work while the VIA
+ * T1 free-runs emitting idle short half-periods.  Cycle-counted from the real
+ * ROM (verified on a cycle-accurate 6502 emulator), the work splits into:
+ *
+ *   chunk           cycles        what the ROM does
+ *   fixed chunk 1     590         finish the name byte's write, clear the status
+ *                                 line, print "Saving ", and set up the name print
+ *   variable      19 * nameLen    poke each program-name char to the screen
+ *                                 (a 19-cycle screen-copy loop, one char each)
+ *   fixed chunk 2      58         finish the name print, set up the data pointer,
+ *                                 and write the first data byte
+ *
+ * so gap_cycles(nameLen) = 648 + 19 * nameLen   (G0 = 590 + 58 = 648 fixed cycles).
+ * The short half-period is 210 CPU cycles (VIA T1 latch $00D0 + 2); the VIA is
+ * clocked by the CPU's phi2, so the timer and the instruction stream never
+ * drift.  The first data byte re-syncs to the next timer timeout, so the whole
+ * effect reduces to one integer q = floor(gap_cycles / 210): its magnitude sets
+ * the first data byte's stop-run base (q+2) and its parity flips the post-gap
+ * toggle phase.  This reproduces every measured real-tape name length exactly.
+ *
+ * There is a further few-cycle, irreducible cost we deliberately do NOT model:
+ * the latency between the timer firing and the CPU's BVC noticing it (0-6
+ * cycles, phase-dependent).  It only nudges G0 within [631, 687], and every
+ * value in that window gives the identical cadence for any realistic name
+ * length, so it has no effect on the output.
+ *
+ * Returns the stop-bit run for the first data byte (`first`) and for the byte
+ * after it (`second`), from which the data body resumes the plain 3/4 toggle.
+ */
+function gapCadence(nameLen: number): { first: number; second: number } {
+  const q = Math.floor((648 + 19 * nameLen) / 210);
+  const e = nameLen & 1;
+  const qEven = (q & 1) === 0;
+  return {
+    first:  (q + 2) - (qEven && e === 1 ? 1 : 0),
+    second: qEven ? 3 + e : 4 - e,
+  };
+}
+
+/**
+ * Encode a single program as Oric fast-format tape audio (square wave),
+ * returning 16-bit PCM samples at SAMPLE_RATE.
+ *
+ * Cadence: the stop run before each byte alternates 3/4, seeded so the run
+ * before the 0x24 (byte index SYNC_BYTES) is 3 - real Oric saves always show 3
+ * there.  At the name->data boundary the ROM's gap perturbs it (see
+ * gapCadence); everywhere else it is the plain toggle.
+ */
+export function encodeProgramSamples(prog: Program, autorun?: boolean): Int16Array {
+  const bytes = buildByteStream(prog, autorun);
+  const out: number[] = [];
+
+  for (let i = 0; i < LEAD_IN_SILENCE; i++) out.push(0);
+
+  // Locate the first data byte (just past the name's NUL) so the name->data gap
+  // cadence lands there; everywhere else is the plain 3/4 toggle.
+  const nameStart = SYNC_BYTES + 10;           // leader + 0x24 + 9 header bytes
+  let nul = nameStart;
+  while (nul < bytes.length && bytes[nul] !== 0x00) nul++;
+  const { first, second } = gapCadence(nul - nameStart);
+  const firstData = nul + 1;
+
+  let stop = (SYNC_BYTES % 2 === 0) ? 3 : 4;   // 3/4 toggle, seeded so 0x24 = 3
+  for (let i = 0; i < bytes.length; i++) {
+    let run: number;
+    if (i === firstData) {
+      run  = first;          // the name->data gap
+      stop = second;         // data body resumes the toggle from `second`
+    } else {
+      run  = stop;
+      stop = stop === 3 ? 4 : 3;
+    }
+    for (let s = 0; s < run; s++) pushCell(out, 1);
+    pushFrame(out, bytes[i]);
+  }
+  // Final byte's stop run, then a terminating 0 as the last bit, then silence
+  // so the receiver latches it.  (Exact tail confirmed by the capture round-trip.)
+  for (let s = 0; s < stop; s++) pushCell(out, 1);
+  pushCell(out, 0);
+  for (let i = 0; i < TRAILING_SILENCE; i++) out.push(0);
+
+  return Int16Array.from(out);
+}
+
+/** Encode a single program as a complete WAV file (mono, 16-bit, SAMPLE_RATE). */
+export function encodeProgramWav(prog: Program, autorun?: boolean): Uint8Array {
+  return encodeWavFile(encodeProgramSamples(prog, autorun), SAMPLE_RATE);
+}

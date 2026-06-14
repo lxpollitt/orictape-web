@@ -21,8 +21,10 @@ import { TAP_META_MAGIC } from './tapCommon';
  * deliberate user action via fixPointersAndTerminators).
  *
  * Narrow deviations from verbatim pass-through:
- *   1. Sync bytes are always the canonical 8× 0x16 + 0x24 (pre-header
- *      sync in prog.bytes is tape-discovery padding, not program data).
+ *   1. Sync bytes are emitted as `syncBytes`× 0x16 + 0x24 (default 8 —
+ *      the canonical TAP leader; the audio encoder passes a much larger
+ *      count for analog tape-input lock-in).  Any pre-header sync in
+ *      prog.bytes is tape-discovery padding, not program data.
  *   2. The autorun bit (header byte 3) is overridable via the optional
  *      `autorun` argument — when omitted, the Program's embedded autorun
  *      value is used (useful for quick-save flows that should inherit
@@ -52,6 +54,7 @@ export function encodeTapBlock(
   prog:        Program,
   autorun?:    boolean,
   fixEndAddr:  boolean = true,
+  syncBytes:   number = 8,
 ): number[] {
   if (fixEndAddr) fixHeaderEndAddr(prog);
 
@@ -59,8 +62,8 @@ export function encodeTapBlock(
   const hdrStart   = prog.header.byteIndex;
   const useAutorun = autorun ?? prog.header.autorun;
 
-  // Canonical sync.
-  for (let i = 0; i < 8; i++) out.push(0x16);
+  // Sync leader (syncBytes × 0x16) then the 0x24 marker.
+  for (let i = 0; i < syncBytes; i++) out.push(0x16);
   out.push(0x24);
 
   // 9 header bytes — copied verbatim from prog.bytes (possibly updated by
