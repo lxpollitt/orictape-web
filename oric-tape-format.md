@@ -189,33 +189,55 @@ stay in phase).
 
 ## 6. The analogue interface (why the recorded signal is not a square wave)
 
-> The component values in this section are taken from the Oric service-manual
-> schematic and a community KiCad redraw, not measured first-hand - treat them as
-> well-attested rather than primary.
+> Component values are from the Oric service-manual schematic / a community KiCad
+> redraw, not measured first-hand. The R12/R13 *divider* (below) is corroborated
+> by the manual's own wording ("attenuated by R12 and R13"); the LM358 input by
+> its stated ~50 mV hysteresis.
 
-On PB7 the signal is a hard square wave. Two analogue stages reshape it:
+On PB7 the signal is a hard square wave. Three things stand between it and a
+decoded program: the Oric output stage, the cassette tape channel, and the Oric
+input stage. The surprise (measured below) is that the **output stage barely
+shapes anything** - almost all the smoothing in a real recording is the tape.
 
-**Output (save) stage.** `PB7 -> R12 (22K, series) -> node -> R13 (1K, series) ->
-tape-out`, with `C7 (47nF)` shunting the node to ground. That is a one-pole
-low-pass with a corner around **3.5 kHz** - only ~1.5x the 2400 Hz carrier - so
-every edge is visibly slewed. The service manual states the PB7 stream is
-"attenuated by R12 and R13 to approximately 150 mV peak-to-peak and *shaped by
-C7*". So the Oric deliberately records a rounded, quasi-sinusoidal "U-wave", not
-a square.
+**Output (save) stage - a mild low-pass.** `PB7 -> R12 (22K, series) -> tape-out`,
+with **R13 (1K) and C7 (47nF) both to ground** at the tape-out node: R12/R13 form
+a divider (setting the ~150 mV output level the manual quotes), C7 is the shunt
+capacitor. It's a one-pole RC low-pass whose corner is `1/(2π·R·C7)` with the
+resistance C7 sees `R = R12 ∥ R13 ∥ Z_load`:
+- Unloaded, `R = R12 ∥ R13 ≈ 957 Ω -> 3.5 kHz` - this is the corner *floor*.
+- The recorder's mic input `Z_load` sits in *parallel*, so loading *raises* the
+  corner: a ~600 Ω–1 kΩ mic input gives ~7–9 kHz.
+
+Either way the corner is well above the 2400 Hz carrier, so the output stage only
+**softens the cell corners by a sample or two**. It does *not* produce the deep,
+rounded "U".
+
+**The cassette tape channel - NOT modelled.** The dramatic smoothing in a real
+recording is the record/playback process, not the Oric. Measured across several
+different tapes *and* two different digitisers (so it's in the signal, not the
+capture): (a) a steep band-limit at ~3.5 kHz - the carrier's 3rd harmonic
+(7200 Hz) is 30–50 dB down, so there are no sharp edges left on tape; (b) a
+high-pass "droop" (fast attack, slow release) intrinsic to magnetic playback,
+where the head EMF is proportional to `dΦ/dt` (it differentiates, +6 dB/oct - the
+reason tape needs playback EQ); (c) an occasional attack-side overshoot from
+playback resonance. The net is roughly a band-pass that keeps the carrier and
+discards the harmonics, giving smooth quasi-sinusoidal humps. A least-squares fit
+of a one-pole low-pass - or a low-pass + high-pass band-pass - to a real cell does
+*not* reproduce it; faithful reproduction needs a real tape-channel model, which
+is a rabbit hole and out of scope.
 
 **Input (load) stage.** `tape-in -> C6 (47nF, AC-coupling) -> LM358 op-amp
-(~x101, driven into clipping) -> transistor -> the VIA's CB1 read input`. The
-front end strips DC, amplifies, clips, and recovers bits from the
-edge/zero-crossing **timing** - it is insensitive to waveform shape. So a clean
-square, the recorded U-wave, or anything between all load, provided the
-half-period edge timings are preserved.
+comparator (~50 mV hysteresis) -> the VIA's read input`. It strips DC,
+amplifies/clips, and recovers bits from edge/zero-crossing **timing with
+hysteresis** - insensitive to waveform shape. So a clean square, a softened
+square, or the tape-coloured U all load, provided the half-period edge timings
+are preserved. (Hence, for playback *into* a real Oric, the output shape barely
+matters - only the edge timings do.)
 
 For playback into a real Oric from a PC line-out, use a moderate level (well
-below full scale) - the input is single-rail and has no over-voltage protection.
+below full scale) - the input is single-rail with no over-voltage protection.
 
-No difference was found between the Oric-1 and Atmos analogue stages; the Atmos's
-better tape reliability came from ROM changes and input-side mods, not the
-output stage.
+No difference was found between the Oric-1 and Atmos analogue stages.
 
 ---
 
@@ -223,7 +245,10 @@ output stage.
 
 48 kHz, 16-bit, mono PCM, implementing all of the above:
 
-- bit cells at the 10/20-sample half-periods of §1;
+- bit cells at the 10/20-sample half-periods of §1, then the whole stream run
+  through the §6 output-stage one-pole low-pass (~6.9 kHz mic-load corner,
+  normalised to ±20000) - a mild corner-softening, the authentic Oric output;
+  the tape colouring is deliberately not modelled;
 - the §2 framing, with the `NOT(popcount & 1)` parity;
 - a 256-byte `0x16` leader + one `0x24`;
 - the §4 3/4 cadence, with the §5 name->data gap formula;
