@@ -24,8 +24,11 @@ export const SYNC_BYTES = 256;
 const SHORT_HALF = 10;
 const LONG_HALF  = 20;
 
-/** Square amplitude (~ -6 dBFS), emitted symmetric about zero. */
-const AMPLITUDE = 20000;
+/** Cell amplitude before the output-stage filter: 16384 = exactly -6 dBFS
+ *  (2^14); shapeOutputStage normalises the final peak to this.  Leaves ~6 dB of
+ *  headroom so the WAV won't clip if the playback chain adds a little gain, and
+ *  it's still plenty hot for the Oric's edge-triggered input. */
+const AMPLITUDE = 16384;
 
 /** Output-stage low-pass corner (Hz).  The Oric tape-out is a one-pole RC:
  *  `PB7 -> R12 (22K) -> tape-out`, with `R13 (1K)` and `C7 (47nF)` both to
@@ -51,8 +54,14 @@ const TRAILING_SILENCE = 2400;  // 50 ms
 /**
  * Emit one bit-cell as square samples: a short HIGH leading half, then a LOW
  * trailing half that is short for a 1-bit (one 2400 Hz cycle) or long for a
- * 0-bit (the asymmetric short+long cell).  Every cell starts HIGH (consistent
- * polarity; the edge-triggered Oric input is insensitive to absolute polarity).
+ * 0-bit (the asymmetric short+long cell).  Every cell starts HIGH.
+ *
+ * The real Oric's PB7 is a continuous hardware toggle, so its half-period
+ * polarity is the running parity of all half-periods and flips roughly once per
+ * byte (each byte spans an odd count — the ROM's extra inter-byte wait).  We do
+ * NOT reproduce that: it's purely cosmetic (the decoder and the Oric input are
+ * both polarity-blind), and injecting the odd half-period shifts the decoder's
+ * cycle pairing and breaks the cadence match.  See oric-tape-format.md §6.
  */
 function pushCell(out: number[], bit: 0 | 1): void {
   for (let i = 0; i < SHORT_HALF; i++) out.push(AMPLITUDE);
