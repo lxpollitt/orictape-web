@@ -13,7 +13,7 @@
  * paradigm normalises the autorun byte and the endAddr); those are detected
  * byte-aware via a value difference and must still keep matching stop bits.
  * This validates framing, parity, the 3/4 cadence + name->data gap, AND the
- * per-byte long-half phase against ground truth.
+ * long-half phase of every shared 0-cell against ground truth.
  *
  * The comparison is purely byte/bit level: the program's extent comes from the
  * header (endAddr - startAddr), not from BASIC line structure, so it works for
@@ -64,11 +64,13 @@ export function programLabel(base: string, prog: Program, sampleRate: number): s
 /** UI-style byte label: byte 0 = first header byte, just after the 0x24. */
 const uiByte = (k: number) => (k === 0 ? 'the 0x24 marker' : `byte ${k - 1}`);
 
-/** Count the run of 1-bits (stop bits) at the front of a decoded byte. */
-export function stopRun(s: BitStream, firstBit: number): number {
-  let n = 0, i = firstBit;
-  while (i < s.bitCount && s.bitV[i] === 1) { n++; i++; }
-  return n;
+/**
+ * A decoded byte's trailing stop-bit count.  The decoder frames every byte as
+ * start + 8 data + parity (10 bits) followed by its stop bits, read up to the
+ * next byte's start bit - so the stops are exactly bits [firstBit+10 .. lastBit].
+ */
+export function stopRun(b: { firstBit: number; lastBit: number }): number {
+  return b.lastBit - b.firstBit + 1 - 10;
 }
 
 /**
@@ -123,10 +125,11 @@ export function programWindow(prog: Program): ProgramWindow | string {
  * tolerant) bit-exact match, else a human-readable mismatch description (byte
  * indices in the UI convention: byte 0 = first header byte).
  *
- * Per byte it also checks the start-bit *phase* (which half of the 0-cell is the
- * long one) against the recording.  The bit *values* are phase-blind, so this is
- * the only check that the encoder placed each long half-cycle the same side the
- * real Oric did - i.e. that we stay in phase with a genuine save (§4).
+ * Per byte it also checks the *phase* (which half of each 0-cell is the long one)
+ * at every position both sides decoded as 0 - the start bit always, plus every
+ * shared 0 in data/parity.  The bit *values* are phase-blind, so this is the only
+ * check that the encoder placed each long half-cycle the same side the real Oric
+ * did - i.e. that we stay in phase with a genuine save (§4).
  *
  * Mutates `orig`'s header via the encoder's TAP-paradigm normalisation, so the
  * original byte values are snapshotted up front; the original *bits*
@@ -167,24 +170,28 @@ export function roundTripMismatch(orig: Program): string | null {
 
     const aLen = a.lastBit - a.firstBit + 1, bLen = bB.lastBit - bB.firstBit + 1;
     if (aLen !== bLen) return `${uiByte(k)} (${hex(a.v)} vs ${hex(bB.v)}): bit length ${aLen} (recording) vs ${bLen} (ours)`;
-    const frameStart = aLen - 10;                     // last 10 bits = start + 8 data + parity; before = stop bits
+    const FRAME = 10;                                 // first 10 bits = start + 8 data + parity; the rest are stop bits
     for (let j = 0; j < aLen; j++) {
       const av = origBitV[a.firstBit + j], bv = reenc.stream.bitV[bB.firstBit + j];
+
+      // Phase (§4): only a 0-cell has a long half, so phase is comparable wherever
+      // both sides decoded a 0 - the start bit always, plus every shared 0 in the
+      // data/parity (so normalised bytes are still checked at the positions they
+      // share).  Phase is value-independent (the cadence sets it) and value +
+      // length are phase-blind, so this is the sole guard that each long
+      // half-cycle landed the side (low/high) the real Oric put it.
+      if (av === 0 && bv === 0) {
+        const op = phaseHigh(orig.stream, a.firstBit + j);
+        const rp = phaseHigh(reenc.stream, bB.firstBit + j);
+        if (op !== rp) return `${uiByte(k)} (${hex(want)}) frame bit ${j}: phase long-${op ? 'high' : 'low'} (recording) vs long-${rp ? 'high' : 'low'} (ours)`;
+      }
+
       if (av === bv) continue;
-      if (j < frameStart || !normalised) {
-        const where = j < frameStart ? `stop bit ${j}` : `frame bit ${j - frameStart}`;
+      if (j >= FRAME || !normalised) {
+        const where = j >= FRAME ? `stop bit ${j - FRAME}` : `frame bit ${j}`;
         return `bit mismatch in ${uiByte(k)} (recording ${hex(a.v)}, ours ${hex(bB.v)}) ${where}: recording=${av} ours=${bv}`;
       }
     }
-
-    // Phase (§4): the start bit (first frame bit) is always a 0-cell, and its
-    // phase is the byte's cadence phase - value-independent, so it holds for
-    // normalised bytes too.  The bit *values* above are polarity/phase-blind, so
-    // this is the only check that the encoder placed each long half-cycle the
-    // same side (low/high) the real Oric did.
-    const op = phaseHigh(orig.stream, a.firstBit + frameStart);
-    const rp = phaseHigh(reenc.stream, bB.firstBit + frameStart);
-    if (op !== rp) return `${uiByte(k)} (${hex(want)}): start-bit phase long-${op ? 'high' : 'low'} (recording) vs long-${rp ? 'high' : 'low'} (ours)`;
   }
   return null;
 }

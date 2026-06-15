@@ -15,9 +15,9 @@
  * app / waveform directly.
  *
  * "Non-corrupt" = decoded cleanly in the compared region: valid header, no
- * parity errors, no dropped stop bits (a leading run < 3 is impossible in a
- * clean save), no structural line errors / early termination, and the 0x24
- * stop-run is the expected 3.  `unclear` bytes ARE allowed: in fast format one
+ * parity errors, no dropped stop bits (a trailing run < 3 is impossible in a
+ * clean save), no structural line errors / early termination, and the run
+ * before the 0x24 marker is the expected 3.  `unclear` bytes ARE allowed: in fast format one
  * cycle is always one bit with a definite value, so a non-parity unclear byte
  * re-encodes to identical bits.  Skipped programs are tallied by reason (with
  * the offending byte where relevant) so coverage is visible — nothing is
@@ -63,24 +63,29 @@ function skipReason(prog: Program): Skip | null {
   const { ai, dataEnd } = w;
 
   // Cadence anchor: real Oric saves always show 3 stop bits before the 0x24.
-  // A different count means a mis-segmented / non-program block.
-  if (stopRun(prog.stream, prog.bytes[ai].firstBit) !== 3) return { reason: '0x24 stop-run != 3' };
+  // In the trailing-stops framing that run belongs to the byte before the marker
+  // (the last leader 0x16); a different count means a mis-segmented block.
+  if (ai < 1 || stopRun(prog.bytes[ai - 1]) !== 3) return { reason: 'pre-0x24 stop-run != 3' };
 
   // Byte-level damage anywhere in the compared region disqualifies — our clean
   // re-encode of a damaged byte legitimately wouldn't match the bits:
   //   - parity error: the byte's value is suspect;
-  //   - a leading stop run < 3: impossible in a clean Oric save (the ROM always
+  //   - a trailing stop run < 3: impossible in a clean Oric save (the ROM always
   //     emits >= 3 stop bits), so the recording dropped a stop bit — a local
   //     timing glitch (often at an `unclear`, slightly-stretched cell) that
   //     shifts the framing across adjacent bytes without corrupting their
   //     values, and which our canonical cadence can't and shouldn't reproduce.
+  // The last program byte is exempt: its trailing run borders the extra byte,
+  // outside the cadence and often corrupt on real saves.
   for (let i = ai; i < dataEnd; i++) {
     const b = prog.bytes[i];
     if (!b) continue;
     const ui = i - ai - 1;                            // UI index: 0 = first header byte (just after 0x24)
     if (b.chkErr) return { reason: 'parity error', detail: `byte ${ui} (${hex(b.v)})` };
-    const run = stopRun(prog.stream, b.firstBit);
-    if (run < 3) return { reason: 'dropped stop bit (recording glitch)', detail: `byte ${ui} (${hex(b.v)}, ${run} stops)` };
+    if (i < dataEnd - 1) {
+      const run = stopRun(b);
+      if (run < 3) return { reason: 'dropped stop bit (recording glitch)', detail: `byte ${ui} (${hex(b.v)}, ${run} stops)` };
+    }
   }
   if (prog.earlyTermination) return { reason: 'early termination' };
 
@@ -91,6 +96,17 @@ function skipReason(prog: Program): Skip | null {
     if (ln.lenErr || ln.earlyEnd || ln.nonMonotonic) return { reason: 'structural line error' };
   }
   return null;   // qualifies (unclear bytes allowed; no-name and machine-code OK)
+}
+
+/** How many 0x16 sync bytes the decoder captured immediately before the 0x24
+ *  marker — i.e. how much of the leader survived decoding, counted back from the
+ *  marker.  Diagnostic: informs a sensible minimum for the leader to assert. */
+function syncBytesBeforeMarker(prog: Program): number {
+  const ai = prog.bytes.findIndex(b => b.v === 0x24);
+  if (ai < 0) return 0;
+  let n = 0;
+  for (let i = ai - 1; i >= 0 && prog.bytes[i].v === 0x16; i--) n++;
+  return n;
 }
 
 if (!existsSync(AUDIO_DIR)) {
@@ -112,6 +128,7 @@ let totalProgs = 0, tested = 0, passed = 0, failed = 0;
 const skips     = new Map<string, number>();   // reason -> count
 const testedLen = new Map<number, number>();   // name length -> count tested
 const failures: string[] = [];
+const syncCounts: number[] = [];   // 0x16 sync bytes decoded before the 0x24, per tested program
 
 for (let fi = 0; fi < files.length; fi++) {
   const f = files[fi];
@@ -142,10 +159,12 @@ for (let fi = 0; fi < files.length; fi++) {
 
     tested++; fileTested++;
     testedLen.set(prog.name.length, (testedLen.get(prog.name.length) ?? 0) + 1);
+    const sync = syncBytesBeforeMarker(prog);
+    syncCounts.push(sync);
     const mismatch = roundTripMismatch(prog);
     if (mismatch === null) {
       passed++; filePassed++;
-      if (verbose) console.log(`  ${c.green('pass')} ${label}  ${c.dim(`(nameLen ${prog.name.length})`)}`);
+      if (verbose) console.log(`  ${c.green('pass')} ${label}  ${c.dim(`(nameLen ${prog.name.length}, sync ${sync})`)}`);
     } else {
       failed++; fileFailed++;
       failures.push(`${label}  ${mismatch}`);
@@ -175,6 +194,14 @@ if (tested > 0) {
   const span = lens.length ? `${lens[0]}-${lens[lens.length - 1]}` : '-';
   console.log(`\nName-length coverage (tested): ${lens.length} distinct lengths, range ${span}`);
   console.log(`  ${lens.map(l => `${l}:${testedLen.get(l)}`).join('  ')}`);
+}
+
+if (syncCounts.length > 0) {
+  const sorted = [...syncCounts].sort((a, b) => a - b);
+  const min = sorted[0], max = sorted[sorted.length - 1], median = sorted[sorted.length >> 1];
+  console.log(`\nLeader: 0x16 sync bytes decoded before the 0x24 (tested programs, n=${sorted.length}):`);
+  console.log(`  min ${min}, median ${median}, max ${max}`);
+  console.log(`  lowest 20: ${sorted.slice(0, 20).join(' ')}`);
 }
 
 if (failures.length > 0) {
