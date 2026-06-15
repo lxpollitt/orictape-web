@@ -1384,39 +1384,40 @@ export function joinPrograms(progs: Program[]): Program {
 export function readProgramBytes(stream: BitStream, skipSync = false): Program {
   // progNumber is a placeholder here; main.ts stamps the real value after load.
   const prog: Program = { stream, bytes: [], lines: [], name: '', originalSource: '', progNumber: 0, header: { byteIndex: 0, fileType: 0, startAddr: 0, endAddr: 0, autorun: false } };
-  let currentBit = 0;
+  let nextBit = 0;
   let byteUnclear = false;
 
   const getBit = (): { bt: 0 | 1; ok: boolean } => {
-    if (currentBit < stream.bitCount) {
-      byteUnclear = byteUnclear || (stream.bitUnclear[currentBit] === 1);
-      return { bt: stream.bitV[currentBit++] as 0 | 1, ok: true };
+    if (nextBit < stream.bitCount) {
+      byteUnclear = byteUnclear || (stream.bitUnclear[nextBit] === 1);
+      return { bt: stream.bitV[nextBit++] as 0 | 1, ok: true };
     }
     return { bt: 0, ok: false };
   };
 
-  let sync = 0x0000;
+  // Scan for sync byte (0x16) frame including start bit (0) and parity bit (0), assembled LSB-first from the raw bit stream.
+  const SYNC_FRAME_BITS = 0x016 << 1
+  const SYNC_FRAME_MASK = 0x03FF // 10 bits
+  let sync = 0x03FF; // Initialise with 1s so we have to read at least 10 bits to trigger a match 
   if (!skipSync) {
-    // Scan for sync byte 0x16 including its parity bit (0), assembled LSB-first from the raw bit stream.
-    while (sync !== 0x0016) {
+    while (sync !== SYNC_FRAME_BITS) {
       const { bt, ok } = getBit();
       if (!ok) return prog;
-      sync = ((sync >>> 1) | (bt << 8)) & 0x01FF;
+      sync = ((sync >>> 1) | (bt << 9)) & SYNC_FRAME_MASK;
     }
   }
 
-  // Skip stop bits until the start bit (0) appears.
+  nextBit = nextBit-10 // start bit (0-bit), 8 data bits (0x16), 1 parity bit (0)
+  byteUnclear = false;
+
+  // Prime byte read loop with the sync byte's start bit
   let r = getBit();
   if (!r.ok) return prog;
-  while (r.bt !== 0) {
-    r = getBit();
-    if (!r.ok) return prog;
-  }
   
   // Read bytes until the bit stream is exhausted.
   while (true) {
     byteUnclear = false;
-    const byteStart = currentBit-1; // We've already read the start bit (a 0-bit)
+    const byteStart = nextBit-1; // We've already read the start bit (a 0-bit)
 
     // Read 8 data bits, LSB first.
     let by = 0;
@@ -1448,7 +1449,7 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     prog.bytes.push({
       v: by,
       firstBit: byteStart,
-      lastBit:  currentBit - 2,
+      lastBit:  nextBit - 2,
       unclear:  byteUnclear,
       chkErr:   ce,
       originalIndex: prog.bytes.length,
