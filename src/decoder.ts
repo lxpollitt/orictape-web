@@ -1405,21 +1405,18 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     }
   }
 
+  // Skip stop bits until the start bit (0) appears.
+  let r = getBit();
+  if (!r.ok) return prog;
+  while (r.bt !== 0) {
+    r = getBit();
+    if (!r.ok) return prog;
+  }
+  
   // Read bytes until the bit stream is exhausted.
   while (true) {
     byteUnclear = false;
-    const byteStart = currentBit;
-
-    let r = getBit();
-    if (!r.ok) return prog;
-
-    // Skip stop bits until the start bit (0) appears.
-    r = getBit();
-    if (!r.ok) return prog;
-    while (r.bt !== 0) {
-      r = getBit();
-      if (!r.ok) return prog;
-    }
+    const byteStart = currentBit-1; // We've already read the start bit (a 0-bit)
 
     // Read 8 data bits, LSB first.
     let by = 0;
@@ -1434,12 +1431,26 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     // Parity bit: error when it equals chk&1 (odd-parity scheme).
     r = getBit();
     if (!r.ok) return prog;
+    let ce = r.bt === (chk & 1);
+
+    // Blind sync bit get (old algorithm did this, but not clear if it makes sense)
+    r = getBit();
+    if (!r.ok) return prog;
+
+    // Skip stop bits until the start bit (0) appears.
+    r = getBit();
+    if (!r.ok) return prog;
+    while (r.bt !== 0) {
+      r = getBit();
+      if (!r.ok) return prog;
+    }
+
     prog.bytes.push({
       v: by,
       firstBit: byteStart,
-      lastBit:  currentBit - 1,
+      lastBit:  currentBit - 2,
       unclear:  byteUnclear,
-      chkErr:   r.bt === (chk & 1),
+      chkErr:   ce,
       originalIndex: prog.bytes.length,
     });
   }
