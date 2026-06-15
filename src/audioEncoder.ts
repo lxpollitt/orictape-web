@@ -14,10 +14,9 @@ import { encodeWavFile } from './wavfile';
 /** WAV sample rate.  48 kHz gives exact integer half-cycle lengths. */
 export const SAMPLE_RATE = 48000;
 
-/** Leader length: `SYNC_BYTES` framed 0x16 bytes before the 0x24.  Deliberate
- *  and documented — the ROM emits only 6, too short for line-out lock-in and
- *  below the decoder's ~200-cycle minimum; 256 matches tap2wav's reference. */
-export const SYNC_BYTES = 256;
+/** Leader length: `SYNC_BYTES` framed 0x16 bytes before the 0x24. Matches
+ * real Oric ROM. */
+export const SYNC_BYTES = 259;
 
 /** Half-cycle lengths in samples at 48 kHz: a 2400 Hz half-period is 10 samples
  *  (the always-short leading half); a 1200 Hz half-period is 20. */
@@ -56,13 +55,14 @@ const TRAILING_SILENCE = 2400;  // 50 ms
  * trailing half LOW (-): a 1-bit is short+short, a 0-bit is short+long (if
  * longFirst is false) or long+short (if longFirst is true).
  *
- * That renders the real Oric's phase alternation: on tape a 0-bit's long
- * half-cycle is sometimes low, sometimes high (the per-byte rule driving 
- * `longFirst` is in encodeProgramSamples / oric-tape-format.md §6).  In either
- * case the cell is still one cycle of the same length, led by the same 
- * positive-going edge the decoder splits on, so it decodes identically and 
- * the round-trip is unaffected. But we replicate these phase changes
- * when encoding our audio to be authentic to what a real Oric would generate.
+ * That renders the real Oric's phase alternation: within a 0-bit's full cycle
+ * the long half-cycle is either the first half-cycle (high half-cycle), or the 
+ * second half-cycle (low half-cycle), and normally alternating between each byte
+ * (The per-byte rule driving `longFirst` is in encodeProgramSamples. See also
+ * oric-tape-format.md). In either case the cell's full cycle length is the
+ * same, led by the same positive-going edge the decoder splits on, so it decodes
+ * identically in either case. But we replicate these phase changes when encoding
+ * our audio to be authentic to what a real Oric would generate.
  */
 function pushCell(out: number[], bit: 0 | 1, longFirst = false): void {
   if (bit === 0 && longFirst) {
@@ -120,7 +120,7 @@ export function buildByteStream(prog: Program, autorun?: boolean): number[] {
  *   variable      19 * nameLen    poke each program-name char to the screen
  *                                 (a 19-cycle screen-copy loop, one char each)
  *   fixed chunk 2      58         finish the name print, set up the data pointer,
- *                                 and write the first data byte
+ *                                 and start the write of the first data byte
  *
  * so gap_cycles(nameLen) = 648 + 19 * nameLen   (G0 = 590 + 58 = 648 fixed cycles).
  * The short half-period is 210 CPU cycles (VIA T1 latch $00D0 + 2); the VIA is
