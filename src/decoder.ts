@@ -1395,13 +1395,13 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     return { bt: 0, ok: false };
   };
 
-  let by = 0;
+  let sync = 0x0000;
   if (!skipSync) {
-    // Scan for sync byte 0x16, assembled LSB-first from the raw bit stream.
-    while (by !== 0x16) {
+    // Scan for sync byte 0x16 including its parity bit (0), assembled LSB-first from the raw bit stream.
+    while (sync !== 0x0016) {
       const { bt, ok } = getBit();
       if (!ok) return prog;
-      by = ((by >>> 1) | (bt << 7)) & 0xFF;
+      sync = ((sync >>> 1) | (bt << 8)) & 0x01FF;
     }
   }
 
@@ -1422,7 +1422,7 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     }
 
     // Read 8 data bits, LSB first.
-    by = 0;
+    let by = 0;
     let chk = 0;
     for (let i = 0; i < 8; i++) {
       r = getBit();
