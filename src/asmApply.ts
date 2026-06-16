@@ -984,8 +984,8 @@ function buildType2DataLineText(
  *  `fileType` is `0x80` for machine code (empirically observed in
  *  professional TAPs; matches our `describeProgRegion` inspector).
  *  `endAddr` is exclusive
- *  (first byte past program data).  `autorun` is `0x80` when the
- *  caller asks for it. */
+ *  (first byte past program data).  `autorun` is `0xC7` (the Atmos
+ *  ROM's value) when the caller asks for it, else `0x00`. */
 function buildMachineCodeTap(
   name:      string,
   autorun:   boolean,
@@ -1001,15 +1001,11 @@ function buildMachineCodeTap(
   out.push(0x00);
   out.push(0x00);
   out.push(0x80);                                  // fileType = machine code
-  // Autorun byte: type-specific values interpreted by the Oric ROM.
-  // `0x80` is the BASIC-autorun flag and makes CLOAD jump into the
-  // BASIC interpreter after load — if we use it for a machine-code
-  // TAP the ROM tries to parse raw 6502 bytes as tokenised BASIC
-  // and typically locks up.  `0xC7` is the machine-code-autorun
-  // flag (name from `describeProgRegion`'s inspector), causing the
-  // ROM to JMP to the program's startAddr after load.  Both values
-  // have the high bit set, which is what the autorun check looks
-  // for; the other bits distinguish BASIC vs MC dispatch.
+  // Auto-run byte. The ROM treats it as a plain non-zero flag (any
+  // non-zero value auto-runs); whether it runs as BASIC or machine code
+  // is decided by the fileType byte above, not this one.  For a synthesised
+  // TAP we emit 0xC7 (the value an Atmos ROM writes) when auto-run is asked
+  // for, else 0x00.
   out.push(autorun ? 0xC7 : 0x00);
   out.push((endAddr   >> 8) & 0xFF);
   out.push( endAddr         & 0xFF);

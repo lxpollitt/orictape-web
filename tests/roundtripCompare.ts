@@ -170,7 +170,7 @@ export function roundTripMismatch(orig: Program): string | null {
     if (!bB) return `re-encode ran out at ${uiByte(k)}`;
     const want = stream[SYNC_BYTES + k];
     if (bB.v !== want) return `${uiByte(k)} decoded to ${hex(bB.v)}, encoded ${hex(want)}`;
-    const normalised = a.v !== want;                  // a byte the encoder deliberately changed (autorun / endAddr)
+    const normalised = a.v !== want;                  // a byte the encoder deliberately changed (the endAddr correction; or a non-canonical autorun byte, normalised to 0xC7 - none in the corpus)
 
     const aLen = a.lastBit - a.firstBit + 1, bLen = bB.lastBit - bB.firstBit + 1;
     if (aLen !== bLen) return `${uiByte(k)} (${hex(a.v)} vs ${hex(bB.v)}): bit length ${aLen} (recording) vs ${bLen} (ours)`;

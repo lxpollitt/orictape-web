@@ -91,14 +91,24 @@ popcount 3 (odd) so parity `0`, giving the frame `0 / 01101000 / 0 / 111`.
 A saved program is a single block:
 
 ```
-[ 0x16 x N (leader) ][ 0x24 ][ 9-byte header ][ name, 0x00-terminated ][ program data ][ extra byte ]
+[ 0x16 x N (sync bytes) ][ 0x24 sync marker ][ header fixed size fields ][ header program name, 0x00-terminated ][ program data ][ extra byte ]
 ```
 
 - **Leader / sync** A run of 259 `0x16` bytes then one `0x24` marker. 
-- **Header**, 9 bytes:
-  `[ 0x00, 0x00, fileType, autorun, end_hi, end_lo, start_hi, start_lo, 0x00 ]`,
-  addresses big-endian. The block length is implicit (`end - start`).
-- **Name**, ASCII, NUL-terminated.
+- **Header**
+  - **Fixed size fields** 9 bytes:
+    `[ reserved1, reserved2, fileType, autorun, end_hi, end_lo, start_hi, start_lo, reserved3 ]`,
+    addresses big-endian. The program data length is implicit (`end - start`).
+    `fileType` is one of: `0x00` (BASIC); `0x40` (array - only supported by Oric
+    Atmos / 1.1 ROM via the `STORE`/`RECALL` commands); `0x80` (machine code / 
+    memory block). For BASIC and machine code / memory block files, the `reserved`
+    bytes are unused (set from uninitialised RAM locations on save, and ignored on 
+    load). For array files, `reserved1` and `reserved2` specify the array length.
+    An `autorun` byte value of anything other than zero is interpreted as autorun 
+    on. On the save side, the value used for autorun varies by ROM. The 1.0 ROM 
+    uses `0x04` (the option bytes scan index in the 1.0 code) and the 1.1 ROM uses 
+    `0xC7` (the keyword token for `AUTO`).
+  - **Name**, the file name in Oric ASCII, NUL-terminated.
 - **Program data**, then the **extra byte**: the ROM's data-write loop (end-check
   at `$E554`) compares the running pointer with the end address and loops *while
   pointer < end*, so it emits `start..end` **inclusive**. The header's end

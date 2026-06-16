@@ -3550,14 +3550,16 @@ function describeProgRegion(prog: Program, byteIdx: number): string {
       case 0: case 1: case 8: return 'Header · reserved';
       case 2: {
         const v = b[byteIdx]?.v ?? 0;
-        const s = v === 0x00 ? 'BASIC' : v === 0x80 ? 'machine code or memory block'
+        const s = v === 0x00 ? 'BASIC' : v === 0x40 ? 'array' : v === 0x80 ? 'machine code or memory block'
                 : `0x${v.toString(16).toUpperCase().padStart(2, '0')}`;
         return `Header · type: ${s}`;
       }
       case 3: {
         const v = b[byteIdx]?.v ?? 0;
-        const s = v === 0x00 ? 'off' : v === 0x80 ? 'on (BASIC)' : v === 0xC7 ? 'on (machine code)'
-                : `0x${v.toString(16).toUpperCase().padStart(2, '0')}`;
+        // Auto-run is a non-zero flag (BASIC vs machine code is the type byte,
+        // not this one).  0x04 is the value the Oric-1 ROM writes, 0xC7 the Atmos.
+        const s = v === 0x00 ? 'off' : v === 0x04 ? 'on (Oric-1)' : v === 0xC7 ? 'on (Atmos)'
+                : `on (0x${v.toString(16).toUpperCase().padStart(2, '0')})`;
         return `Header · autorun: ${s}`;
       }
       case 4: return `Header · end address (hi) · ${hex4(endAddr)}`;

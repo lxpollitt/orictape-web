@@ -67,16 +67,19 @@ export function encodeTapBlock(
   out.push(0x24);
 
   // 9 header bytes — copied verbatim from prog.bytes (possibly updated by
-  // fixHeaderEndAddr above), with byte 3 (autorun) overridden.  The
-  // autorun-on value is type-specific: `0x80` dispatches the ROM's
-  // BASIC autorun path (interpreter entry), `0xC7` dispatches the
-  // machine-code autorun path (JMP to startAddr).  Using `0x80` on a
-  // machine-code TAP makes the ROM parse raw 6502 bytes as tokenised
-  // BASIC after CLOAD and typically locks the system up.  `fileType
-  // === 0x01` is machine code; BASIC is `0x00`.
-  const autorunOn = prog.header.fileType === 0x80 ? 0xC7 : 0x80;
+  // fixHeaderEndAddr above), with byte 3 (autorun) resolved separately.
+  // Auto-run is a non-zero flag to the ROM (BASIC-vs-machine-code is the
+  // fileType byte, not this), so we preserve the recording's own byte when
+  // it is one of the two values a real ROM writes (0x04 Oric-1, 0xC7 Atmos)
+  // and fall back to 0xC7 (Atmos) otherwise — when auto-run is newly turned
+  // on, synthesised, or the original was a non-canonical/corrupt value.
+  // Off is always 0x00.
+  const origAutorun = prog.bytes[hdrStart + 3]?.v ?? 0;
+  const autorunByte = !useAutorun                          ? 0x00
+                    : (origAutorun === 0x04 || origAutorun === 0xC7) ? origAutorun
+                    :                                          0xC7;
   for (let i = 0; i < 9; i++) {
-    if (i === 3) out.push(useAutorun ? autorunOn : 0x00);
+    if (i === 3) out.push(autorunByte);
     else         out.push(prog.bytes[hdrStart + i]?.v ?? 0);
   }
 

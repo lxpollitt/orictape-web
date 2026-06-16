@@ -603,16 +603,16 @@ export interface ProgramHeader {
   /** Byte index of the first header byte (after the 0x24 sync marker)
    *  within the bytes[] array. */
   byteIndex:  number;
-  /** 0x00 = BASIC, 0x80 = machine code (as observed in real Oric
-   *  TAPs; matches the `describeProgRegion` inspector labels).
-   *  Other values appear occasionally in the wild and are passed
-   *  through verbatim; downstream code treats any non-zero value
-   *  as machine code. */
+  /** Tape header file-type, a bitfield: bit 7 (`0x80`) = machine code /
+   *  memory block, bit 6 (`0x40`) = array (Atmos `STORE`/`RECALL` only),
+   *  `0x00` = BASIC.  Stored verbatim, but downstream code treats any
+   *  non-zero value as machine code - so a `0x40` array is currently
+   *  mislabelled m/c (harmless; no array tapes in practice). */
   fileType:   number;
-  /** True if the program should auto-run on load.  The ROM checks
-   *  bit 7 of header byte 3; specific values observed in real TAPs
-   *  are `0x80` (autorun as BASIC) and `0xC7` (autorun as machine
-   *  code — ROM JMPs to startAddr).  `0x00` means no autorun. */
+  /** True if the program should auto-run on load.  The ROM tests header
+   *  byte 3 for non-zero (any non-zero value auto-runs); BASIC-vs-machine-
+   *  code dispatch is the fileType byte, not this one.  Real saves write
+   *  `0x04` (Oric-1) or `0xC7` (Atmos); `0x00` = no auto-run. */
   autorun:    boolean;
   /** First byte of program data in Oric memory (big-endian from header). */
   startAddr:  number;
@@ -1562,10 +1562,12 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
     prog.header = {
       byteIndex:  headerByteIndex,
       fileType:   headerBytes[2],
-      // High-bit set on byte 3 = autorun (0x80 for BASIC, 0xC7 for
-      // machine code — the specific bits distinguish the ROM's
-      // dispatch path but both count as "autorun on" semantically).
-      autorun:    (headerBytes[3] & 0x80) !== 0,
+      // Auto-run is a plain non-zero flag: the ROM tests byte 3 with BEQ, so
+      // ANY non-zero value auto-runs (the high bit is not what is checked).
+      // BASIC-vs-machine-code dispatch is the fileType byte, not this one.
+      // The raw byte (0x04 Oric-1 / 0xC7 Atmos / 0x00 off) stays in prog.bytes
+      // for the encoder to preserve.
+      autorun:    headerBytes[3] !== 0,
       startAddr,
       endAddr,
     };

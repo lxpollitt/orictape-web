@@ -175,7 +175,6 @@ for (const filename of wavFiles) {
 
       const tapBytes = encodeTapFile([{
         prog,
-        autorun:         false,
         fixEndAddr:      !noFix,
         includeMetadata: true,
       }]);
