@@ -102,8 +102,8 @@ function skipReason(prog: Program): Skip | null {
  *  marker — i.e. how much of the leader survived decoding, counted back from the
  *  marker.  Diagnostic: informs a sensible minimum for the leader to assert. */
 function syncBytesBeforeMarker(prog: Program): number {
-  const ai = prog.bytes.findIndex(b => b.v === 0x24);
-  if (ai < 0) return 0;
+  if (prog.header.byteIndex <= 0) return 0;
+  const ai = prog.header.byteIndex - 1;              // decoder's marker, not findIndex(0x24)
   let n = 0;
   for (let i = ai - 1; i >= 0 && prog.bytes[i].v === 0x16; i--) n++;
   return n;

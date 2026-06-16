@@ -102,8 +102,12 @@ export interface ProgramWindow {
  */
 export function programWindow(prog: Program): ProgramWindow | string {
   const bytes = prog.bytes;
-  const ai = bytes.findIndex(x => x.v === 0x24);
-  if (ai < 0) return 'no 0x24 marker';
+  // Anchor on the decoder's sync scan (4+ 0x16 then 0x24) via header.byteIndex,
+  // not a naive search for the first 0x24 - a stray 0x24 in the leader would
+  // otherwise mis-anchor the window onto garbage.  byteIndex points just past
+  // the marker, so the marker itself is byteIndex - 1.
+  if (prog.header.byteIndex <= 0) return 'no 0x24 marker';
+  const ai = prog.header.byteIndex - 1;
 
   const nameStart = ai + 10;                 // 0x24 + 9 header bytes
   let nul = nameStart;
@@ -156,8 +160,8 @@ export function roundTripMismatch(orig: Program): string | null {
   const stream = buildByteStream(orig);               // the exact bytes we put on tape (mutates orig.header)
   const reenc  = decodeWavBytes(encodeProgramWav(orig))[0];
   if (!reenc) return 're-encode decoded no program';
-  const bi = reenc.bytes.findIndex(x => x.v === 0x24);
-  if (bi < 0) return '0x24 not found in re-encode';
+  if (reenc.header.byteIndex <= 0) return 're-encode has no 0x24 marker';
+  const bi = reenc.header.byteIndex - 1;              // anchor on the decoder's marker, not findIndex
 
   // Bit-exact comparison, byte by byte so a mismatch points at a specific byte.
   for (let k = 0; k < count; k++) {
