@@ -31,11 +31,17 @@ import { buildByteStream, encodeProgramWav, SYNC_BYTES } from '../src/audioEncod
 
 export const hex = (v: number) => '0x' + v.toString(16).padStart(2, '0');
 
-/** Decode a WAV byte buffer to programs + its sample rate (left channel). */
-export function decodeWav(bytes: Uint8Array): { programs: Program[]; sampleRate: number } {
-  const ab  = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-  const wav = parseWavFile(ab);
-  return { programs: readPrograms(readBitStreams(wav.left, wav.sampleRate)), sampleRate: wav.sampleRate };
+/**
+ * Decode a WAV byte buffer to programs + its sample rate (left channel).
+ * `invert` negates the samples first, for captures made with inverted playback
+ * polarity (which otherwise decode as run-4 / mirror phase) so they decode in the
+ * canonical run-3 frame and can be round-trip tested like any normal capture.
+ */
+export function decodeWav(bytes: Uint8Array, invert = false): { programs: Program[]; sampleRate: number } {
+  const ab   = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const wav  = parseWavFile(ab);
+  const left = invert ? wav.left.map((s: number) => -s) : wav.left;
+  return { programs: readPrograms(readBitStreams(left, wav.sampleRate)), sampleRate: wav.sampleRate };
 }
 
 /** Decode a WAV byte buffer to programs (left channel), as the app would. */
@@ -61,8 +67,12 @@ export function programLabel(base: string, prog: Program, sampleRate: number): s
   return `${base}_${prog.name}_${startSec}s`;
 }
 
-/** UI-style byte label: byte 0 = first header byte, just after the 0x24. */
-const uiByte = (k: number) => (k === 0 ? 'the 0x24 marker' : `byte ${k - 1}`);
+/** UI-style byte label: byte 0 = first header byte (just after the 0x24); a
+ *  negative k is a leader sync byte that many positions before the marker. */
+const uiByte = (k: number) =>
+  k < 0   ? `sync byte ${-k} before the marker` :
+  k === 0 ? 'the 0x24 marker' :
+            `byte ${k - 1}`;
 
 /**
  * A decoded byte's trailing stop-bit count.  The decoder frames every byte as
@@ -84,10 +94,51 @@ export function stopRun(b: { firstBit: number; lastBit: number }): number {
 export const phaseHigh = (s: BitStream, bi: number): boolean =>
   2 * s.bitL1[bi] > s.bitLastSample[bi] - s.bitFirstSample[bi] + 1;
 
+/**
+ * The run of clean 0x16 sync bytes immediately before the 0x24 marker, counted
+ * back from the marker and stopping at the first unclear / parity-errored /
+ * non-0x16 byte.  This bounds how far back into the leader the round-trip can
+ * bit-compare: the near-marker leader is the reliable part (the early leader
+ * carries the recording's startup artefacts), so a corrupt sync byte simply
+ * shortens the run rather than failing the comparison.
+ */
+export function cleanLeaderRun(prog: Program): number {
+  const marker = prog.header.byteIndex - 1;     // 0x24 position
+  let n = 0;
+  while (n < marker) {
+    const b = prog.bytes[marker - 1 - n];
+    if (!b || b.v !== 0x16 || b.unclear || b.chkErr) break;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Median decoded bit-cell length, in microseconds, sampled over the start of the
+ * program (the uniform-speed leader).  Fast-format cells run 416 us (1-bit) to
+ * 624 us (0-bit); slow-format (`CSAVE,S`) cells are ~4-5x longer.  Lets callers
+ * keep slow-mode recordings out of the fast-format-only round-trip - our encoder
+ * and the whole 3/4-cadence / phase model are fast-mode; slow mode is a different
+ * regime we don't reproduce or analyse.
+ */
+export function medianCellMicros(prog: Program, sampleRate: number): number {
+  const s = prog.stream;
+  const lens: number[] = [];
+  const n = Math.min(prog.bytes.length, 100);
+  for (let bi = 0; bi < n; bi++) {
+    const b = prog.bytes[bi];
+    for (let i = b.firstBit; i <= b.lastBit; i++)
+      lens.push((s.bitLastSample[i] - s.bitFirstSample[i] + 1) / sampleRate * 1e6);
+  }
+  if (lens.length === 0) return 0;
+  lens.sort((a, b) => a - b);
+  return lens[lens.length >> 1];
+}
+
 export interface ProgramWindow {
-  ai:      number;   // byte index of the 0x24 marker (start of the compared region)
-  dataEnd: number;   // byte index one past the last program byte (the $52 extra byte sits here)
-  count:   number;   // bytes to compare: 0x24 .. last program byte (dataEnd - ai)
+  markerIndex: number;   // byte index of the 0x24 marker (the comparison anchor)
+  dataEnd:     number;   // byte index one past the last program byte (the $52 extra byte sits here)
+  count:       number;   // program bytes to compare: 0x24 .. last program byte (dataEnd - markerIndex)
 }
 
 /**
@@ -107,9 +158,9 @@ export function programWindow(prog: Program): ProgramWindow | string {
   // otherwise mis-anchor the window onto garbage.  byteIndex points just past
   // the marker, so the marker itself is byteIndex - 1.
   if (prog.header.byteIndex <= 0) return 'no 0x24 marker';
-  const ai = prog.header.byteIndex - 1;
+  const markerIndex = prog.header.byteIndex - 1;
 
-  const nameStart = ai + 10;                 // 0x24 + 9 header bytes
+  const nameStart = markerIndex + 10;        // 0x24 + 9 header bytes
   let nul = nameStart;
   while (nul < bytes.length && bytes[nul].v !== 0x00) nul++;
   if (nul >= bytes.length) return 'name not NUL-terminated (truncated)';
@@ -120,14 +171,16 @@ export function programWindow(prog: Program): ProgramWindow | string {
   const dataEnd = nul + 1 + dataLen;
   if (dataEnd > bytes.length) return 'program data runs past decoded bytes (truncated)';
 
-  return { ai, dataEnd, count: dataEnd - ai };
+  return { markerIndex, dataEnd, count: dataEnd - markerIndex };
 }
 
 /**
  * Round-trip one program decoded from a real recording and bit-compare the
  * re-decode against the original's bits.  Returns null on a (normalisation-
  * tolerant) bit-exact match, else a human-readable mismatch description (byte
- * indices in the UI convention: byte 0 = first header byte).
+ * indices in the UI convention: byte 0 = first header byte).  The compared
+ * region runs from the clean leader sync bytes (as far back as cleanLeaderRun
+ * allows) through the last program byte.
  *
  * Per byte it also checks the *phase* (which half of each 0-cell is the long one)
  * at every position both sides decoded as 0 - the start bit always, plus every
@@ -145,17 +198,25 @@ export function programWindow(prog: Program): ProgramWindow | string {
 export function roundTripMismatch(orig: Program): string | null {
   const w = programWindow(orig);
   if (typeof w === 'string') return w;
-  const { ai, count } = w;
+  const { markerIndex, count } = w;
 
-  // Snapshot the original byte values + bit boundaries BEFORE the encoder
-  // mutates the header.  The bitV array itself is not mutated by encoding.
+  // How far back into the leader we can bit-compare: the clean 0x16 run before
+  // the marker (cleanLeaderRun).  Working back from the marker keeps the
+  // reliable near-marker leader and drops the artefact-prone early leader.
+  const origLead = cleanLeaderRun(orig);
+
+  // Snapshot the compared bytes (clean leader + program) BEFORE the encoder
+  // mutates the header.  snap[snapBase + k] is the byte at marker-relative k
+  // (k < 0 = a leader sync byte, 0 = the marker, > 0 = header/program); the bitV
+  // array itself is never mutated by encoding, so it is read live.
   const origBitV = orig.stream.bitV;
   const snap: { v: number; firstBit: number; lastBit: number }[] = [];
-  for (let k = 0; k < count; k++) {
-    const b = orig.bytes[ai + k];
+  for (let k = -origLead; k < count; k++) {
+    const b = orig.bytes[markerIndex + k];
     if (!b) return `original ran out at ${uiByte(k)}`;
     snap.push({ v: b.v, firstBit: b.firstBit, lastBit: b.lastBit });
   }
+  const snapBase = origLead;
 
   const stream = buildByteStream(orig);               // the exact bytes we put on tape (mutates orig.header)
   const reenc  = decodeWavBytes(encodeProgramWav(orig))[0];
@@ -163,9 +224,14 @@ export function roundTripMismatch(orig: Program): string | null {
   if (reenc.header.byteIndex <= 0) return 're-encode has no 0x24 marker';
   const bi = reenc.header.byteIndex - 1;              // anchor on the decoder's marker, not findIndex
 
-  // Bit-exact comparison, byte by byte so a mismatch points at a specific byte.
-  for (let k = 0; k < count; k++) {
-    const a  = snap[k];
+  // The leader actually compared is also bounded by the re-encode's own leader
+  // and our sync-byte count (both ~SYNC_BYTES, so this rarely shortens it).
+  const lead = Math.min(origLead, bi, SYNC_BYTES);
+
+  // Bit-exact comparison, byte by byte (k < 0 are leader sync bytes) so a
+  // mismatch points at a specific byte.
+  for (let k = -lead; k < count; k++) {
+    const a  = snap[snapBase + k];
     const bB = reenc.bytes[bi + k];
     if (!bB) return `re-encode ran out at ${uiByte(k)}`;
     const want = stream[SYNC_BYTES + k];
@@ -183,8 +249,12 @@ export function roundTripMismatch(orig: Program): string | null {
       // data/parity (so normalised bytes are still checked at the positions they
       // share).  Phase is value-independent (the cadence sets it) and value +
       // length are phase-blind, so this is the sole guard that each long
-      // half-cycle landed the side (low/high) the real Oric put it.
-      if (av === 0 && bv === 0) {
+      // half-cycle landed the side (low/high) the real Oric put it.  Program only
+      // (k >= 0): leader sync-byte phase is unreliable to compare - the first
+      // decoded byte sits at the signal onset (startup phase), and a corrupt byte
+      // just past the clean run slips its neighbours' phase - neither an encoder
+      // fault, and the leader phase doesn't affect loading anyway.
+      if (k >= 0 && av === 0 && bv === 0) {
         const op = phaseHigh(orig.stream, a.firstBit + j);
         const rp = phaseHigh(reenc.stream, bB.firstBit + j);
         if (op !== rp) return `${uiByte(k)} (${hex(want)}) frame bit ${j}: phase long-${op ? 'high' : 'low'} (recording) vs long-${rp ? 'high' : 'low'} (ours)`;

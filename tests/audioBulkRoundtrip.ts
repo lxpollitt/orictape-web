@@ -33,7 +33,7 @@
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import type { Program } from '../src/decoder';
-import { decodeWav, hex, programLabel, programWindow, roundTripMismatch, stopRun } from './roundtripCompare';
+import { cleanLeaderRun, decodeWav, hex, medianCellMicros, programLabel, programWindow, roundTripMismatch, stopRun } from './roundtripCompare';
 
 const AUDIO_DIR = 'tests/audio';
 const rawArgs = process.argv.slice(2);
@@ -56,16 +56,21 @@ interface Skip { reason: string; detail?: string }
  * a valid header are fine to round-trip).  Checks the compared region only
  * (0x24 .. last program byte) — corruption past it is irrelevant.
  */
-function skipReason(prog: Program): Skip | null {
+function skipReason(prog: Program, sampleRate: number): Skip | null {
+  // Slow-format (CSAVE,S) recordings have ~4-5x longer cells and a different
+  // cadence/phase regime we neither model nor encode — this is a fast-format
+  // round-trip, so exclude them.  Fast cells are 416-624us; slow are ~2000+us.
+  if (medianCellMicros(prog, sampleRate) > 1500) return { reason: 'slow-mode recording (fast-format test only)' };
+
   // Structural usability + extent, derived from the header (any program type).
   const w = programWindow(prog);
   if (typeof w === 'string') return { reason: w };   // no marker / name not terminated / truncated / degenerate length
-  const { ai, dataEnd } = w;
+  const { markerIndex, dataEnd } = w;
 
   // Cadence anchor: real Oric saves always show 3 stop bits before the 0x24.
   // In the trailing-stops framing that run belongs to the byte before the marker
   // (the last leader 0x16); a different count means a mis-segmented block.
-  if (ai < 1 || stopRun(prog.bytes[ai - 1]) !== 3) return { reason: 'pre-0x24 stop-run != 3' };
+  if (markerIndex < 1 || stopRun(prog.bytes[markerIndex - 1]) !== 3) return { reason: 'pre-0x24 stop-run != 3' };
 
   // Byte-level damage anywhere in the compared region disqualifies — our clean
   // re-encode of a damaged byte legitimately wouldn't match the bits:
@@ -77,10 +82,10 @@ function skipReason(prog: Program): Skip | null {
   //     values, and which our canonical cadence can't and shouldn't reproduce.
   // The last program byte is exempt: its trailing run borders the extra byte,
   // outside the cadence and often corrupt on real saves.
-  for (let i = ai; i < dataEnd; i++) {
+  for (let i = markerIndex; i < dataEnd; i++) {
     const b = prog.bytes[i];
     if (!b) continue;
-    const ui = i - ai - 1;                            // UI index: 0 = first header byte (just after 0x24)
+    const ui = i - markerIndex - 1;                   // UI index: 0 = first header byte (just after 0x24)
     if (b.chkErr) return { reason: 'parity error', detail: `byte ${ui} (${hex(b.v)})` };
     if (i < dataEnd - 1) {
       const run = stopRun(b);
@@ -96,17 +101,6 @@ function skipReason(prog: Program): Skip | null {
     if (ln.lenErr || ln.earlyEnd || ln.nonMonotonic) return { reason: 'structural line error' };
   }
   return null;   // qualifies (unclear bytes allowed; no-name and machine-code OK)
-}
-
-/** How many 0x16 sync bytes the decoder captured immediately before the 0x24
- *  marker — i.e. how much of the leader survived decoding, counted back from the
- *  marker.  Diagnostic: informs a sensible minimum for the leader to assert. */
-function syncBytesBeforeMarker(prog: Program): number {
-  if (prog.header.byteIndex <= 0) return 0;
-  const ai = prog.header.byteIndex - 1;              // decoder's marker, not findIndex(0x24)
-  let n = 0;
-  for (let i = ai - 1; i >= 0 && prog.bytes[i].v === 0x16; i--) n++;
-  return n;
 }
 
 if (!existsSync(AUDIO_DIR)) {
@@ -128,7 +122,7 @@ let totalProgs = 0, tested = 0, passed = 0, failed = 0;
 const skips     = new Map<string, number>();   // reason -> count
 const testedLen = new Map<number, number>();   // name length -> count tested
 const failures: string[] = [];
-const syncCounts: number[] = [];   // 0x16 sync bytes decoded before the 0x24, per tested program
+const syncCounts: number[] = [];   // sync bytes bit-compared (clean leader run) per tested program
 
 for (let fi = 0; fi < files.length; fi++) {
   const f = files[fi];
@@ -137,7 +131,9 @@ for (let fi = 0; fi < files.length; fi++) {
 
   let programs: Program[], sampleRate: number;
   try {
-    ({ programs, sampleRate } = decodeWav(readFileSync(join(AUDIO_DIR, f))));
+    // Files tagged "(Ø)" were captured with inverted playback polarity; invert the
+    // samples so they decode in the canonical (run-3) frame and can be tested.
+    ({ programs, sampleRate } = decodeWav(readFileSync(join(AUDIO_DIR, f)), f.includes('(Ø)')));
   } catch (e: any) {
     failures.push(`${base}: decode threw: ${e.message}`);
     failed++;
@@ -149,7 +145,7 @@ for (let fi = 0; fi < files.length; fi++) {
     totalProgs++;
     const label = programLabel(base, prog, sampleRate);
 
-    const skip = skipReason(prog);
+    const skip = skipReason(prog, sampleRate);
     if (skip) {
       skips.set(skip.reason, (skips.get(skip.reason) ?? 0) + 1);
       fileSkipped++;
@@ -159,7 +155,7 @@ for (let fi = 0; fi < files.length; fi++) {
 
     tested++; fileTested++;
     testedLen.set(prog.name.length, (testedLen.get(prog.name.length) ?? 0) + 1);
-    const sync = syncBytesBeforeMarker(prog);
+    const sync = cleanLeaderRun(prog);
     syncCounts.push(sync);
     const mismatch = roundTripMismatch(prog);
     if (mismatch === null) {
@@ -199,7 +195,7 @@ if (tested > 0) {
 if (syncCounts.length > 0) {
   const sorted = [...syncCounts].sort((a, b) => a - b);
   const min = sorted[0], max = sorted[sorted.length - 1], median = sorted[sorted.length >> 1];
-  console.log(`\nLeader: 0x16 sync bytes decoded before the 0x24 (tested programs, n=${sorted.length}):`);
+  console.log(`\nLeader: sync bytes bit-compared (clean run before the 0x24, tested programs, n=${sorted.length}):`);
   console.log(`  min ${min}, median ${median}, max ${max}`);
   console.log(`  lowest 20: ${sorted.slice(0, 20).join(' ')}`);
 }
