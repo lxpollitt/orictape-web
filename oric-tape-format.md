@@ -59,6 +59,12 @@ audio file sample rate because every half-period lands on an integer sample.
 From the chip's point of view this is a square wave. By the time it is recorded
 it is not - see §6.
 
+When `CSAVE` is invoked, due to the way the code initialises the VIA and first
+synchronises with the timer, it produces a single `1`-bit output (low short + high 
+short) immediately before the first bit of the first byte of the program save is 
+generated. This is always a `0`-bit (low short + high long) - the start bit of the
+first sync byte.
+
 ---
 
 ## 2. Byte framing
@@ -165,11 +171,12 @@ Because the 6522 VIA is clocked by the CPU's phi2, the ROM's load and save
 algorithms are 100% deterministic. And because the save algorithm always output
 a fixed number of sync preamble ($16) bytes followed by one sync marker ($24),
 the sync marker byte always preceded by 3 stop bits, and its `0`-bits are always
-short-long phase.
+short-long phase. (Assuming the recording/playback chain does not invert the 
+phase polarity - see note in §6 for more details.)
 
 orictape-web reproduces this predictability by toggling 3/4 stop bits per byte 
 cadence and choosing the start phase - from the parity of its hard-coded 
-sync-byte count - so the `0x24` before the header lands on 3 stop bits. This 
+sync-byte count - so the `0x24` before the header lands after 3 stop bits. This 
 cadence is adjusted as a special case at the "gap" byte (see §5).
 
 ---
@@ -231,7 +238,19 @@ of a wide selection of measured real-tape program name lengths.
 
 ---
 
-## 6. The analogue interface (why the recorded signal is not a square wave)
+## 6. The analogue interface 
+
+### A note on phase
+
+The above discussion on phase assumes that the recording and playback chains
+have identical phase polarity. If the phase polarity differs between the two 
+then the result of the decode is identical in terms of bits and bytes.
+But phase related aspects all switch around: what was a high half-cycle becomes 
+a low half-cycle; `0`-bits that were read as long-short become short-long, and 
+vice-versa; and the 3/4 stop bit cadence reverses such that bytes that would 
+have been read as having 3 stop bits are now read as having 4, and vice-versa. 
+
+### Why the recorded signal on tape is not a square wave
 
 > Component values are from the Oric service-manual schematic / a community KiCad
 > redraw, not measured first-hand. The R12/R13 *divider* (below) is corroborated

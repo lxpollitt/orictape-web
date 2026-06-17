@@ -75,6 +75,11 @@ function pushCell(out: number[], bit: 0 | 1, longFirst = false): void {
   }
 }
 
+/** Emit one short half-cycle at the given level - authentically modelling the CSAVE startup. */
+function pushHalf(out: number[], level: number): void {
+  for (let i = 0; i < SHORT_HALF; i++) out.push(level);
+}
+
 /**
  * Frame one byte: start bit (0), 8 data bits LSB-first, then the parity bit.
  * Parity = NOT(popcount & 1) — the value the decoder treats as non-error (and
@@ -182,7 +187,9 @@ function shapeOutputStage(square: number[]): Int16Array {
  * Cadence: the stop run before each byte alternates 3/4, seeded so the run
  * before the 0x24 (byte index SYNC_BYTES) is 3 - real Oric saves always show 3
  * there.  At the name->data boundary the ROM's gap perturbs it (see
- * gapCadence); everywhere else it is the plain toggle.
+ * gapCadence); everywhere else it is the plain toggle.  The first byte opens
+ * with the real CSAVE startup half-cycles (low pedestal, first toggle, start-bit
+ * leading half) instead of stop bits, matching the very start of a real save.
  */
 export function encodeProgramSamples(prog: Program, autorun?: boolean): Int16Array {
   const bytes = buildByteStream(prog, autorun);
@@ -217,7 +224,19 @@ export function encodeProgramSamples(prog: Program, autorun?: boolean): Int16Arr
       // running half-period parity).  First data byte is the exception (above).
       longFirst = (run & 1) === 0;
     }
-    for (let s = 0; s < run; s++) pushCell(out, 1);
+    if (i === 0) {
+      // Open with the real CSAVE startup, not stop bits: the ROM drives PB7 low
+      // at the T1C-H write, so the signal leads with a low pedestal half-cycle,
+      // then the timer's first toggle (high), then the start bit's leading low
+      // half.  pushFrame is high-half-first, so it can't emit that leading low
+      // half - we hand-emit these three and let it resume at the start bit's
+      // (long) high half.  See oric-tape-format.md.
+      pushHalf(out, -AMPLITUDE);   // pedestal       (short, low)
+      pushHalf(out, +AMPLITUDE);   // first toggle   (short, high)
+      pushHalf(out, -AMPLITUDE);   // start-bit lead (short, low)
+    } else {
+      for (let s = 0; s < run; s++) pushCell(out, 1);
+    }
     pushFrame(out, bytes[i], longFirst);
   }
   // Final byte's stop run, then a terminating 0 as the last bit, then silence
