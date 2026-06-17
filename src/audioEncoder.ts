@@ -45,10 +45,13 @@ const OUTPUT_STAGE_FC = 6900;
  *  We emit a fixed filler so output is deterministic.  See oric-tape-format.md. */
 const EXTRA_BYTE = 0x52;
 
-/** Lead-in / trailing silence (samples).  Trailing silence (not a hard cut)
- *  gives the receiver time to latch the final bit. */
-const LEAD_IN_SILENCE  = 480;   // 10 ms
-const TRAILING_SILENCE = 2400;  // 50 ms
+/** Lead-in / trailing silence per program (samples), 2 s each - enough that a
+ *  bundled multi-program WAV has a workable real-hardware gap between segments
+ *  (prev trailing + next lead-in = inter-program gap = ~4 s) for the Oric to
+ *  finish a CLOAD, return to BASIC and re-CLOAD.  (The trailing's other role,
+ *  letting the receiver latch the final bit, needs only ms.) */
+const LEAD_IN_SILENCE  = 2 * SAMPLE_RATE;   // 2 s
+const TRAILING_SILENCE = 2 * SAMPLE_RATE;   // 2 s
 
 /**
  * Emit one bit-cell as square samples.  The leading half is always HIGH (+), the
