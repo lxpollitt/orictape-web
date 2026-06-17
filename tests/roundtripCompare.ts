@@ -261,6 +261,11 @@ export function roundTripMismatch(orig: Program): string | null {
       }
 
       if (av === bv) continue;
+      // A stop bit the decoder flagged unclear is a borderline/stretched cell in
+      // the recording (e.g. a stop stretched into the short/medium tie-break
+      // range); the encoder emits canonical clean stops, so it can't reproduce
+      // that glitch.  Tolerate it - the byte's data and clean stops still match.
+      if (j >= FRAME && orig.stream.bitUnclear[a.firstBit + j]) continue;
       if (j >= FRAME || !normalised) {
         const where = j >= FRAME ? `stop bit ${j - FRAME}` : `frame bit ${j}`;
         return `bit mismatch in ${uiByte(k)} (recording ${hex(a.v)}, ours ${hex(bB.v)}) ${where}: recording=${av} ours=${bv}`;

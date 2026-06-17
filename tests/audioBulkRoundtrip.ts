@@ -17,9 +17,11 @@
  * "Non-corrupt" = decoded cleanly in the compared region: valid header, no
  * parity errors, no dropped stop bits (a trailing run < 3 is impossible in a
  * clean save), no structural line errors / early termination, and the run
- * before the 0x24 marker is the expected 3.  `unclear` bytes ARE allowed: in fast format one
- * cycle is always one bit with a definite value, so a non-parity unclear byte
- * re-encodes to identical bits.  Skipped programs are tallied by reason (with
+ * before the 0x24 marker is the expected 3.  `unclear` bytes ARE allowed: a
+ * cycle's length still gives a definite value, so an unclear *data* bit re-encodes
+ * identically; an unclear *stop* bit can be a stretched, ambiguous cell the
+ * canonical clean-stop encoder won't reproduce, so roundTripMismatch tolerates a
+ * mismatch there.  Skipped programs are tallied by reason (with
  * the offending byte where relevant) so coverage is visible — nothing is
  * dropped silently.
  *

@@ -895,8 +895,10 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       cycleKind = 'short';
     } else if (length < MEDIUM_MIN) {
       // Unclear zone between short and medium — use half-cycle asymmetry heuristic.
-      cycleKind = Math.abs(lengthBelow - lengthAbove) <= (MEDIUM_MIN - SHORT_MAX) >> 1
-        ? 'medium' : 'short';
+      // cycleKind = Math.abs(lengthBelow - lengthAbove) <= (MEDIUM_MIN - SHORT_MAX) >> 1
+      //  ? 'short' : 'long'; // Doesn't seem to work any better than just using total length
+      // Unclear zone between short and medium — classify as nearest.
+      cycleKind = (length - SHORT_MAX) <= (MEDIUM_MIN - length) ? 'short' : 'medium';
     } else if (length <= MEDIUM_MAX) {
       cycleKind = 'medium';
     } else if (length < LONG_MIN) {
