@@ -317,12 +317,15 @@ below full scale) - the input is single-rail with no over-voltage protection.
   real save - **high iff the byte's preceding stop-bit run is even**, except the
   first data byte, which takes the *opposite* of the (normal) 2nd data byte (its 
   own run is the anomalous gap value);
+- the initial pre-program data half-cycles the Oric generates at the start of
+  each save;
 - the `$52` extra byte (§3), then a trailing `0` and ~50 ms of trailing
   silence so the receiver latches the final bit of the extra byte;
 - header handling identical to a TAP save (autorun byte normalised, end address
   auto-corrected), so a WAV and a TAP of the same program carry identical bytes.
 
-It is validated by a **bit and phase-exact round-trip** test: decode a genuine
+In addition to using a real Oric-1 to test genarated files load successfully, 
+it is validated by **bit and phase-exact round-trip** tests: decode a genuine
 recording, re-encode it, decode that, and confirm the bit streams match the original
-bit-for-bit (bar the documented header normalisation) including checking the phase 
+bit-for-bit (bar any program header normalisation) including checking the phase 
 of each bit.
