@@ -1397,22 +1397,55 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     return { bt: 0, ok: false };
   };
 
-  // Scan for sync byte (0x16) frame including start bit (0) and parity bit (0), assembled LSB-first from the raw bit stream.
-  const SYNC_FRAME_BITS = 0x016 << 1
-  const SYNC_FRAME_MASK = 0x03FF // 10 bits
-  let sync = 0x03FF; // Initialise with 1s so we have to read at least 10 bits to trigger a match 
   if (!skipSync) {
-    while (sync !== SYNC_FRAME_BITS) {
-      const { bt, ok } = getBit();
-      if (!ok) return prog;
-      sync = ((sync >>> 1) | (bt << 9)) & SYNC_FRAME_MASK;
+    // TODO: find out when we use skipSync, because searching for a valid byte frame seems to work well in our corpus
+    if (false) {
+      // Scan for sync byte (0x16) frame including start bit (0) and parity bit (0), assembled LSB-first from the raw bit stream.
+      const SYNC_FRAME_BITS = 0x016 << 1;
+      const SYNC_FRAME_MASK = 0x03FF; // 10 bits
+      let sync = 0x03FF; // Initialise with 1s so we have to read at least 10 bits to trigger a match 
+      while (sync !== SYNC_FRAME_BITS) {
+        const { bt, ok } = getBit();
+        if (!ok) return prog;
+        sync = ((sync >>> 1) | (bt << 9)) & SYNC_FRAME_MASK;
+      }
+
+      nextBit = nextBit-10; // start bit (0-bit), 8 data bits (0x16), 1 parity bit (0)
+    } else {
+      // Scan for any error free byte frame (including start bit, parity, stop bits), assembled LSB-first from the raw bit stream.
+      // Search using a 15 bit frame: 0ddddddddp111[1]0 (start bit + 8 data bits + parity bit + 3 or 4 stop bits + next start bit)
+      let frame = 0x0000;
+      // Prime the search frame with 14 bits, leaving room for 1 more bit read at the start of the search loop
+      for (let i=0;i<14;i++){
+        const { bt, ok } = getBit();
+        if (!ok) return prog;
+        frame = ((frame << 1) | bt);
+      }
+      while (true) {                     
+        const { bt, ok } = getBit();
+        if (!ok) return prog;
+        frame = ((frame << 1) | bt) & 0x7FFF;
+        if (((frame & (0x1 << 14)) == 0) // start bit = 0
+          && ((frame & (0x7 << 2)) == (0x7 << 2)) // at least 3 stop bits
+          && !((frame & 0x1) && (frame & 0x2))) // next start bit found
+        {
+          // Start and stop bits are valid; check data byte parity
+          const d = frame >> 6;
+          const p4 = ((d & 0xF0) >> 4) ^ (d & 0x0F);
+          const p2 = ((p4 & 0x0C) >> 2) ^ (p4 & 0x03);
+          const p = ((p2 & 0x2) >> 1) ^ (p2 & 0x1);
+          if (p != ((frame >> 5) & 0x01)) { // odd parity
+            // We found a valid frame
+            break 
+          }
+        }
+      }
+      nextBit = nextBit-15; // start bit (0-bit)
     }
   }
 
-  nextBit = nextBit-10 // start bit (0-bit), 8 data bits (0x16), 1 parity bit (0)
-  byteUnclear = false;
-
   // Prime byte read loop with the sync byte's start bit
+  byteUnclear = false;
   let r = getBit();
   if (!r.ok) return prog;
   
