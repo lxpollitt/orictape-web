@@ -128,8 +128,11 @@ export class WaveformView {
         for (let b = byte.firstBit; b <= byte.lastBit && b < bitCount; b++) {
           bitIsError[b] = 1;
         }
-        // Mark only the parity bit for label-level highlighting.
-        if (byte.lastBit < bitCount) bitIsParityErr[byte.lastBit] = 1;
+        // Mark only the parity bit (frame bit 9: start + 8 data) for the red
+        // label - NOT lastBit, which in the trailing-stops framing is the last
+        // stop bit.
+        const pbit = byte.firstBit + 9;
+        if (pbit <= byte.lastBit && pbit < bitCount) bitIsParityErr[pbit] = 1;
       }
     }
     this.bitIsError     = bitIsError;
@@ -586,14 +589,25 @@ export class WaveformView {
 
     // Selected-byte highlight band (spans full canvas height including label strip).
     // Floor to 1px so the selection stays visible at overview zooms where the
-    // byte's natural width falls below a pixel.
+    // byte's natural width falls below a pixel.  When the byte is wide enough to
+    // resolve its bits, the 8 data bits keep the strong shade while the framing
+    // bits (start = bit 0, parity = bit 9, stops = bit 10+) get a subtler one, so
+    // the byte's boundaries read at a glance.
     if (this.selByte !== null) {
       const b = prog.bytes[this.selByte];
       if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
         const x0 = (stream.bitFirstSample[b.firstBit] - vs) / spp;
         const x1 = (stream.bitLastSample[b.lastBit]   - vs) / spp;
-        ctx.fillStyle = '#1e3a1e';
+        const dFirst = b.firstBit + 1, dLast = Math.min(b.firstBit + 8, b.lastBit);
+        const splitBits = x1 - x0 >= 24 && dLast >= dFirst && dLast < stream.bitCount;
+        ctx.fillStyle = splitBits ? '#1a2e1a' : '#1e3a1e';   // framing (subtle) / whole byte
         ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
+        if (splitBits) {
+          const dx0 = (stream.bitFirstSample[dFirst] - vs) / spp;
+          const dx1 = (stream.bitLastSample[dLast]   - vs) / spp;
+          ctx.fillStyle = '#1e3a1e';                         // data bits (strong)
+          ctx.fillRect(dx0, 0, dx1 - dx0, h);
+        }
       }
     }
 
