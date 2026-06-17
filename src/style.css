@@ -1060,3 +1060,30 @@ header h1 {
   background: #2a1414;
   color: var(--red);
 }
+
+/* Waveform right-click context menu (program split / join). */
+.ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 168px;
+  padding: 4px 0;
+  background: #262626;
+  border: 1px solid #454545;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  font-size: 13px;
+  user-select: none;
+}
+.ctx-item {
+  display: block;
+  width: 100%;
+  padding: 6px 16px;
+  border: none;
+  background: none;
+  color: #dcdcdc;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ctx-item:hover:not(:disabled) { background: #2d4a2d; color: #fff; }
+.ctx-item:disabled { color: #5f5f5f; cursor: default; }

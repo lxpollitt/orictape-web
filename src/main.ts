@@ -157,6 +157,63 @@ waveform.setStreamSelectHandler((progIdx) => {
   }
 });
 
+// ── Waveform right-click context menu: program split / join ───────────────────
+// A discoverable surface for the same ops as the hex-panel keys, calling the same
+// shared functions (so identical confirm dialogs / renumbering).  It acts on the
+// program under the cursor (the waveform secondary-selects a non-active program on
+// right-click, exactly as a first left-click does), NOT on whichever program is
+// open in the editors.  Split needs a byte selection, which only the active program
+// has - so it greys out for any other (secondary-selected) program.
+const waveCtxMenu = document.createElement('div');
+waveCtxMenu.className = 'ctx-menu';
+waveCtxMenu.hidden = true;
+waveCtxMenu.innerHTML =
+  '<button class="ctx-item" data-act="split">Split at selected byte</button>' +
+  '<button class="ctx-item" data-act="join-prev">Join with previous</button>' +
+  '<button class="ctx-item" data-act="join-next">Join with next</button>';
+document.body.appendChild(waveCtxMenu);
+const hideWaveCtxMenu = (): void => { waveCtxMenu.hidden = true; };
+let ctxProgIdx: number | null = null;   // program the open menu acts on
+
+waveform.setContextMenuHandler((clientX, clientY, progIdx) => {
+  if (viewMode !== 'tape' || progIdx === null) return;   // dead space / non-tape: no menu
+  const prog = programs[progIdx];
+  if (!prog) return;
+  ctxProgIdx = progIdx;
+  const onActive = progIdx === activeProgIdx;   // a byte can only be selected in the active program
+  const enable = (act: string, on: boolean) =>
+    waveCtxMenu.querySelector<HTMLButtonElement>(`[data-act="${act}"]`)!.disabled = !on;
+  enable('split',     onActive && selByte !== null && selByte > 0 && selByte < prog.bytes.length);
+  enable('join-prev', progIdx > 0);
+  enable('join-next', progIdx < programs.length - 1);
+  waveCtxMenu.hidden = false;   // unhide to measure, then clamp into the viewport
+  waveCtxMenu.style.left = `${Math.min(clientX, window.innerWidth  - waveCtxMenu.offsetWidth  - 4)}px`;
+  waveCtxMenu.style.top  = `${Math.min(clientY, window.innerHeight - waveCtxMenu.offsetHeight - 4)}px`;
+});
+
+waveCtxMenu.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.ctx-item');
+  if (!btn || btn.disabled || ctxProgIdx === null) return;
+  hideWaveCtxMenu();
+  const idx = ctxProgIdx;
+  if (btn.dataset.act === 'split') {
+    if (selByte !== null) splitProgramInteractive(idx, selByte);
+  } else {
+    // Joining a non-active program switches focus to the merged result; its byte
+    // selection comes from the join, not the editor's stale one - so clear it.
+    if (idx !== activeProgIdx) selByte = null;
+    if (btn.dataset.act === 'join-prev') joinProgramWithPrevious(idx);
+    else                                 joinProgramWithNext(idx);
+  }
+});
+
+window.addEventListener('mousedown', (e) => {
+  if (!waveCtxMenu.hidden && !waveCtxMenu.contains(e.target as Node)) hideWaveCtxMenu();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !waveCtxMenu.hidden) { e.stopPropagation(); hideWaveCtxMenu(); }
+}, true);
+
 // Apply initial wrap state and keep in sync with the checkbox.
 const appEl = document.getElementById('app')!;
 appEl.classList.toggle('basic-wrap', wrapMode);
@@ -276,6 +333,98 @@ function closeProgram(tapeIdx: number, progIdx: number): void {
   }
 
   renderAll();
+}
+
+/**
+ * Split the program at `progIdx` into two at byte `byteIdx` (which becomes the
+ * start of the second part): confirm (warning if it has explicit edits, which the
+ * split discards), renumber both halves, derive the second half's provenance, and
+ * focus the new second program.  Shared by the hex Shift+Enter gesture and the
+ * waveform context menu.
+ */
+function splitProgramInteractive(progIdx: number, byteIdx: number): void {
+  const progs = tapes[activeTapeIdx]?.programs;
+  const prog  = progs?.[progIdx];
+  if (!progs || !prog || byteIdx <= 0 || byteIdx >= prog.bytes.length) return;
+  const name = prog.name || `Prog ${prog.progNumber}`;
+  const warn = programHasExplicitEdits(prog) ? confirmDangerBanner() : '';
+  confirmAction(
+    warn +
+    `Split program <span class="prog-num">${prog.progNumber}</span>${escHtml(name)} ` +
+    `into two parts at the selected byte?<br><br>` +
+    `Any edits to this program will be lost.`,
+  ).then((ok) => {
+    if (!ok) return;
+    const [first, second] = splitProgram(prog, byteIdx);
+    first.progNumber      = nextProgNumber++;
+    second.progNumber     = nextProgNumber++;
+    first.originalSource  = prog.originalSource;
+    second.originalSource = computeOriginalSource(second, tapes[activeTapeIdx]);
+    progs.splice(progIdx, 1, first, second);
+    activeProgIdx = progIdx + 1;
+    selByte       = 0;
+    renderAll();
+  });
+}
+
+/**
+ * Join the program at `progIdx` with the one before it in the same tape (absorbs
+ * into the previous one's slot); confirm first.  Shared by the hex Backspace
+ * gesture and the waveform context menu.
+ */
+function joinProgramWithPrevious(progIdx: number): void {
+  const progs = tapes[activeTapeIdx]?.programs;
+  const prog = progs?.[progIdx], prev = progs?.[progIdx - 1];
+  if (!progs || !prog || !prev) return;
+  const prevLen  = prev.bytes.length;
+  const prevName = prev.name || `Prog ${prev.progNumber}`;
+  const currName = prog.name || `Prog ${prog.progNumber}`;
+  const warn = (programHasExplicitEdits(prev) || programHasExplicitEdits(prog)) ? confirmDangerBanner() : '';
+  confirmAction(
+    warn +
+    `Join program <span class="prog-num">${prev.progNumber}</span>${escHtml(prevName)} ` +
+    `with program <span class="prog-num">${prog.progNumber}</span>${escHtml(currName)}?` +
+    `<br><br>Any edits to either program will be lost.`,
+  ).then((ok) => {
+    if (!ok) return;
+    const joined = joinPrograms([prev, prog]);
+    joined.progNumber     = nextProgNumber++;
+    joined.originalSource = prev.originalSource;
+    progs.splice(progIdx - 1, 2, joined);
+    activeProgIdx = progIdx - 1;
+    selByte       = prevLen;
+    renderAll();
+  });
+}
+
+/**
+ * Join the program at `progIdx` with the one after it in the same tape; the
+ * cursor keeps its byte offset (still valid in the joined stream).  Confirm
+ * first.  Shared by the hex Delete gesture and the waveform context menu.
+ */
+function joinProgramWithNext(progIdx: number): void {
+  const progs = tapes[activeTapeIdx]?.programs;
+  const prog = progs?.[progIdx], next = progs?.[progIdx + 1];
+  if (!progs || !prog || !next) return;
+  const currName = prog.name || `Prog ${prog.progNumber}`;
+  const nextName = next.name || `Prog ${next.progNumber}`;
+  const keepSel  = selByte;
+  const warn = (programHasExplicitEdits(prog) || programHasExplicitEdits(next)) ? confirmDangerBanner() : '';
+  confirmAction(
+    warn +
+    `Join program <span class="prog-num">${prog.progNumber}</span>${escHtml(currName)} ` +
+    `with program <span class="prog-num">${next.progNumber}</span>${escHtml(nextName)}?` +
+    `<br><br>Any edits to either program will be lost.`,
+  ).then((ok) => {
+    if (!ok) return;
+    const joined = joinPrograms([prog, next]);
+    joined.progNumber     = nextProgNumber++;
+    joined.originalSource = prog.originalSource;
+    progs.splice(progIdx, 2, joined);
+    activeProgIdx = progIdx;
+    selByte       = keepSel;
+    renderAll();
+  });
 }
 
 /**
@@ -3267,30 +3416,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     const prog = programs[activeProgIdx];
     if (prog && selByte > 0 && selByte < prog.bytes.length) {
       e.preventDefault();
-      const pi    = activeProgIdx;
-      const name  = prog.name || `Prog ${prog.progNumber}`;
-      const warn  = programHasExplicitEdits(prog) ? confirmDangerBanner() : '';
-      confirmAction(
-        warn +
-        `Split program <span class="prog-num">${prog.progNumber}</span>${escHtml(name)} ` +
-        `into two parts at the selected byte?<br><br>` +
-        `Any edits to this program will be lost.`,
-      ).then((ok) => {
-        if (!ok) return;
-        const [first, second] = splitProgram(prog, selByte!);
-        first.progNumber     = nextProgNumber++;
-        second.progNumber    = nextProgNumber++;
-        // Provenance: first half keeps the source it already had; second
-        // half gets a fresh source derived from its own first-byte sample
-        // position and parsed name — what our decoder would have produced
-        // if it had split the bitstream here itself.
-        first.originalSource  = prog.originalSource;
-        second.originalSource = computeOriginalSource(second, tapes[activeTapeIdx]);
-        tapes[activeTapeIdx].programs.splice(pi, 1, first, second);
-        activeProgIdx = pi + 1;
-        selByte       = 0;
-        renderAll();
-      });
+      splitProgramInteractive(activeProgIdx, selByte);
     }
     return;
   }
@@ -3307,27 +3433,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     const prev = programs[activeProgIdx - 1];
     if (prog && prev) {
       e.preventDefault();
-      const pi       = activeProgIdx;
-      const prevLen  = prev.bytes.length;
-      const prevName = prev.name || `Prog ${prev.progNumber}`;
-      const currName = prog.name || `Prog ${prog.progNumber}`;
-      const warn     = (programHasExplicitEdits(prev) || programHasExplicitEdits(prog))
-                         ? confirmDangerBanner() : '';
-      confirmAction(
-        warn +
-        `Join program <span class="prog-num">${prev.progNumber}</span>${escHtml(prevName)} ` +
-        `with program <span class="prog-num">${prog.progNumber}</span>${escHtml(currName)}?` +
-        `<br><br>Any edits to either program will be lost.`,
-      ).then((ok) => {
-        if (!ok) return;
-        const joined = joinPrograms([prev, prog]);
-        joined.progNumber     = nextProgNumber++;
-        joined.originalSource = prev.originalSource;
-        tapes[activeTapeIdx].programs.splice(pi - 1, 2, joined);
-        activeProgIdx = pi - 1;
-        selByte       = prevLen;
-        renderAll();
-      });
+      joinProgramWithPrevious(activeProgIdx);
     }
     return;
   }
@@ -3342,26 +3448,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     const next = programs[activeProgIdx + 1];
     if (prog && next && selByte === prog.bytes.length - 1) {
       e.preventDefault();
-      const pi          = activeProgIdx;
-      const savedSelByte = selByte;
-      const currName    = prog.name || `Prog ${prog.progNumber}`;
-      const nextName    = next.name || `Prog ${next.progNumber}`;
-      const warn        = (programHasExplicitEdits(prog) || programHasExplicitEdits(next))
-                            ? confirmDangerBanner() : '';
-      confirmAction(
-        warn +
-        `Join program <span class="prog-num">${prog.progNumber}</span>${escHtml(currName)} ` +
-        `with program <span class="prog-num">${next.progNumber}</span>${escHtml(nextName)}?` +
-        `<br><br>Any edits to either program will be lost.`,
-      ).then((ok) => {
-        if (!ok) return;
-        const joined = joinPrograms([prog, next]);
-        joined.progNumber     = nextProgNumber++;
-        joined.originalSource = prog.originalSource;
-        tapes[activeTapeIdx].programs.splice(pi, 2, joined);
-        selByte = savedSelByte;
-        renderAll();
-      });
+      joinProgramWithNext(activeProgIdx);
       return;
     }
     // Fall through: Delete not at end-of-program is not a hex-panel

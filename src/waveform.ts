@@ -86,6 +86,7 @@ export class WaveformView {
   private lastWaveClickSelectChange = 0;
   private onByteClick: ((byteIndex: number) => void) | null = null;
   private onStreamSelect: ((progIdx: number) => void) | null = null;
+  private onContextMenu:  ((clientX: number, clientY: number, progIdx: number | null) => void) | null = null;
 
   /** True when a TAP file is active — shows "No waveform" label. */
   private noWaveform = false;
@@ -177,6 +178,12 @@ export class WaveformView {
 
   setStreamSelectHandler(cb: (progIdx: number) => void): void {
     this.onStreamSelect = cb;
+  }
+
+  /** Right-click in the canvas: reports the cursor position (for menu placement)
+   *  and the byte under it (or null if off any program byte). */
+  setContextMenuHandler(cb: (clientX: number, clientY: number, progIdx: number | null) => void): void {
+    this.onContextMenu = cb;
   }
 
   /** Binary-search for the byte whose sample range contains `sample`.
@@ -904,11 +911,32 @@ export class WaveformView {
     const { canvas } = this;
 
     canvas.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;   // left only; right-click is the context menu
       this.dragging  = true;
       this.dragMoved = false;
       this.dragX     = e.clientX;
       this.dragView  = this.viewStart;
       canvas.style.cursor = 'grabbing';
+    });
+
+    canvas.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (!this.onContextMenu) return;
+      const rect   = canvas.getBoundingClientRect();
+      const sample = this.viewStart + (e.clientX - rect.left) * this.spp;
+      // Target the program under the cursor, mirroring a left-click: over the
+      // active program drop any secondary highlight; over another program
+      // secondary-select it - so the menu visibly acts on the right-clicked
+      // program, not on whichever one is open in the editors.
+      const stream = this.sampleToStream(sample);
+      if (this.sampleToByte(sample) !== null) {
+        this.clickedStream = null;
+      } else if (stream) {
+        this.clickedStream = stream;
+        this.clickedSample = sample;
+      }
+      this.draw();
+      this.onContextMenu(e.clientX, e.clientY, stream ? stream.progIdx : null);
     });
 
     window.addEventListener('mousemove', (e) => {
