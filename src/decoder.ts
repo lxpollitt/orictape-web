@@ -1397,22 +1397,12 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     }
     return { bt: 0, ok: false, unclear: false };
   };
-
-  // Old algorithm, didn't match program fragments (missing sync+header)
-  // if (!skipSync) {
-  //   // Scan for sync byte (0x16) frame including start bit (0) and parity bit (0), assembled LSB-first from the raw bit stream.
-  //   const SYNC_FRAME_BITS = 0x016 << 1;
-  //   const SYNC_FRAME_MASK = 0x03FF; // 10 bits
-  //   let sync = 0x03FF; // Initialise with 1s so we have to read at least 10 bits to trigger a match 
-  //   while (sync !== SYNC_FRAME_BITS) {
-  //     const { bt, ok } = getBit();
-  //     if (!ok) return prog;
-  //     sync = ((sync >>> 1) | (bt << 9)) & SYNC_FRAME_MASK;
-  //   }
-  //   nextBit = nextBit-10; // start bit (0-bit), 8 data bits (0x16), 1 parity bit (0)
-  // }
-
   
+  // Unless skipSync is specified, we search for two adjacent error-free byte frames. We then
+  // walk backwards to match as many (not error-free) byte frames which the main forward 
+  // running decoding algorithm could parse and end up in alignment with the originally found
+  // two adjacent error-free byte frames. (Note it is rare for this walk-back to find additional
+  // valid-enough bytes that meet this criteria.)
   if (!skipSync) {
     // Search for two adjacent error-free byte frames
     let firstBit = nextBit;
@@ -1565,7 +1555,6 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
   
   // Read bytes until the bit stream is exhausted.
   while (true) {
-    byteUnclear = false;
     const byteStart = nextBit-1; // We've already read the start bit (a 0-bit)
 
     // Read 8 data bits, LSB first.
@@ -1583,21 +1572,10 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     if (!r.ok) return prog;
     let ce = r.bt === (chk & 1);
 
-    // Blind stop bit get
-    // r = getBit();
-    // if (!r.ok) return prog;
-
-    // Skip stop bits until the start bit (0) appears.
-    // r = getBit();
-    // if (!r.ok) return prog;
-    // while (r.bt !== 0) {
-    //   r = getBit();
-    //   if (!r.ok) return prog;
-    // }
-
     // There should always be at least 3 stop bits (1s).
     // Blindly skip the first (if it is a clear 0 then most likely a slip happened during the data bits parsing)
     // If either of the next 2 are unclear 0s then treat them as 1s.
+    // (Note, an unclear start bit for the next byte will also mark this byte as unclear.)
     let stopBits = 0;
     r = getBit();
     if (!r.ok) return prog;
@@ -1615,6 +1593,9 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
       chkErr:   ce,
       originalIndex: prog.bytes.length,
     });
+
+    // Unclear start bit carries over to the next byte
+    byteUnclear = r.unclear;
   }
 }
 

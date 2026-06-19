@@ -144,10 +144,15 @@ for (const c of [3, 4] as const) {
           const core: Frame = { value: CORE, stops: region, badParity };
           const from: Frame = { value: FROM, stops: ones(flip), badParity: true, startUnclear: followingUnclear };
           const s = bitStream([core, from, ...lockFrames(flip)]);
+          // unclear = the byte's own start cell + any unclear-0 in its run + the next
+          // byte's start cell (read as the boundary).  The core's own start is always
+          // clear here; the `from` byte's own start is `followingUnclear`, so it now
+          // flags itself.
           const coreFlags: Flags = { chkErr: badParity, unclear: region.includes('u') || followingUnclear };
+          const fromFlags: Flags = { chkErr: true, unclear: followingUnclear };
           let err: string | null;
-          if (cls === 'recover') { recovered++; err = expectBytes(s, [CORE, FROM, LOCK_A, LOCK_B], [coreFlags, { chkErr: true }, {}, {}]); }
-          else                   { halted++;    err = expectBytes(s, [FROM, LOCK_A, LOCK_B], [{ chkErr: true }, {}, {}]); }
+          if (cls === 'recover') { recovered++; err = expectBytes(s, [CORE, FROM, LOCK_A, LOCK_B], [coreFlags, fromFlags, {}, {}]); }
+          else                   { halted++;    err = expectBytes(s, [FROM, LOCK_A, LOCK_B], [fromFlags, {}, {}]); }
           if (err) fails.push(`region "${region}" cadence ${c} ${badParity ? 'badP' : 'okP'} nextU=${followingUnclear} (${cls}) — ${err}`);
         }
       }
