@@ -1389,59 +1389,174 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
   let nextBit = 0;
   let byteUnclear = false;
 
-  const getBit = (): { bt: 0 | 1; ok: boolean } => {
-    if (nextBit < stream.bitCount) {
-      byteUnclear = byteUnclear || (stream.bitUnclear[nextBit] === 1);
-      return { bt: stream.bitV[nextBit++] as 0 | 1, ok: true };
+  const getBit = (): { bt: 0 | 1; ok: boolean; unclear: boolean } => {
+    if (nextBit >= 0 && nextBit < stream.bitCount) {
+      const unclearBit = stream.bitUnclear[nextBit] === 1;
+      byteUnclear = byteUnclear || unclearBit;
+      return { bt: stream.bitV[nextBit++] as 0 | 1, unclear: unclearBit, ok: true };
     }
-    return { bt: 0, ok: false };
+    return { bt: 0, ok: false, unclear: false };
   };
 
-  // TODO: find out when we use skipSync, because searching for a valid byte frame seems to work well in our corpus
-  if (false) {
-    if (!skipSync) {
-      // Scan for sync byte (0x16) frame including start bit (0) and parity bit (0), assembled LSB-first from the raw bit stream.
-      const SYNC_FRAME_BITS = 0x016 << 1;
-      const SYNC_FRAME_MASK = 0x03FF; // 10 bits
-      let sync = 0x03FF; // Initialise with 1s so we have to read at least 10 bits to trigger a match 
-      while (sync !== SYNC_FRAME_BITS) {
+  // Old algorithm, didn't match program fragments (missing sync+header)
+  // if (!skipSync) {
+  //   // Scan for sync byte (0x16) frame including start bit (0) and parity bit (0), assembled LSB-first from the raw bit stream.
+  //   const SYNC_FRAME_BITS = 0x016 << 1;
+  //   const SYNC_FRAME_MASK = 0x03FF; // 10 bits
+  //   let sync = 0x03FF; // Initialise with 1s so we have to read at least 10 bits to trigger a match 
+  //   while (sync !== SYNC_FRAME_BITS) {
+  //     const { bt, ok } = getBit();
+  //     if (!ok) return prog;
+  //     sync = ((sync >>> 1) | (bt << 9)) & SYNC_FRAME_MASK;
+  //   }
+  //   nextBit = nextBit-10; // start bit (0-bit), 8 data bits (0x16), 1 parity bit (0)
+  // }
+
+  
+  if (!skipSync) {
+    // Search for two adjacent error-free byte frames
+    let firstBit = nextBit;
+    let stopBits = 0;
+    while (true) {
+      // Scan for the first error-free byte frame (including start bit, parity, stop bits), assembled LSB-first from the raw bit stream.
+      // Search using a 15 bit frame: 0ddddddddp111[1]0 (start bit + 8 data bits + parity bit + 3 or 4 stop bits + next start bit)
+      let frame = 0x0000;
+      firstBit = nextBit;
+      stopBits = 0;
+
+      // Prime the search frame with 14 bits, leaving room for 1 more bit read (the takes us 
+      // to the minimum error-free frame size) read at the start of the search loop
+      for (let i=0;i<14;i++) {
         const { bt, ok } = getBit();
         if (!ok) return prog;
-        sync = ((sync >>> 1) | (bt << 9)) & SYNC_FRAME_MASK;
+        frame = ((frame << 1) | bt);
       }
-      nextBit = nextBit-10; // start bit (0-bit), 8 data bits (0x16), 1 parity bit (0)
-    }
-  } else {
-    // Scan for any error free byte frame (including start bit, parity, stop bits), assembled LSB-first from the raw bit stream.
-    // Search using a 15 bit frame: 0ddddddddp111[1]0 (start bit + 8 data bits + parity bit + 3 or 4 stop bits + next start bit)
-    let frame = 0x0000;
-    // Prime the search frame with 14 bits, leaving room for 1 more bit read at the start of the search loop
-    for (let i=0;i<14;i++){
-      const { bt, ok } = getBit();
-      if (!ok) return prog;
-      frame = ((frame << 1) | bt);
-    }
-    while (true) {                     
-      const { bt, ok } = getBit();
-      if (!ok) return prog;
-      frame = ((frame << 1) | bt) & 0x7FFF;
-      if (((frame & (0x1 << 14)) == 0) // start bit = 0
-        && ((frame & (0x7 << 2)) == (0x7 << 2)) // at least 3 stop bits
-        && !((frame & 0x1) && (frame & 0x2))) // next start bit found
+
+      while (true) {                     
+        const { bt, ok } = getBit();
+        if (!ok) return prog;
+        frame = ((frame << 1) | bt) & 0x7FFF;
+        if (((frame & (0x1 << 14)) == 0) // start bit = 0
+          && ((frame & (0x7 << 2)) == (0x7 << 2)) // at least 3 stop bits
+          && !((frame & 0x1) && (frame & 0x2))) // next start bit found
+        {
+          // Start and stop bits are valid; check data byte parity
+          const d = frame >> 6;
+          const p4 = ((d & 0xF0) >> 4) ^ (d & 0x0F);
+          const p2 = ((p4 & 0x0C) >> 2) ^ (p4 & 0x03);
+          const p = ((p2 & 0x2) >> 1) ^ (p2 & 0x1);
+          if (p != ((frame >> 5) & 0x01)) { // odd parity
+            // We found a valid frame
+            stopBits = (frame & 0x02) == 0x02 ? 4 : 3;
+            firstBit = nextBit-15; // start bit (0-bit)
+            break 
+          }
+        }
+      }    
+      
+      // We found a first error-free byte frame including the start bit of the byte
+      // following it. Now check the rest of the byte following it is also
+      // error-free, including stop bits and next start bit after that. 
+      nextBit = firstBit + 11 + stopBits;
+      frame = 0x0000;
+
+      // Fast format saves normally alternate between 3 stop bits and 4 stop bits.
+      // Slow format saves normally use 3 stop bits (? 99% of bytes).
+      const extraStopBit = stream.format === "fast" ? 4-stopBits : 0;
+      for (let i=0; i<13+extraStopBit; i++) {
+        const { bt, ok } = getBit();
+        if (!ok) return prog;
+        frame = (frame << 1) | bt;
+      }
+      if (extraStopBit == 0) {
+        frame = frame << 1; // Align a 3 stop bit frame the same as a 4 stop bit frame
+      }
+      const expectedStopBits = (0x7 << 2) | (extraStopBit << 1);
+
+      if (((frame & expectedStopBits) == expectedStopBits) // expected number of stop bits
+        && !(frame & (0x2 - extraStopBit))) // next start bit found
       {
         // Start and stop bits are valid; check data byte parity
         const d = frame >> 6;
         const p4 = ((d & 0xF0) >> 4) ^ (d & 0x0F);
         const p2 = ((p4 & 0x0C) >> 2) ^ (p4 & 0x03);
         const p = ((p2 & 0x2) >> 1) ^ (p2 & 0x1);
-        if (skipSync || (p != ((frame >> 5) & 0x01))) { // odd parity; or relax and ignore parity is skipSync was specified
-          // We found a valid frame
+        if (p != ((frame >> 5) & 0x01)) { // odd parity
+          // The second byte frame is valid
           break 
         }
       }
+
+      // Second byte frame was not valid. Resume the search starting one bit further
+      // on that the latest first byte frame we found.
+      nextBit = firstBit + 1;
     }
-    nextBit = nextBit-15; // start bit (0-bit)
-  }
+
+    // We found an error-free valid frame (which starts at firstBit). Now we work backwards to 
+    // find the first not error-free byte frame that our decode could start decoding from and 
+    // end up aligned with the error-free byte frame we found.
+    // As we are walking backwards, we will decrement nextBit immediately after every getBit
+    // so it points to the bit we are currently processing.
+    let wantStopBits = stopBits;
+    walkBackLoop: while (firstBit > 0) {
+      // Check if the already found start bit is clear. If it is unclear then it can
+      // impact viability of some potential stop bit sequences.
+      nextBit = firstBit;
+      let r = getBit();
+      nextBit--;
+      if (!r.ok) break;
+      let startBitUnclear = r.unclear;
+
+      // Walk backwards through the potential stop bits
+      wantStopBits = wantStopBits == 3 ? 4 : 3;
+      stopBits = 0;
+      let adjustedWantStopBits = wantStopBits;
+      while (stopBits < adjustedWantStopBits) {
+        nextBit--;
+        r = getBit();
+        nextBit--;
+        if (!r.ok) break walkBackLoop;
+        if (r.bt == 0) {
+          if (r.unclear) {
+            if (stopBits == 0) {
+              // The decoder only tolerates unclear 0s as stop bits for the first 3 stop bits.
+              // So a trailing unclear 0 cannot be the 4th stop bit, even if we want it to be.
+              // We therefore neeed to assume a stop bit slip of some sort and adjust our 
+              // wanted stop bits to 3. (The alternative would be to abandon the search at this point.)
+              adjustedWantStopBits = 3;
+            }
+          } else {
+            // A clear 0 where we expect a stop bit (1) can only be the first stop bit the decoder reads
+            // (the only stop bit it is liberal enough to accept a clear 0 as stop bit slip of some sort)
+            // So we terminate our stop bit search here. But if there are not at least two other stop bits 
+            // between it and the start bit, then the start bit must be clear, otherwise the decoder would
+            // have treated the start bit as a stop bit. So in this case this byte frame couldn't lead 
+            // to the next byte frame, so we abandon our walk back.
+            if (stopBits < 2 && startBitUnclear) {
+              break walkBackLoop
+            }
+            stopBits++;
+            break;
+          }
+        }
+        stopBits++;
+      }
+
+      // We found stop bits the decoder would recognise (even if not error free).
+      // Skip the parity and data bits, and check that the start bit is in place.
+      nextBit = nextBit-10
+      r = getBit();
+      nextBit--;      
+      if (!r.ok) break walkBackLoop;
+      if (r.bt == 1) break walkBackLoop; // Not a valid stop bit; abandon the walk back
+
+      // Found a valid start bit (0), so we have a good-enough byte frame.
+      // Loop to contine the walkback.
+      firstBit = nextBit;
+    }
+
+    nextBit = firstBit;
+  }  
 
   // Prime byte read loop with the sync byte's start bit
   byteUnclear = false;
@@ -1468,14 +1583,26 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
     if (!r.ok) return prog;
     let ce = r.bt === (chk & 1);
 
-    // Blind sync bit get (old algorithm did this, but not clear if it makes sense)
-    r = getBit();
-    if (!r.ok) return prog;
+    // Blind stop bit get
+    // r = getBit();
+    // if (!r.ok) return prog;
 
     // Skip stop bits until the start bit (0) appears.
+    // r = getBit();
+    // if (!r.ok) return prog;
+    // while (r.bt !== 0) {
+    //   r = getBit();
+    //   if (!r.ok) return prog;
+    // }
+
+    // There should always be at least 3 stop bits (1s).
+    // Blindly skip the first (if it is a clear 0 then most likely a slip happened during the data bits parsing)
+    // If either of the next 2 are unclear 0s then treat them as 1s.
+    let stopBits = 0;
     r = getBit();
     if (!r.ok) return prog;
-    while (r.bt !== 0) {
+    while (r.bt !== 0 || (stopBits < 1) || (r.unclear && stopBits < 3 )) {
+      stopBits++;
       r = getBit();
       if (!r.ok) return prog;
     }
