@@ -810,14 +810,15 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   let minVal = 0, maxVal = 0, threshold = 0;
   let minIndex = 0, maxIndex = startSample, nextMaxIndex = startSample;
   let belowIndex = 0, aboveIndex = startSample;
-  let lengthBelow = 0, lengthAbove = 0, length = 0;
+  let lengthAbove = 0, lengthBelow = 0, length = 0;
   let streamFirstSample = startSample;
   let streamMinVal = 0, streamMaxVal = 0;
 
   // Cycle classification output (set by readCycle, consumed by pushBit).
   type CycleKind = 'short' | 'medium' | 'long' | 'unreadable';
-  let cycleKind:    CycleKind = 'short';
+  let cycleKind: CycleKind = 'short';
   let cycleUnclear = false;
+  let cycleFrequency = 0;
 
   /** Measure one waveform cycle and classify it as short, medium, or long.
    *  Returns false if bit is unreadbale / no useful signal found (for section of ~cycle length). */
@@ -855,7 +856,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     for (let i = maxIndex + 1; i < minSearchLongestEnd; i++) {
       if (samples[i] <= threshold) { belowIndex = i; break; }
     }
-    lengthBelow = belowIndex - aboveIndex;
+    lengthAbove = belowIndex - aboveIndex;
 
     // Find next maximum (the maximum in the first half of the next cycle).
     // Same adaptive window: at least SMALLEST, extend up to LONGEST.
@@ -882,8 +883,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     for (let i = minIndex + 1; i < maxSearchLongestEnd; i++) {
       if (samples[i] >= threshold) { aboveIndex = i; break; }
     }
-    lengthAbove = aboveIndex - belowIndex;
-    length = lengthBelow + lengthAbove;
+    lengthBelow = aboveIndex - belowIndex;
+    length = lengthAbove + lengthBelow;
 
     // TODO: Simplify readCycle to returns every GAP, and have higher layer decide how many milliseconds of gaps it cares about
     // so it can make sync decision vs inside a program decision
@@ -917,16 +918,18 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
                 || (length > MEDIUM_MAX && length < LONG_MIN)    // medium/long boundary
                 || length > LONG_MAX;                            // long/gap boundary
 
+    cycleFrequency = length > 0 ? Math.round(sampleRate / length) : 0; // Defensive; length should always be > 0
+
     return length < MIN_UREADABLE_CYCLE_LENGTH;
   };
 
   /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit). */
   const pushBitFast = (): void => {
     _bitV[bitCount] = (cycleKind === 'short' || cycleKind === 'unreadable') ? 1 : 0;
-    _bitL1[bitCount] = Math.min(lengthBelow, 65535);
+    _bitL1[bitCount] = Math.min(lengthAbove, 65535);
     _bitFirstSample[bitCount] = aboveIndex - length;
     _bitLastSample[bitCount]  = aboveIndex - 1;
-    _bitUnclear[bitCount] = cycleUnclear ? 1 : 0;
+    _bitUnclear[bitCount] = (cycleUnclear || cycleKind === 'long') ? 1 : 0;
     _bitMaxIndex[bitCount] = maxIndex;
     _bitMinIndex[bitCount] = minIndex;
     bitCount++;
@@ -1002,11 +1005,13 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     if (slow0s >= 4) slow0s = 0;
   };
 
-  const pushBitSlow = (): void => {
+  const oldPushBitSlow = (): void => {
     const cycleFirst = aboveIndex - length;
     const cycleLast  = aboveIndex - 1;
     // The crossover midpoint between the two half-cycles.
-    const midSample  = cycleFirst + lengthBelow;
+    const midSample  = cycleFirst + lengthAbove;
+
+    if (bitCount>=222138 && bitCount<=222142) console.log("pushBitSlow", bitCount, cycleFirst, cycleKind);
 
     if (cycleKind === 'short' || cycleKind == 'unreadable') {
       slowSampleFrom = cycleFirst;
@@ -1024,7 +1029,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       if (bitCount > 0) {
         _bitLastSample[bitCount - 1] = midSample - 1;
       }
-      if (lengthBelow <= lengthAbove) {
+      if (lengthAbove <= lengthBelow) {
         // First half is short, second is long.
         slowSampleFrom = cycleFirst;
         slowSampleTo   = midSample - 1;
@@ -1043,6 +1048,122 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       }
     }
   };
+
+  // Slow format per bit cylce counts
+  let slowCycles = 0;   // total cycles (including the alignment cycle)
+  let slowShorts = 0;   // short cycle count (after the alignment cycle) 
+  let slowLongs = 0;    // long cycle count (after the alignment cycle)
+  let slowPossibleTransiton = false;
+  let slowPossibleTranistionFrom: CycleKind = 'short';
+  let slowPossibleTranistionTo: CycleKind = 'short';
+
+  const pushBitSlow = (): void => {
+    const cycleFirst = aboveIndex - length;
+    const cycleLast  = aboveIndex - 1;
+    const cycleIsShort = (cycleKind === 'short' || (cycleKind === 'medium' && cycleFrequency >= 2000) || cycleKind == 'unreadable');
+    let parsedBit = false;
+    let parsedBitValue = 0;
+
+
+    if (slowPossibleTransiton) {
+      if (slowPossibleTranistionTo == cycleKind) {
+        // Confirmed previous cycle was a valid transition
+        if (slowCycles == 1 && bitCount > 0) {
+          // If the first cycle of a bit is a transition then bundle it with the previous bit
+          // TODO: adjust previous bit length to bundle this cycle in with previous bit
+        }
+        slowCycles = 0;
+        slowShorts = 0;
+        slowLongs = 0;
+        slowBitUnclear = false;
+      }
+      if (cycleKind !== 'medium') {
+        slowPossibleTransiton = false;
+      }
+    } else if (cycleKind === 'medium') {
+      slowPossibleTranistionTo = (lengthBelow < lengthAbove) ?  'short' : 'long';
+      if (slowPossibleTranistionFrom != slowPossibleTranistionTo) {
+        slowPossibleTransiton = true;
+      }
+    } else {
+      slowPossibleTranistionFrom = cycleKind;
+      slowPossibleTransiton = false;
+    }
+
+    slowBitUnclear = slowBitUnclear || cycleUnclear;
+    slowCycles++;
+
+    // if (bitCount>=222138 && bitCount<=222142) console.log("pushBitSlow", bitCount, cycleFirst, cycleKind, cycleFrequency);
+    if (bitCount<50) console.log("pushBitSlow:", bitCount, cycleFirst, cycleKind, cycleFrequency, slowCycles, slowShorts, slowLongs, slowPossibleTransiton, slowPossibleTranistionFrom, slowPossibleTranistionTo);
+
+    if (slowCycles == 1) {
+      // The alignment bit - length is ignored
+      slowBitFirstSample = cycleFirst;      
+    } else if (slowCycles == 2) {
+      // The 2nd cycle detemines whether we are expecting shorts or longs; total of 7 shorts or 3 longs (plus the alignment bit)
+      if (cycleIsShort) {
+        slowShorts = 1;
+      } else {
+        slowLongs = 1;
+      }
+    } else {
+      if (slowShorts > 0) {
+        // We are processing an "expecting shorts" run
+        if (cycleIsShort) {
+          slowShorts++
+        }
+        if (slowCycles == 8) {
+          parsedBit = true;
+          if (cycleKind === 'medium') {
+            slowShorts++;
+          }
+          if (slowShorts >= 4) {
+            // The ROM treats as a 1-bit. We mark as unclear if any cycle was unclear or if slowShorts != 7.
+            parsedBitValue = 1;
+            slowBitUnclear = slowBitUnclear || slowShorts != 7;
+          } else {
+            // A 0 bit, unclear
+            parsedBitValue = 0;
+            slowBitUnclear = true;
+
+            // The ROM treats as a 0 bit and continues, even though it just consumed 8 cycles
+            // when a 0 bit should only be 4. We could do better and re-align our read back 4 cycles.
+          }
+
+          slowCycles = 0;
+        }
+      } else {
+        // We are processing an "expecting longs" run
+        if (!cycleIsShort) {
+          slowLongs++
+        }
+        if (slowCycles == 4) {
+          parsedBit = true;
+
+          // The ROM treats as 0-bit. We mark as unclear if slowLongs != 3.
+          parsedBitValue = 0;
+          slowBitUnclear = slowBitUnclear || slowLongs != 3;
+
+          // We could do better and if slowCycles == 0 then consider the 2nd bit as an error and continue
+          // as if it were a fast cycle?
+        }
+      }
+
+      if (parsedBit) {
+        _bitV[bitCount] = parsedBitValue;
+        _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
+        _bitFirstSample[bitCount] = slowBitFirstSample;
+        _bitLastSample[bitCount]  = cycleLast;
+        _bitL1[bitCount] = 0;
+        bitCount++;
+        slowCycles = 0;
+        slowShorts = 0;
+        slowLongs = 0;
+        slowBitUnclear = false;
+      }
+    }    
+  };
+
 
   // Phase 1: Sync search — find a continuous run of at least MIN_SYNC_BITS cycles.
   // Uses both length-based gaps AND noise-floor to avoid locking onto noise.
@@ -1074,7 +1195,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       // @ts-expect-error
       if (cycleKind === 'medium') mediumCycleCount++;
       // @ts-expect-error
-      else if (cycleKind === 'long') longCycleCount++;
+       else if (cycleKind === 'long') longCycleCount++;
       pushBitFast();
     }
   }
