@@ -1085,7 +1085,14 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
           slowPossibleReframeFrom = cycleKind;
           slowPossibleReframe = false;
         } else {
-          if (cyclesBeforeReframe == 1 && bitCount > 0) {
+          if (cyclesBeforeReframe == -1) {
+            // The cycle has already been incorporated into the previous bit, but we want to reframe
+            // it to be the first cycle in this bit, including setting out cycle counts correctly. 
+            // The reframed cycle will become the first cycle in this bit which the ROM's algorithm
+            // treats as an alignment cycle, ignoring its length. So we just need to set the cycle 
+            // count accordingly.
+            slowCycles = 1;
+          } else if (cyclesBeforeReframe == 1 && bitCount > 0) {
             // Bundle the cycle before the reframe into the previous bit. If the reframe kind was
             // a medium cycle then mark it as clear (potentially a normal half-cycle stop bit);
             // otherwsie mark it as unclear.
