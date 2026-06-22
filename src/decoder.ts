@@ -770,6 +770,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const MEDIUM_MAX    = Math.round(34 * sampleRate / 48000);  // 31 at 44100 Hz
   const LONG_MIN      = Math.round(38 * sampleRate / 48000);  // 35 at 44100 Hz
   const LONG_MAX      = Math.round(44 * sampleRate / 48000);  // 42 at 44100 Hz
+  const SHORT_ROM_MAX_HZ = 2000;
+  const SHORT_ROM_MAX = Math.round(sampleRate/SHORT_ROM_MAX_HZ);  // 24 at 48000 Hz; 22 at 44100 Hz
   
   // Search window sizes for searching from current peak to next (opposite polarity) peak
   //
@@ -899,7 +901,9 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       // cycleKind = Math.abs(lengthBelow - lengthAbove) <= (MEDIUM_MIN - SHORT_MAX) >> 1
       //  ? 'short' : 'long'; // Doesn't seem to work any better than just using total length
       // Unclear zone between short and medium — classify as nearest.
-      cycleKind = (length - SHORT_MAX) <= (MEDIUM_MIN - length) ? 'short' : 'medium';
+      // cycleKind = (length - SHORT_MAX) <= (MEDIUM_MIN - length) ? 'short' : 'medium';
+      // Unclear zone between short and medium — use the same boundry as the ROM uses
+      cycleKind = length <= SHORT_ROM_MAX ? 'short' : 'medium';
     } else if (length <= MEDIUM_MAX) {
       cycleKind = 'medium';
     } else if (length < LONG_MIN) {
@@ -1060,7 +1064,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   const pushBitSlow = (): void => {
     const cycleFirst = aboveIndex - length;
     const cycleLast  = aboveIndex - 1;
-    const cycleIsROMShort = (cycleKind === 'short' || (cycleKind === 'medium' && cycleFrequency >= 2000) || cycleKind == 'unreadable');
+    const cycleIsROMShort = (cycleKind === 'short' || (cycleKind === 'medium' && length <= SHORT_ROM_MAX) || cycleKind == 'unreadable');
     let parsedBit = false;
     let parsedBitValue = 0;
     // This algorithm runs in two parts: 1) keep track of possible reframes (transistions
