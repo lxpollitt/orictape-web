@@ -1124,10 +1124,17 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       } else {
         slowPossibleReframe = false;
       }
-    } else if (slowPossibleReframeFrom !== cycleKind) {
+    }
+    
+    if (slowPossibleReframeFrom !== cycleKind) {
       if (slowCycles == 0 &&  cycleKind !== 'medium') {
         slowPossibleReframe = false;
         slowPossibleReframeFrom = cycleKind;
+      } else if (slowCycles == 1) {
+        // The ROM decoding algorithm uses the first cycle per bit as an alignment cylce, independent of cycle length.
+        // So a change between it and the second cycle does warrant a possible reframe.
+        slowPossibleReframe = false;
+        slowPossibleReframeFrom = cycleIsROMShort ? 'short' : 'long';
       } else {
         if (cycleKind === 'medium') {
           slowPossibleReframeTo = (lengthBelow < lengthAbove) ?  'short' : 'long';
@@ -1147,8 +1154,8 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     // will potentially early terminate where the ROM's algorithm on its own would not.)
     slowBitUnclear = slowBitUnclear || cycleUnclear;
     slowCycles++;
-    // if (bitCount<20) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
-    if (bitCount>=256948 && bitCount <=256951) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
+    if (bitCount <50) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, cycleFrequency, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
+    // if (bitCount>=256948 && bitCount <=256951) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, cycleFrequency, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
 
     if (slowCycles == 1) {
       // The alignment bit - the ROM ignores the length of this bit
