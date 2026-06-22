@@ -1078,7 +1078,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     if (slowPossibleReframe) {
       if (slowPossibleReframeTo === cycleKind) {
         // Transtion confirmed - this cycle matches what was expected by the possible transition.
-        const cyclesBeforeTransition = slowCycles - ((slowPossibleReframeKind === 'medium') ? 0 : 1);
+        const cyclesBeforeReframe = slowCycles - ((slowPossibleReframeKind === 'medium') ? 0 : 1);
 
         // if (slowCycles == 1) {
         //   if (slowPossibleReframeKind === 'medium' && bitCount > 0) {
@@ -1091,27 +1091,32 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
             
         //   }
         // }
-        // // Interrupt the basic cycle matching and counting modelled on the ROM's algorithm.
-        // if (cyclesBeforeTransition  0) {
-        //   // The transition didn't happen right at the start of the bit, so we need to interrupt
-        //   // the basic cycle matching and
-        //   if (bitCount<50) console.log("pushBitSlow: transition confirmed", cyclesBeforeTransition);
-        //   if (cyclesBeforeTransition > 2) {
-        //     // Bundle the cylces up to the transition as a seperate unclear bit, rather than bundling them into the previous bit
-        //     if (bitCount<50) console.log("pushBitSlow: transition confirmed: separate bit");
-        //     _bitV[bitCount] = (slowPossibleTransitionFrom === 'short') ? 1 : 0;
-        //     _bitUnclear[bitCount] = 1;
-        //     _bitFirstSample[bitCount] = slowBitFirstSample;
-        //     _bitLastSample[bitCount] = slowPossibleTransitionIndex - 1;
-        //     _bitL1[bitCount] = 0;
-        //     bitCount++;
-        //   } else if (bitCount > 0) {
-        //     // Bundle the cycles up to the transition into the previous bit and mark it as unclear
-        //     if (bitCount<50) console.log("pushBitSlow: transition confirmed: add to previous");
-        //     _bitUnclear[bitCount - 1] = 1;
-        //     _bitLastSample[bitCount - 1] = slowPossibleTransitionIndex - 1;
-        //   }
-        // }
+
+        // Interrupt the basic cycle matching and counting modelled on the ROM's algorithm.
+        if (cyclesBeforeReframe > 1) {
+          // The transition didn't happen right at the start of the bit, so we need to interrupt
+          // the basic cycle matching and
+          // if (bitCount<50) console.log("pushBitSlow: transition confirmed", cyclesBeforeTransition);
+          if (cyclesBeforeReframe > 1) {
+            // Bundle the cylces up to the transition as a seperate unclear bit, rather than bundling them into the previous bit
+            // if (bitCount<50) console.log("pushBitSlow: transition confirmed: separate bit");
+            if (slowShorts == 0 && slowLongs == 0) {
+              _bitV[bitCount] = slowPossibleReframeFrom === 'short' ? 1 : 0;
+            } else {
+              _bitV[bitCount] = slowShorts > 0 ? 1 : 0;
+            }
+            _bitUnclear[bitCount] = 1;
+            _bitFirstSample[bitCount] = slowBitFirstSample;
+            _bitLastSample[bitCount] = slowPossibleReframeIndex - 1;
+            _bitL1[bitCount] = 0;
+            bitCount++;
+          } else if (bitCount > 0) {
+            // Bundle the cycles up to the transition into the previous bit and mark it as unclear
+            if (bitCount<50) console.log("pushBitSlow: transition confirmed: add to previous");
+            _bitUnclear[bitCount - 1] = 1;
+            _bitLastSample[bitCount - 1] = slowPossibleReframeIndex - 1;
+          }
+        }
 
         // Use the transition point as first cycle of the next bit
         slowCycles = (slowPossibleReframeKind === 'medium') ? 0 : 1;
@@ -1154,8 +1159,9 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     // will potentially early terminate where the ROM's algorithm on its own would not.)
     slowBitUnclear = slowBitUnclear || cycleUnclear;
     slowCycles++;
-    if (bitCount <50) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, cycleFrequency, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
-    // if (bitCount>=256948 && bitCount <=256951) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, cycleFrequency, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
+    // if (bitCount <50) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, slowBitUnclear, cycleUnclear, cycleFrequency, lengthAbove, lengthBelow, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
+    if (bitCount>=222014 && bitCount <=222018) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, slowBitUnclear, cycleUnclear, cycleFrequency, lengthAbove, lengthBelow, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
+    // if (bitCount>=256948 && bitCount <=256951) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, slowBitUnclear, cycleUnclear, cycleFrequency, lengthAbove, lengthBelow, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
 
     if (slowCycles == 1) {
       // The alignment bit - the ROM ignores the length of this bit
