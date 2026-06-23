@@ -14,11 +14,11 @@
  *
  * When TAP files contain ORICTAPE_META metadata (from snapshot.ts), differences
  * are classified by severity:
- *   REGRESSION — was clean, now corrupted or missing
- *   DEGRADED   — was corrupted, now more corrupted
+ *   REGRESSION — a hard error (chkErr/structural) appeared: clean→error or unclear→error
+ *   DEGRADED   — materially worse, no new hard error: clean→unclear, or error→error ≥50% worse
  *   CHANGED    — was clean, still clean, but different content
- *   EQUIVALENT — was corrupted, still corrupted, similar severity
- *   IMPROVED   — was corrupted, now less corrupted or clean
+ *   SIMILAR    — marginal change within an already-imperfect line
+ *   IMPROVED   — fewer issues, error→unclear, or back to clean
  */
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'fs';
@@ -51,8 +51,8 @@ const sanitiseHighlighted = (s: string) => sanitise(s).replace(/ /g, '_');
 // ── Severity types ───────────────────────────────────────────────────────────
 
 type Severity =
-  | 'regression'          // was clean, now corrupted or missing
-  | 'degraded'            // significantly worsened: warning→error, or issues increased ≥50%
+  | 'regression'          // a hard error appeared: clean→error or unclear→error
+  | 'degraded'            // materially worse, no new hard error: clean→unclear, or error→error ≥50%
   | 'changed'             // was clean, still clean, different content
   | 'similar-degraded'    // marginally worsened (below degraded threshold)
   | 'similar-equivalent'  // same level of issues, just different
@@ -154,13 +154,42 @@ function editMetaDiffers(a: LineStats, b: LineStats): boolean {
 }
 
 /**
- * Classify a conflict between baseline and current versions of a line.
+ * For a same-text (consensus) line, true iff baseline and current carry the
+ * identical byte-health pattern — the same bytes flagged unclear and chkErr in
+ * the same positions, and the same structural flags.  Same issue COUNT but
+ * different positions counts as a difference (so it surfaces), not a match.
+ */
+function healthPatternIdentical(
+  baseProg: Program, baseIdx: number,
+  currProg: Program, currIdx: number,
+): boolean {
+  const bl = baseProg.lines[baseIdx];
+  const cl = currProg.lines[currIdx];
+  if (bl.lenErr !== cl.lenErr || bl.earlyEnd !== cl.earlyEnd || bl.nonMonotonic !== cl.nonMonotonic) {
+    return false;
+  }
+  const span = bl.lastByte - bl.firstByte;
+  if (span !== cl.lastByte - cl.firstByte) return false;
+  for (let k = 0; k <= span; k++) {
+    const b  = baseProg.bytes[bl.firstByte + k];
+    const cu = currProg.bytes[cl.firstByte + k];
+    if ((b?.unclear ?? false) !== (cu?.unclear ?? false)) return false;
+    if ((b?.chkErr  ?? false) !== (cu?.chkErr  ?? false)) return false;
+  }
+  return true;
+}
+
+/**
+ * Classify a baseline→current health transition for a line (health: clean <
+ * unclear/"warning" < error).  Also used for same-text lines whose only
+ * difference is byte health; the caller resolves the truly-identical case first
+ * (via healthPatternIdentical), so "both clean" never reaches here from that path.
  *
- * IMPROVED (green):   error → clean, error → warning-only, warning → clean
- * DEGRADED (red):     warning → error, or total issues increased ≥50%
- * CHANGED (yellow):   clean → clean (different content)
- * REGRESSION (red):   clean → non-clean
- * SIMILAR (yellow):   everything else (marginal changes in already-imperfect lines)
+ * REGRESSION (red):    a hard error appeared — clean→error or unclear→error
+ * DEGRADED   (red):    materially worse, no new hard error — clean→unclear, or error→error ≥50%
+ * IMPROVED   (green):  error→unclear, →clean, or total issues down ≥50%
+ * CHANGED    (yellow): clean → clean, different content (conflict lines only)
+ * SIMILAR    (yellow): marginal change within an already-imperfect line
  */
 function classifyConflict(
   baseProg: Program, baseLineIdx: number,
@@ -171,14 +200,16 @@ function classifyConflict(
 
   // Clean → anything different.
   if (base.health === 'clean' && curr.health === 'clean')    return 'changed';
-  if (base.health === 'clean')                                return 'regression';
+  // Clean → not clean: a hard error is a REGRESSION; losing clean status to
+  // unclear-only is the milder DEGRADED.
+  if (base.health === 'clean')  return curr.health === 'error' ? 'regression' : 'degraded';
 
   // Anything → clean.
   if (curr.health === 'clean')                                return 'improved';
 
-  // Warning → ...
+  // Unclear ("warning") → ...
   if (base.health === 'warning') {
-    if (curr.health === 'error')                              return 'similar-degraded';
+    if (curr.health === 'error')                              return 'regression';  // a hard error appeared
     // Both warning — compare counts.
     if (curr.unclearCount < base.unclearCount)                return 'similar-improved';
     if (curr.unclearCount > base.unclearCount)                return 'similar-degraded';
@@ -504,11 +535,11 @@ Options:
   -h, --help       Show full help
 
 Severity levels:
-  REGRESSION    Was clean, now corrupted or missing (red)
-  DEGRADED      Significantly worsened (red)
+  REGRESSION    A hard error appeared: clean→error or unclear→error (red, fails run)
+  DEGRADED      Materially worse, no new hard error: clean→unclear, or error+50% (red, fails run)
   CHANGED       Was clean, still clean, different content (yellow)
   SIMILAR       Marginal change in already-imperfect lines (yellow)
-  IMPROVED      Significantly improved or newly recovered (green)
+  IMPROVED      Fewer issues, error→unclear, or back to clean (green)
 
 Exit code: 1 if regressions/degraded, 0 otherwise.`);
   process.exit(0);
@@ -765,13 +796,14 @@ for (const pair of pairs) {
     const currSrc = line.sources.find(s => s.tapeIdx === 1);
 
     if (baseSrc && currSrc) {
-      if (line.status === 'consensus') {
-        // Consensus on BASIC text — but still check for edit-metadata drift
-        // (edit flags, originalBytesDelta).  These don't affect the decoded
-        // program's semantics but indicate provenance changes worth surfacing
-        // (e.g. when validating that the tapEncoder / merger preserve edit
-        // tracking faithfully).  Report as 'changed', not a regression.
-        // Suppressed entirely under --ignore-edits.
+      // A same-text ('consensus') line whose byte HEALTH is also byte-for-byte
+      // identical is truly unchanged — only its edit-provenance might differ
+      // (edit flags / originalBytesDelta), surfaced as 'changed' unless
+      // --ignore-edits.  Otherwise — the text differs, OR the text agrees but the
+      // decoder flagged different bytes unclear/chkErr — classify the health
+      // transition (clean→unclear, more/fewer unclear, →error, ...).
+      if (line.status === 'consensus'
+          && healthPatternIdentical(baseProg, baseSrc.lineIdx, currProg, currSrc.lineIdx)) {
         const baseStats = getLineStats(baseProg, baseSrc.lineIdx);
         const currStats = getLineStats(currProg, currSrc.lineIdx);
         if (!ignoreEdits && editMetaDiffers(baseStats, currStats)) {
@@ -956,11 +988,14 @@ if (totalDiffs > 0) {
   console.log(`Line differences: ${sevParts.join(', ')}`);
 }
 
-const hasRegressions = globalSeverity.regression > 0 || globalSeverity.degraded > 0;
+const hasRegressions = globalSeverity.regression > 0;
+const hasDegraded    = globalSeverity.degraded > 0;
 const hasChanges     = globalSeverity.changed > 0;
 console.log('');
 if (hasRegressions) {
   console.log(c.red('Result: REGRESSIONS DETECTED'));
+} else if (hasDegraded) {
+  console.log(c.red('Result: DEGRADED (no hard regressions)'));
 } else if (hasChanges) {
   console.log(c.yellow('Result: CHANGES DETECTED (no regressions)'));
 } else if (totalDiffs > 0) {
@@ -975,4 +1010,6 @@ if (!verbose && totalDiffs > 0) {
   console.log(c.dim('For full details, re-run with --verbose or -v'));
 }
 
-process.exit(hasRegressions ? 1 : 0);
+// Hard regressions and degradations both fail the run; degraded gets its own
+// headline above but still exits non-zero.
+process.exit((hasRegressions || hasDegraded) ? 1 : 0);
