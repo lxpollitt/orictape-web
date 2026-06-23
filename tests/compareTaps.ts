@@ -511,8 +511,10 @@ function highlightElementDiffs(
 
 const rawArgs = process.argv.slice(2);
 const verbose     = rawArgs.includes('--verbose') || rawArgs.includes('-v');
+const brief       = rawArgs.includes('--brief') || rawArgs.includes('-b');
+const briefMode   = brief && !verbose;   // per-file counts only; -v wins if both given
 const ignoreEdits = rawArgs.includes('--ignore-edits');
-const args = rawArgs.filter(a => a !== '--verbose' && a !== '-v' && a !== '--ignore-edits');
+const args = rawArgs.filter(a => !['--verbose', '-v', '--brief', '-b', '--ignore-edits'].includes(a));
 
 const wantsHelp = rawArgs.includes('--help') || rawArgs.includes('-h');
 
@@ -530,6 +532,7 @@ Filter:
 
 Options:
   -v, --verbose    Show identical/structural-only files and SIMILAR line details
+  -b, --brief      Per-file counts only — suppress the per-line detail (ignored if -v given)
   --ignore-edits   Suppress edit-provenance differences (edit flags + originalBytesDelta).
                    Useful when comparing against older baselines that didn't preserve edit state.
   -h, --help       Show full help
@@ -552,6 +555,7 @@ if (args.length < 2) {
 
 Options:
   -v, --verbose    Show identical/structural-only files and SIMILAR line details
+  -b, --brief      Per-file counts only — suppress the per-line detail (ignored if -v given)
   --ignore-edits   Suppress edit-provenance differences (edit flags + originalBytesDelta)
   -h, --help       Show full help`);
   process.exit(1);
@@ -897,13 +901,15 @@ for (const pair of pairs) {
   // red where byte values differ) and a delta-bytes suffix.  Field-level
   // summaries (name, fileType, etc.) are appended below for context.
   if (headerDiffs.length > 0 || headerEditMetaDiffers) {
-    const { aStr, bStr } = formatHeaderBytes(baseProg, currProg);
-    const [aDelta, bDelta] = formatDeltaPair(baseProg.header.originalBytesDelta, currProg.header.originalBytesDelta);
     console.log(`  Header: ${severityLabel('changed')}`);
-    console.log(`    baseline: ${aStr}${aDelta}`);
-    console.log(`    current:  ${bStr}${bDelta}`);
-    for (const hd of headerDiffs) {
-      console.log(`    - ${hd.field}: ${hd.baseVal} → ${hd.currVal}`);
+    if (!briefMode) {
+      const { aStr, bStr } = formatHeaderBytes(baseProg, currProg);
+      const [aDelta, bDelta] = formatDeltaPair(baseProg.header.originalBytesDelta, currProg.header.originalBytesDelta);
+      console.log(`    baseline: ${aStr}${aDelta}`);
+      console.log(`    current:  ${bStr}${bDelta}`);
+      for (const hd of headerDiffs) {
+        console.log(`    - ${hd.field}: ${hd.baseVal} → ${hd.currVal}`);
+      }
     }
   }
 
@@ -929,10 +935,12 @@ for (const pair of pairs) {
     }
   }
 
-  // Show detail for each classified line.
+  // Show detail for each classified line (suppressed under --brief — the
+  // per-file counts line above is the digest).
   const isSimilar = (s: Severity) => s === 'similar-degraded' || s === 'similar-equivalent' || s === 'similar-improved';
 
   for (const cl of classifiedLines) {
+    if (briefMode) break;
     // In non-verbose mode, skip SIMILAR lines entirely — the per-file summary has the counts.
     if (!verbose && isSimilar(cl.severity)) continue;
 
