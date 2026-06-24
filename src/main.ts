@@ -1,5 +1,6 @@
 import './style.css';
 import { parseWavFile } from './wavfile';
+import { conditionSamples } from './tapeAnalog';
 import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
@@ -619,6 +620,7 @@ fileInput.addEventListener('change', async () => {
       let sampleRate: number;
       try { ({ left: samples, sampleRate } = parseWavFile(buffer)); }
       catch (err) { showError(`${file.name}: ${err}`); return; }
+      samples = conditionSamples(samples, sampleRate);
 
       const result = await decodeInWorker(buffer);
       if (!result.ok) { showError(`${file.name}: ${result.error}`); return; }

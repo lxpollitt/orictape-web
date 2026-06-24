@@ -8,6 +8,7 @@
 
 import { flagTokenisationMismatches, byteSequenceSyntaxChecker } from './editor';
 import { oricByteToChar } from './oricCharset';
+import { conditionSamples } from './tapeAnalog';
 
 // BitInfo is used by the UI when reading individual bits out of a BitStream.
 export interface BitInfo {
@@ -721,6 +722,8 @@ export const INVALID_CODE_LITERALS = new Set(
 );
 
 export function readBitStreams(samples: Int16Array, sampleRate = 44100): BitStream[] {
+  samples = conditionSamples(samples, sampleRate);
+
   // Compute file-level peak amplitude once, used to scale noise floor thresholds
   // to compensate for different ADC recording levels.
   let fileMin = 0, fileMax = 0;
