@@ -1,6 +1,4 @@
 import './style.css';
-import { parseWavFile } from './wavfile';
-import { conditionSamples } from './tapeAnalog';
 import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
 import type { Program, LineInfo, ByteInfo } from './decoder';
@@ -616,17 +614,14 @@ fileInput.addEventListener('change', async () => {
         fromTap:  true,
       });
     } else {
-      let samples: Int16Array;
-      let sampleRate: number;
-      try { ({ left: samples, sampleRate } = parseWavFile(buffer)); }
-      catch (err) { showError(`${file.name}: ${err}`); return; }
-      samples = conditionSamples(samples, sampleRate);
-
+      // Decode AND conditioning both run in the worker (off the main thread); it hands
+      // back the conditioned samples for the waveform view, so the main thread never runs
+      // the heavy input-stage conditioning itself (that was freezing the UI on big tapes).
       const result = await decodeInWorker(buffer);
       if (!result.ok) { showError(`${file.name}: ${result.error}`); return; }
 
       assignProgNumbers(result.programs);
-      tapes.push({ filename: file.name, samples, sampleRate, programs: result.programs, fromTap: false });
+      tapes.push({ filename: file.name, samples: result.samples, sampleRate: result.sampleRate, programs: result.programs, fromTap: false });
     }
     // Set originalSource on any program where it wasn't already filled in
     // by TAP metadata.  For WAV decodes this is always recomputed; for

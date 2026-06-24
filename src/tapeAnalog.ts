@@ -115,6 +115,9 @@ export interface InputStageConfig {
    *  TAPE_IN. Only matters for 'ic3a'/'cb1' (it sets how hard IC3A clips); inert
    *  for 'ac' (linear → the decoder's midline adapts). */
   volume?: number;
+  /** Sub-steps per sample for the diodes-on coupled ODE (default NET_OVERSAMPLE).
+   *  Lower = faster load; verify it doesn't move the output before trusting a low value. */
+  oversample?: number;
 }
 
 /**
@@ -197,7 +200,7 @@ export function applyInputStage(
     //   'ic3anet' → IC3A analog output, flipped in-phase + normalised (waveform view)
     //   'vref'/'sum' → that internal node's deviation from 2.5 V, FIXED scale (±1 V ≈ full
     //                  height) so magnitude is honest, with the peak logged to the console.
-    const K = NET_OVERSAMPLE, dts = dt / K;
+    const K = cfg.oversample ?? NET_OVERSAMPLE, dts = dt / K;
     const G5 = 1 / R5, Gf = 1 / RF_A, tauC6 = R5 * C6;
     const NODE_VIEW = 28000;     // int16 per volt of node deviation from 2.5 V
     let Vj1 = VREF, vref = VREF, vinPrev = 0, outA = VREF, sum = VREF;

@@ -721,8 +721,8 @@ export const INVALID_CODE_LITERALS = new Set(
     .concat(0x3F)  // ? (PRINT shorthand)
 );
 
-export function readBitStreams(samples: Int16Array, sampleRate = 44100): BitStream[] {
-  samples = conditionSamples(samples, sampleRate);
+export function readBitStreams(samples: Int16Array, sampleRate = 44100, preconditioned = false): BitStream[] {
+  if (!preconditioned) samples = conditionSamples(samples, sampleRate);  // worker conditions once, then passes preconditioned=true
 
   // Compute file-level peak amplitude once, used to scale noise floor thresholds
   // to compensate for different ADC recording levels.
