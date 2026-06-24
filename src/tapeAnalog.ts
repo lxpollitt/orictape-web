@@ -18,7 +18,8 @@
 // Applied once at load (conditionSamples), so the decoder and the waveform view
 // both work from the same conditioned signal.  Depth 0 = raw passthrough.
 export const INPUT_STAGE_DEPTH: number = 0;   // 0 off | 1 AC-couple | 2 +IC3A (clip) | 3 +IC3B/TR1 (CB1 square)
-export const INPUT_STAGE_VOLUME       = 50;   // cassette volume %, 0-100 (Oric manual: start at 50; decks often ~70-80)
+export const INPUT_STAGE_DIODES       = true; // model D2/D3 + the dynamic-VREF network. Only bites at stages 2-3 (where IC3A clips); inert at 0-1.
+export const INPUT_STAGE_VOLUME       = 50;   // cassette volume %, 0-100 (Oric manual: start at 50; ~65 keeps the diodes conducting - inert below ~55%)
 
 
 /** Tape input-stage component values (OricSchematics Issue 6.1, tape.sch). */
@@ -31,6 +32,20 @@ const GAIN_A = 2.2;  // IC3A gain = (R29+RP3B)/R5 = 22k/10k
 const R7  = 1e3;     // IC3A output → IC3B pin 5 (+)
 const R8  = 100e3;   // IC3B output → pin 5 positive feedback (the Schmitt)
 
+// ── Dynamic VREF / diode network (INPUT_STAGE_DIODES): D2/D3 + the VREF node, as-is ──
+// With diodes OFF the inverting input (SUM) is assumed to sit exactly at a fixed 2.5 V.
+// Diodes ON drops that: when IC3A clips, D2/D3 clamp SUM to VREF±Vf and inject that
+// current onto VREF, which is a real node - the RP3C/RP3D divider (5k source impedance)
+// with C25 across it, not a stiff rail.  Built from the component values; the sim
+// decides what it does.
+const VDD      = 5.0;        // +5V rail
+const RP3D     = 10e3;       // VREF → +5V
+const RP3C     = 10e3;       // VREF → DGND
+const C25      = 100e-9;     // VREF bypass cap
+const RF_A     = GAIN_A * R5; // IC3A feedback R29+RP3B = 22k (GAIN_A = RF_A/R5)
+const DIODE_VF = 0.6;        // D2/D3 forward drop (generic small-signal Si)
+const NET_OVERSAMPLE = 16;   // sub-steps per sample for the coupled ODE
+
 /** C6/R5 AC-coupling high-pass corner: 1/(2π·R5·C6) ≈ 339 Hz. Below the
  *  1200-2400 Hz signal band, so in-band it passes the signal; its effect is to
  *  droop each cell (RC ≈ one bit-cell), which shifts the mid-line crossings
@@ -42,12 +57,14 @@ const DEFAULT_HP_FC = 1 / (2 * Math.PI * R5 * C6);
 const CB1_AMPLITUDE = 20000;
 
 // Fidelity notes (for the schematic authenticity check):
-//  - D2/D3 (antiparallel diodes across IC3A's *inputs*) are NOT modelled
-//    separately; their dominant effect - bounding the swing once IC3A saturates -
-//    is represented by IC3A's output rails [VOL,VOH].  A faithful D2/D3 would need
-//    op-amp slew/recovery dynamics and only bites at high vPeak.
-//  - VREF is a constant: RP3C/RP3D is matched and C25-bypassed, so the network is
-//    a stiff 2.5 V reference; no need to model it dynamically.
+//  - Diodes OFF: IC3A's output rails [VOL,VOH] stand in for D2/D3, and VREF is a fixed
+//    2.5 V.  Diodes ON drops both - it models D2/D3 as a SUM clamp injecting current
+//    onto a real VREF node (RP3C/RP3D divider + C25).  Neither models the op-amp's own
+//    slew/GBW: at 0.3 V/µs and ~455 kHz those are ~7-400x faster than the tape signal in
+//    the usable volume range, so they don't move the crossings (slew-headroom calc) -
+//    the clip and the diode current are the live effects.
+//  - Supply noise on VREF (what C25 chiefly rejects on real hardware) is absent here:
+//    the input is a clean tape capture, so there is no +5V switching to reject.
 
 /** Cassette-player volume → TAPE_IN volts: the peak voltage the loudest sample maps
  *  to at full volume (100%).  ~2.5 V peak is the firm-data anchor - it puts the
@@ -88,9 +105,11 @@ export interface InputStageConfig {
   /** AC-coupling high-pass corner, Hz. Defaults to the C6/R5 component value
    *  (~339 Hz); exposed so a setting can sweep it. */
   highPassFc?: number;
-  /** Which node to tap (how far down the chain): 'ac' = C6/R5 output, 'ic3a' =
-   *  + IC3A (gain + clip), 'cb1' = + IC3B/TR1 (the CB1 square). Default 'ac'. */
-  stage?: 'ac' | 'ic3a' | 'cb1';
+  /** Which node to tap: 'ac' = C6/R5 output, 'ic3a' = + IC3A (gain + clip), 'cb1' =
+   *  + IC3B/TR1 (the CB1 square).  The '…net' variants add the D2/D3 + dynamic-VREF
+   *  network: 'cb1net'/'ic3anet' are 'cb1'/'ic3a' with it on; 'vref'/'sum' expose that
+   *  network's internal node voltages (script diagnostics - they don't decode). Default 'ac'. */
+  stage?: 'ac' | 'ic3a' | 'cb1' | 'cb1net' | 'ic3anet' | 'vref' | 'sum';
   /** Cassette-player volume, 0-100 %. Maps the tape signal's peak (a trimmed max,
    *  so a transient can't skew it) to (volume/100) × HEADPHONE_MAX_VPEAK volts at
    *  TAPE_IN. Only matters for 'ic3a'/'cb1' (it sets how hard IC3A clips); inert
@@ -169,6 +188,64 @@ export function applyInputStage(
     return out;
   }
 
+  if (stage === 'cb1net' || stage === 'ic3anet' || stage === 'vref' || stage === 'sum') {
+    // Diodes-on network: full chain with D2/D3 and the VREF node modelled as drawn.  Oversampled
+    // because the diode current pulses within each carrier cycle.  IC3A is ideal-but-
+    // railed (its slew/GBW don't bite in-band); the live extras over 'cb1' are the diode
+    // clamp on SUM and the current it injects onto a *real* VREF node (RP3C/RP3D + C25).
+    //   'cb1net'  → CB1 square (for decoding)
+    //   'ic3anet' → IC3A analog output, flipped in-phase + normalised (waveform view)
+    //   'vref'/'sum' → that internal node's deviation from 2.5 V, FIXED scale (±1 V ≈ full
+    //                  height) so magnitude is honest, with the peak logged to the console.
+    const K = NET_OVERSAMPLE, dts = dt / K;
+    const G5 = 1 / R5, Gf = 1 / RF_A, tauC6 = R5 * C6;
+    const NODE_VIEW = 28000;     // int16 per volt of node deviation from 2.5 V
+    let Vj1 = VREF, vref = VREF, vinPrev = 0, outA = VREF, sum = VREF;
+    const analog = stage === 'ic3anet' ? new Float32Array(n) : null;
+    const node = stage === 'vref' || stage === 'sum' ? stage : null;
+    let m = 1e-9, nodePeak = 0;
+    for (let i = 0; i < n; i++) {
+      const vinS = samples[i] * toVolts;
+      const dvin = (vinS - vinPrev) / K;                       // input change per sub-step
+      for (let k = 0; k < K; k++) {
+        outA = vref - GAIN_A * (Vj1 - vref);                   // IC3A (inverting) about the live VREF
+        if (outA <= VOH && outA >= VOL) {
+          sum = vref;                                          // not railed: op-amp holds SUM=VREF
+        } else {
+          outA = outA > VOH ? VOH : VOL;                       // railed
+          const sf = (Vj1 * G5 + outA * Gf) / (G5 + Gf);       // SUM node-solve (feedback broken)
+          sum = sf > vref + DIODE_VF ? vref + DIODE_VF         // D2/D3 clamp |SUM-VREF| ≤ Vf
+              : sf < vref - DIODE_VF ? vref - DIODE_VF : sf;
+        }
+        const iDiode = (Vj1 - sum) * G5 + (outA - sum) * Gf;   // diode current → VREF (0 unclamped)
+        vref += ((VDD - vref) / RP3D - vref / RP3C + iDiode) / C25 * dts;  // VREF node (C25)
+        Vj1  += dvin - (Vj1 - sum) * dts / tauC6;              // C6/R5, terminated at the real SUM
+        const sense = (outA * R8 + st * R7) / (R7 + R8);       // IC3B pin 5
+        if (st > vref && sense < vref) st = VOL;               // Schmitt about the live VREF
+        else if (st < vref && sense > vref) st = VOH;
+      }
+      vinPrev = vinS;
+      if (analog) {
+        const v = -(outA - vref);                             // flip inverted IC3A node → in phase
+        analog[i] = v;
+        const av = v < 0 ? -v : v; if (av > m) m = av;
+      } else if (node) {
+        const dev = (node === 'vref' ? vref : sum) - VREF;     // deviation from 2.5 V
+        const iv = Math.round(dev * NODE_VIEW);
+        out[i] = iv > 32767 ? 32767 : iv < -32767 ? -32767 : iv;
+        const ad = dev < 0 ? -dev : dev; if (ad > nodePeak) nodePeak = ad;
+      } else {
+        out[i] = st <= vref ? CB1_AMPLITUDE : -CB1_AMPLITUDE; // TR1 inverts → CB1 in phase
+      }
+    }
+    if (analog) {
+      const kk = 28000 / m;                                    // normalise to fill int16 (decoder is level-adaptive)
+      for (let i = 0; i < n; i++) out[i] = Math.round(analog[i] * kk);
+    }
+    if (node) console.log(`[input-stage ${node === 'vref' ? 'depth 6 VREF' : 'depth 7 SUM'}] peak deviation from 2.5 V = ${(nodePeak * 1000).toFixed(1)} mV  (view: ±1 V ≈ full height)`);
+    return out;
+  }
+
   // stage === 'ic3a': tap IC3A's analog output (inverted), flip it back into phase,
   // then normalise to fill int16 (the decoder is level-adaptive).
   const node = new Float32Array(n);
@@ -191,7 +268,10 @@ export function applyInputStage(
  *  depth 0).  Called at load so decode and display share the conditioned signal. */
 export function conditionSamples(samples: Int16Array, sampleRate: number): Int16Array {
   if (INPUT_STAGE_DEPTH <= 0) return samples;
-  const stage = INPUT_STAGE_DEPTH === 1 ? 'ac' : INPUT_STAGE_DEPTH === 2 ? 'ic3a' : 'cb1';
+  const d = INPUT_STAGE_DIODES;                          // diodes only act once IC3A clips (stages 2-3)
+  const stage = INPUT_STAGE_DEPTH === 1 ? 'ac'
+              : INPUT_STAGE_DEPTH === 2 ? (d ? 'ic3anet' : 'ic3a')
+              : (d ? 'cb1net' : 'cb1');
   return applyInputStage(samples, sampleRate, { stage, volume: INPUT_STAGE_VOLUME });
 }
 
