@@ -73,8 +73,6 @@ export interface LineInfo {
   _health?: LineSeverity;
 }
 
-// ── Line health utilities ────────────────────────────────────────────────────
-
 export type LineSeverity = 'error' | 'warning' | 'clean';
 
 export interface LineStatus {
@@ -82,331 +80,10 @@ export interface LineStatus {
   severity: 'error' | 'warning';
 }
 
-/**
- * Determine the overall health of a line: 'error', 'warning', or 'clean'.
- * Considers both line-level flags and byte-level flags.
- */
-export function lineHealth(prog: Program, lineIdx: number): LineSeverity {
-  const line = prog.lines[lineIdx];
-  if (line._health !== undefined) return line._health;
-
-  let health: LineSeverity = 'clean';
-
-  // Line-level flags.
-  if (line.lenErr || line.earlyEnd || line.nonMonotonic || line.tokenisationMismatch || line.tooLong) {
-    health = 'error';
-  }
-
-  // Element-level syntax errors/warnings.
-  if (health !== 'error' && line.elementErrors) {
-    for (const e of line.elementErrors) {
-      if (e === 'error') { health = 'error'; break; }
-      if (e === 'warning') health = 'warning';
-    }
-  }
-
-  // Byte-level waveform errors.
-  if (health !== 'error') {
-    for (let i = line.firstByte; i <= line.lastByte; i++) {
-      if (prog.bytes[i]?.chkErr) { health = 'error'; break; }
-    }
-  }
-  if (health !== 'error') {
-    for (let i = line.firstByte; i <= line.lastByte; i++) {
-      if (prog.bytes[i]?.unclear && health === 'clean') health = 'warning';
-    }
-  }
-
-  line._health = health;
-  return health;
-}
-
-/**
- * Invalidate the cached health for a line, forcing recalculation on next access.
- */
-export function invalidateLineHealth(line: LineInfo): void {
-  line._health = undefined;
-}
-
-/**
- * Oric memory address of this line's first byte.  For the first line this is
- * the header's start address; for subsequent lines it's the previous line's
- * next-line pointer value.  Pointer-driven: if a previous line had a corrupt
- * pointer, this line's firstAddr reflects what the pointer SAYS rather than
- * where the bytes actually sit in the canonical byte-position-to-address
- * mapping.  The divergence shows up as lenErr.
- */
-export function lineFirstAddr(prog: Program, lineIdx: number): number {
-  if (lineIdx === 0) return prog.header.startAddr;
-  return lineNextAddr(prog, lineIdx - 1);
-}
-
-/**
- * Value of this line's next-line pointer (2 bytes at firstByte, little-endian)
- * \u2014 the memory address where the next line should start.  Read directly
- * from prog.bytes so it's always consistent with the current byte state.
- */
-export function lineNextAddr(prog: Program, lineIdx: number): number {
-  const line = prog.lines[lineIdx];
-  return prog.bytes[line.firstByte].v | (prog.bytes[line.firstByte + 1].v << 8);
-}
-
-/**
- * Return true if the line has any hard error (chkErr bytes, structural issues).
- * Unclear-only lines return false.
- */
-export function lineHasHardError(prog: Program, lineIdx: number): boolean {
-  return lineHealth(prog, lineIdx) === 'error';
-}
-
-/**
- * Return a list of status messages for a line, describing each issue found.
- * Used by the status bar and other UI elements that need to display error details.
- */
-export function lineStatuses(prog: Program, lineIdx: number): LineStatus[] {
-  const line = prog.lines[lineIdx];
-  const statuses: LineStatus[] = [];
-
-  if (line.earlyEnd) {
-    statuses.push({ message: 'Unexpected end of program · null pointer before header end address', severity: 'error' });
-  }
-  if (line.lenErr) {
-    const expected = lineNextAddr(prog, lineIdx) - lineFirstAddr(prog, lineIdx);
-    const actual   = line.lastByte - line.firstByte + 1;
-    statuses.push({ message: `Line length error (expected ${expected} bytes, found ${actual})`, severity: 'error' });
-  }
-  if (line.nonMonotonic) {
-    statuses.push({ message: 'Non-monotonic line number', severity: 'error' });
-  }
-  if (line.tokenisationMismatch) {
-    statuses.push({ message: 'Tokenisation mismatch', severity: 'error' });
-  }
-  if (line.tooLong) {
-    statuses.push({ message: 'Line exceeds 255-byte maximum', severity: 'error' });
-  }
-
-  // Element-level syntax issues (counts populated by buildLineElements).
-  if (line.unknownKeywordCount) {
-    const n = line.unknownKeywordCount;
-    statuses.push({ message: `${n} unknown keyword${n !== 1 ? 's' : ''}`, severity: 'error' });
-  }
-  if (line.keywordInLiteralCount) {
-    const n = line.keywordInLiteralCount;
-    statuses.push({ message: `${n} unexpected keyword${n !== 1 ? 's' : ''} in literal`, severity: 'error' });
-  }
-  if (line.invalidReservedCharCount) {
-    const n = line.invalidReservedCharCount;
-    statuses.push({ message: `${n} invalid reserved character${n !== 1 ? 's' : ''}`, severity: 'error' });
-  }
-  if (line.invalidNonPrintableCount) {
-    const n = line.invalidNonPrintableCount;
-    statuses.push({ message: `${n} invalid non-printable character${n !== 1 ? 's' : ''}`, severity: 'error' });
-  }
-  if (line.nonPrintableInLiteralCount) {
-    const n = line.nonPrintableInLiteralCount;
-    statuses.push({ message: `${n} non-printable character${n !== 1 ? 's' : ''}`, severity: 'warning' });
-  }
-
-  // Byte-level waveform issues (summarised, not per-byte).
-  let chkErrCount = 0;
-  let unclearCount = 0;
-  for (let i = line.firstByte; i <= line.lastByte; i++) {
-    const b = prog.bytes[i];
-    if (b?.chkErr)       chkErrCount++;
-    else if (b?.unclear) unclearCount++;
-  }
-  if (chkErrCount > 0) {
-    statuses.push({ message: `${chkErrCount} checksum error byte${chkErrCount !== 1 ? 's' : ''}`, severity: 'error' });
-  }
-  if (unclearCount > 0) {
-    statuses.push({ message: `${unclearCount} unclear byte${unclearCount !== 1 ? 's' : ''}`, severity: 'warning' });
-  }
-
-  return statuses;
-}
-
-/**
- * Determine the highest severity across all lines in a program.
- */
-export function programHealth(prog: Program): LineSeverity {
-  let worst: LineSeverity = 'clean';
-  for (let i = 0; i < prog.lines.length; i++) {
-    const h = lineHealth(prog, i);
-    if (h === 'error') return 'error';
-    if (h === 'warning') worst = 'warning';
-  }
-  return worst;
-}
-
-/**
- * True if the program contains at least one byte marked as an explicit
- * (user-typed) edit.  Automatic edits (e.g. pointer fixups) don't count
- * because they get re-derived on reparse and aren't user-entered state.
- *
- * Used by destructive UI actions (e.g. split / join) to decide whether
- * to surface a "your edits will be lost" warning to the user.
- */
-export function programHasExplicitEdits(prog: Program): boolean {
-  return prog.bytes.some(b => b.edited === 'explicit');
-}
-
-/**
- * Summarise error/warning counts across all lines in a program.
- * Returns a compact array of { label, count, severity } suitable for display.
- */
-export function programSummary(prog: Program): { label: string; count: number; severity: LineSeverity }[] {
-  let errorLines = 0;
-  let warningLines = 0;
-  let cleanLines = 0;
-  for (let i = 0; i < prog.lines.length; i++) {
-    const h = lineHealth(prog, i);
-    if (h === 'error') errorLines++;
-    else if (h === 'warning') warningLines++;
-    else cleanLines++;
-  }
-  const result: { label: string; count: number; severity: LineSeverity }[] = [];
-  result.push({ label: 'lines', count: prog.lines.length, severity: 'clean' });
-  if (cleanLines > 0)   result.push({ label: 'clean', count: cleanLines, severity: 'clean' });
-  if (errorLines > 0)   result.push({ label: 'errors', count: errorLines, severity: 'error' });
-  if (warningLines > 0) result.push({ label: 'warnings', count: warningLines, severity: 'warning' });
-  return result;
-}
 
 
-/**
- * Build the elements array and display text for a line from its bytes.
- * Uses byteSequenceSyntaxChecker to decide whether bytes need escaping
- * (e.g. literal ASCII that should have been a keyword token).
- * Sets line.v and line.elements.
- */
-export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
-  const elements: string[] = [];
-  const errors: ('error' | 'warning' | null)[] = [];
-  let hasAnyError = false;
 
-  // Reset syntax-level counters.
-  let unknownKeywordCount = 0;
-  let keywordInLiteralCount = 0;
-  let invalidReservedCharCount = 0;
-  let invalidNonPrintableCount = 0;
-  let nonPrintableInLiteralCount = 0;
 
-  // Line number from bytes: firstByte+2 (lo) and firstByte+3 (hi).
-  const lineNum = bytes[line.firstByte + 2].v + bytes[line.firstByte + 3].v * 256;
-  elements.push(`${lineNum} `);
-  errors.push(null);  // line number element — syntax checker doesn't cover this
-
-  // Content bytes: firstByte+4 to lastByte. (The lastByte should be the 0x00 terminator,
-  // but corrupt lines may have it earlier or missing in rare cases. Known example is from
-  // the last line of the program, but this code is more defensive and copes with all lines.)
-  byteSequenceSyntaxChecker(0x00, true);  // reset
-  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
-    const b = bytes[i].v;
-    if (b === 0) break;  // terminator
-    const syntax = byteSequenceSyntaxChecker(b);
-    if (syntax.severity !== 'ok') {
-      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
-      errors.push(syntax.severity);
-      hasAnyError = true;
-      // Increment the appropriate counter using the reason from the syntax checker.
-      if (syntax.reason === 'unknownKeyword') unknownKeywordCount++;
-      else if (syntax.reason === 'keywordInLiteral') keywordInLiteralCount++;
-      else if (syntax.reason === 'invalidReservedChar') invalidReservedCharCount++;
-      else if (syntax.reason === 'invalidNonPrintable') invalidNonPrintableCount++;
-      else if (syntax.reason === 'nonPrintableInLiteral') nonPrintableInLiteralCount++;
-    } else if (b >= 0x20 && b <= 0x7E) {
-      elements.push(oricByteToChar(b));
-      errors.push(null);
-    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
-      elements.push(KEYWORDS[b - 0x80]);
-      errors.push(null);
-    } else {
-      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
-      errors.push('error');
-      hasAnyError = true;
-    }
-  }
-  line.v = elements.join('');
-  line.elements = elements;
-  line.elementErrors = hasAnyError ? errors : undefined;
-  // Stored line size = (lastByte - firstByte + 1), counting the
-  // 2-byte next-line pointer, 2 line-number bytes, content bytes,
-  // and the trailing 0x00 terminator.  Oric BASIC's line buffer
-  // tops out at 255 bytes — anything bigger is unloadable on 1.1
-  // and uneditable on 1.0.
-  line.tooLong = (line.lastByte - line.firstByte + 1) > 255;
-  line.unknownKeywordCount = unknownKeywordCount || undefined;
-  line.keywordInLiteralCount = keywordInLiteralCount || undefined;
-  line.invalidReservedCharCount = invalidReservedCharCount || undefined;
-  line.invalidNonPrintableCount = invalidNonPrintableCount || undefined;
-  line.nonPrintableInLiteralCount = nonPrintableInLiteralCount || undefined;
-  invalidateLineHealth(line);
-}
-
-/**
- * Populate per-element error severities on each line in a program.
- * Consolidates all element-level error detection into one pass:
- *   - Non-monotonic line number (element 0) → 'error'
- *   - [UNKNOWN_KEYWORD] element → 'error'
- *   - Syntax mismatch at this element's byte → 'error'
- *   - Underlying byte has chkErr → 'error'
- *   - Underlying byte has unclear → 'warning'
- *
- * Only allocates the elementErrors array if at least one element has an issue.
- * Must be called after flagNonMonotonicLines and flagTokenisationMismatches.
- */
-export function flagElementErrors(prog: Program): void {
-  for (let li = 0; li < prog.lines.length; li++) {
-    const line = prog.lines[li];
-    // Start from syntax-level errors set by buildLineElements, or a fresh array.
-    const errors: ('error' | 'warning' | null)[] = line.elementErrors
-      ? [...line.elementErrors]
-      : new Array(line.elements.length).fill(null);
-    // The line-number element (errors[0]) is purely flag-derived — see
-    // buildLineElements where it's always pushed as `null` ("syntax
-    // checker doesn't cover this").  The only sources of `'error'`
-    // here are `line.nonMonotonic` and chkErr on the line-number
-    // bytes, both recomputed below from current state.  Inheriting
-    // the prior value would keep stale `'error'` after the underlying
-    // flag is cleared by another line's edit (e.g. fixing the line
-    // number that made *this* line non-monotonic by editing a
-    // neighbour) — flagNonMonotonicLines correctly clears the flag,
-    // but the stale element severity would still render red until the
-    // bytes of this line were also touched.  Reset to null so the
-    // re-derivation below sees a clean slate.
-    errors[0] = null;
-    let hasAny = errors.some(e => e !== null);
-
-    for (let ei = 0; ei < line.elements.length; ei++) {
-      let severity = errors[ei];
-
-      // Non-monotonic line number.
-      if (ei === 0 && line.nonMonotonic && severity !== 'error') {
-        severity = 'error';
-      }
-
-      // Byte-level flags (only if no harder error already set).
-      if (!severity) {
-        if (ei === 0) {
-          const b2 = prog.bytes[line.firstByte + 2];
-          const b3 = prog.bytes[line.firstByte + 3];
-          if (b2?.chkErr || b3?.chkErr)       severity = 'error';
-          else if (b2?.unclear || b3?.unclear) severity = 'warning';
-        } else {
-          const b = prog.bytes[line.firstByte + 3 + ei];
-          if (b?.chkErr)       severity = 'error';
-          else if (b?.unclear) severity = 'warning';
-        }
-      }
-
-      errors[ei] = severity;
-      if (severity) hasAny = true;
-    }
-
-    line.elementErrors = hasAny ? errors : undefined;
-    invalidateLineHealth(line);
-  }
-}
 
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
 // This is ~10x more memory-efficient than an array of BitInfo objects and
@@ -428,176 +105,6 @@ export interface BitStream {
   lastSample: number;
   minVal: number;
   maxVal: number;
-}
-
-// Helper to read a single bit as a plain object (for UI use).
-export function streamBitAt(s: BitStream, i: number): BitInfo {
-  return {
-    v: s.bitV[i] as 0 | 1,
-    l1: s.bitL1[i],
-    firstSample: s.bitFirstSample[i],
-    lastSample: s.bitLastSample[i],
-    unclear: s.bitUnclear[i] === 1,
-  };
-}
-
-/**
- * Build a minimal empty BitStream — used for Programs that have no waveform
- * data (e.g. loaded from TAP files, or synthesized by the merger).
- */
-export function emptyBitStream(format: 'fast' | 'slow' = 'fast'): BitStream {
-  return {
-    format,
-    bitCount:       0,
-    bitV:           new Uint8Array(0),
-    bitL1:          new Uint16Array(0),
-    bitFirstSample: new Uint32Array(0),
-    bitLastSample:  new Uint32Array(0),
-    bitUnclear:     new Uint8Array(0),
-    bitMaxIndex:    new Uint32Array(0),
-    bitMinIndex:    new Uint32Array(0),
-    firstSample:    0,
-    lastSample:     0,
-    minVal:         0,
-    maxVal:         0,
-  };
-}
-
-/**
- * Split a BitStream into two at a given bit position.
- *
- * Returns [first, second] where `first` holds bits [0, bitPos) and `second`
- * holds bits [bitPos, bitCount).  Per-bit typed arrays are sliced into fresh
- * compact copies so the two halves own their own buffers (the original can
- * be garbage-collected when no longer referenced).
- *
- * Per-stream metadata is computed as follows:
- *   - `format` inherited by both halves
- *   - `firstSample` / `lastSample`: outer edges match the parent; inner
- *      edges come from the bit at the split boundary
- *   - `minVal` / `maxVal` inherited by both halves.  Each half's true
- *      amplitude range is a subset of the parent's, so inheriting gives
- *      conservative bounds — re-scanning is unnecessary for the UI
- *      thresholds that consume these values
- *
- * Edge cases:
- *   - `bitPos === 0` → first is empty, second is the whole stream
- *   - `bitPos === bitCount` → first is the whole stream, second is empty
- *
- * Throws if `bitPos` is outside [0, bitCount].
- */
-export function splitBitStream(stream: BitStream, bitPos: number): [BitStream, BitStream] {
-  const n = stream.bitCount;
-  if (bitPos < 0 || bitPos > n) {
-    throw new Error(`splitBitStream: bitPos ${bitPos} out of range [0, ${n}]`);
-  }
-  const first: BitStream = {
-    format:         stream.format,
-    bitCount:       bitPos,
-    bitV:           stream.bitV.slice(0, bitPos),
-    bitL1:          stream.bitL1.slice(0, bitPos),
-    bitFirstSample: stream.bitFirstSample.slice(0, bitPos),
-    bitLastSample:  stream.bitLastSample.slice(0, bitPos),
-    bitUnclear:     stream.bitUnclear.slice(0, bitPos),
-    bitMaxIndex:    stream.bitMaxIndex.slice(0, bitPos),
-    bitMinIndex:    stream.bitMinIndex.slice(0, bitPos),
-    firstSample:    stream.firstSample,
-    lastSample:     bitPos > 0 ? stream.bitLastSample[bitPos - 1] : stream.firstSample,
-    minVal:         stream.minVal,
-    maxVal:         stream.maxVal,
-  };
-  const second: BitStream = {
-    format:         stream.format,
-    bitCount:       n - bitPos,
-    bitV:           stream.bitV.slice(bitPos),
-    bitL1:          stream.bitL1.slice(bitPos),
-    bitFirstSample: stream.bitFirstSample.slice(bitPos),
-    bitLastSample:  stream.bitLastSample.slice(bitPos),
-    bitUnclear:     stream.bitUnclear.slice(bitPos),
-    bitMaxIndex:    stream.bitMaxIndex.slice(bitPos),
-    bitMinIndex:    stream.bitMinIndex.slice(bitPos),
-    firstSample:    bitPos < n ? stream.bitFirstSample[bitPos] : stream.lastSample,
-    lastSample:     stream.lastSample,
-    minVal:         stream.minVal,
-    maxVal:         stream.maxVal,
-  };
-  return [first, second];
-}
-
-/**
- * Concatenate one or more BitStreams into a single stream, in order.
- *
- * Per-bit typed arrays are concatenated in input order.  Each bit keeps its
- * original sample positions — so when the inputs came from non-adjacent
- * audio regions (e.g. user-initiated join across an audio gap), the result's
- * bitFirstSample / bitLastSample arrays are NOT monotonic: there will be a
- * jump at each seam.  This is fine for byte decoding (which indexes by bit
- * position, not sample position) and the waveform view renders the gap
- * naturally because it draws each bit at its own sample position.
- *
- * Per-stream metadata:
- *   - `format`: all inputs must match; throws otherwise
- *   - `firstSample`: first input's firstSample
- *   - `lastSample`:  last input's lastSample
- *   - `minVal` / `maxVal`: min / max across all inputs
- *
- * Throws if the input array is empty or the formats differ.  A single-stream
- * join returns the input unchanged (no defensive copy).
- */
-export function joinBitStreams(streams: BitStream[]): BitStream {
-  if (streams.length === 0) {
-    throw new Error('joinBitStreams: need at least one stream to join');
-  }
-  if (streams.length === 1) return streams[0];
-
-  const format = streams[0].format;
-  for (let i = 1; i < streams.length; i++) {
-    if (streams[i].format !== format) {
-      throw new Error(
-        `joinBitStreams: format mismatch at index ${i} ('${streams[i].format}' vs '${format}')`,
-      );
-    }
-  }
-  const total = streams.reduce((n, s) => n + s.bitCount, 0);
-
-  const bitV           = new Uint8Array(total);
-  const bitL1          = new Uint16Array(total);
-  const bitFirstSample = new Uint32Array(total);
-  const bitLastSample  = new Uint32Array(total);
-  const bitUnclear     = new Uint8Array(total);
-  const bitMaxIndex    = new Uint32Array(total);
-  const bitMinIndex    = new Uint32Array(total);
-  let offset = 0;
-  let minVal = streams[0].minVal;
-  let maxVal = streams[0].maxVal;
-  for (const s of streams) {
-    bitV          .set(s.bitV,           offset);
-    bitL1         .set(s.bitL1,          offset);
-    bitFirstSample.set(s.bitFirstSample, offset);
-    bitLastSample .set(s.bitLastSample,  offset);
-    bitUnclear    .set(s.bitUnclear,     offset);
-    bitMaxIndex   .set(s.bitMaxIndex,    offset);
-    bitMinIndex   .set(s.bitMinIndex,    offset);
-    offset += s.bitCount;
-    if (s.minVal < minVal) minVal = s.minVal;
-    if (s.maxVal > maxVal) maxVal = s.maxVal;
-  }
-
-  return {
-    format,
-    bitCount:       total,
-    bitV,
-    bitL1,
-    bitFirstSample,
-    bitLastSample,
-    bitUnclear,
-    bitMaxIndex,
-    bitMinIndex,
-    firstSample: streams[0].firstSample,
-    lastSample:  streams[streams.length - 1].lastSample,
-    minVal,
-    maxVal,
-  };
 }
 
 export interface ProgramHeader {
@@ -721,7 +228,7 @@ export const INVALID_CODE_LITERALS = new Set(
     .concat(0x3F)  // ? (PRINT shorthand)
 );
 
-export function readBitStreams(samples: Int16Array, sampleRate = 44100, preconditioned = false): BitStream[] {
+export function readBitStreams(samples: Int16Array, sampleRate = 48000, preconditioned = false): BitStream[] {
   if (!preconditioned) samples = conditionSamples(samples, sampleRate);  // worker conditions once, then passes preconditioned=true
 
   // Compute file-level peak amplitude once, used to scale noise floor thresholds
@@ -1340,6 +847,176 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   };
 
   return { stream, samplesRead };
+}
+
+// Helper to read a single bit as a plain object (for UI use).
+export function streamBitAt(s: BitStream, i: number): BitInfo {
+  return {
+    v: s.bitV[i] as 0 | 1,
+    l1: s.bitL1[i],
+    firstSample: s.bitFirstSample[i],
+    lastSample: s.bitLastSample[i],
+    unclear: s.bitUnclear[i] === 1,
+  };
+}
+
+/**
+ * Build a minimal empty BitStream — used for Programs that have no waveform
+ * data (e.g. loaded from TAP files, or synthesized by the merger).
+ */
+export function emptyBitStream(format: 'fast' | 'slow' = 'fast'): BitStream {
+  return {
+    format,
+    bitCount:       0,
+    bitV:           new Uint8Array(0),
+    bitL1:          new Uint16Array(0),
+    bitFirstSample: new Uint32Array(0),
+    bitLastSample:  new Uint32Array(0),
+    bitUnclear:     new Uint8Array(0),
+    bitMaxIndex:    new Uint32Array(0),
+    bitMinIndex:    new Uint32Array(0),
+    firstSample:    0,
+    lastSample:     0,
+    minVal:         0,
+    maxVal:         0,
+  };
+}
+
+/**
+ * Split a BitStream into two at a given bit position.
+ *
+ * Returns [first, second] where `first` holds bits [0, bitPos) and `second`
+ * holds bits [bitPos, bitCount).  Per-bit typed arrays are sliced into fresh
+ * compact copies so the two halves own their own buffers (the original can
+ * be garbage-collected when no longer referenced).
+ *
+ * Per-stream metadata is computed as follows:
+ *   - `format` inherited by both halves
+ *   - `firstSample` / `lastSample`: outer edges match the parent; inner
+ *      edges come from the bit at the split boundary
+ *   - `minVal` / `maxVal` inherited by both halves.  Each half's true
+ *      amplitude range is a subset of the parent's, so inheriting gives
+ *      conservative bounds — re-scanning is unnecessary for the UI
+ *      thresholds that consume these values
+ *
+ * Edge cases:
+ *   - `bitPos === 0` → first is empty, second is the whole stream
+ *   - `bitPos === bitCount` → first is the whole stream, second is empty
+ *
+ * Throws if `bitPos` is outside [0, bitCount].
+ */
+export function splitBitStream(stream: BitStream, bitPos: number): [BitStream, BitStream] {
+  const n = stream.bitCount;
+  if (bitPos < 0 || bitPos > n) {
+    throw new Error(`splitBitStream: bitPos ${bitPos} out of range [0, ${n}]`);
+  }
+  const first: BitStream = {
+    format:         stream.format,
+    bitCount:       bitPos,
+    bitV:           stream.bitV.slice(0, bitPos),
+    bitL1:          stream.bitL1.slice(0, bitPos),
+    bitFirstSample: stream.bitFirstSample.slice(0, bitPos),
+    bitLastSample:  stream.bitLastSample.slice(0, bitPos),
+    bitUnclear:     stream.bitUnclear.slice(0, bitPos),
+    bitMaxIndex:    stream.bitMaxIndex.slice(0, bitPos),
+    bitMinIndex:    stream.bitMinIndex.slice(0, bitPos),
+    firstSample:    stream.firstSample,
+    lastSample:     bitPos > 0 ? stream.bitLastSample[bitPos - 1] : stream.firstSample,
+    minVal:         stream.minVal,
+    maxVal:         stream.maxVal,
+  };
+  const second: BitStream = {
+    format:         stream.format,
+    bitCount:       n - bitPos,
+    bitV:           stream.bitV.slice(bitPos),
+    bitL1:          stream.bitL1.slice(bitPos),
+    bitFirstSample: stream.bitFirstSample.slice(bitPos),
+    bitLastSample:  stream.bitLastSample.slice(bitPos),
+    bitUnclear:     stream.bitUnclear.slice(bitPos),
+    bitMaxIndex:    stream.bitMaxIndex.slice(bitPos),
+    bitMinIndex:    stream.bitMinIndex.slice(bitPos),
+    firstSample:    bitPos < n ? stream.bitFirstSample[bitPos] : stream.lastSample,
+    lastSample:     stream.lastSample,
+    minVal:         stream.minVal,
+    maxVal:         stream.maxVal,
+  };
+  return [first, second];
+}
+
+/**
+ * Concatenate one or more BitStreams into a single stream, in order.
+ *
+ * Per-bit typed arrays are concatenated in input order.  Each bit keeps its
+ * original sample positions — so when the inputs came from non-adjacent
+ * audio regions (e.g. user-initiated join across an audio gap), the result's
+ * bitFirstSample / bitLastSample arrays are NOT monotonic: there will be a
+ * jump at each seam.  This is fine for byte decoding (which indexes by bit
+ * position, not sample position) and the waveform view renders the gap
+ * naturally because it draws each bit at its own sample position.
+ *
+ * Per-stream metadata:
+ *   - `format`: all inputs must match; throws otherwise
+ *   - `firstSample`: first input's firstSample
+ *   - `lastSample`:  last input's lastSample
+ *   - `minVal` / `maxVal`: min / max across all inputs
+ *
+ * Throws if the input array is empty or the formats differ.  A single-stream
+ * join returns the input unchanged (no defensive copy).
+ */
+export function joinBitStreams(streams: BitStream[]): BitStream {
+  if (streams.length === 0) {
+    throw new Error('joinBitStreams: need at least one stream to join');
+  }
+  if (streams.length === 1) return streams[0];
+
+  const format = streams[0].format;
+  for (let i = 1; i < streams.length; i++) {
+    if (streams[i].format !== format) {
+      throw new Error(
+        `joinBitStreams: format mismatch at index ${i} ('${streams[i].format}' vs '${format}')`,
+      );
+    }
+  }
+  const total = streams.reduce((n, s) => n + s.bitCount, 0);
+
+  const bitV           = new Uint8Array(total);
+  const bitL1          = new Uint16Array(total);
+  const bitFirstSample = new Uint32Array(total);
+  const bitLastSample  = new Uint32Array(total);
+  const bitUnclear     = new Uint8Array(total);
+  const bitMaxIndex    = new Uint32Array(total);
+  const bitMinIndex    = new Uint32Array(total);
+  let offset = 0;
+  let minVal = streams[0].minVal;
+  let maxVal = streams[0].maxVal;
+  for (const s of streams) {
+    bitV          .set(s.bitV,           offset);
+    bitL1         .set(s.bitL1,          offset);
+    bitFirstSample.set(s.bitFirstSample, offset);
+    bitLastSample .set(s.bitLastSample,  offset);
+    bitUnclear    .set(s.bitUnclear,     offset);
+    bitMaxIndex   .set(s.bitMaxIndex,    offset);
+    bitMinIndex   .set(s.bitMinIndex,    offset);
+    offset += s.bitCount;
+    if (s.minVal < minVal) minVal = s.minVal;
+    if (s.maxVal > maxVal) maxVal = s.maxVal;
+  }
+
+  return {
+    format,
+    bitCount:       total,
+    bitV,
+    bitL1,
+    bitFirstSample,
+    bitLastSample,
+    bitUnclear,
+    bitMaxIndex,
+    bitMinIndex,
+    firstSample: streams[0].firstSample,
+    lastSample:  streams[streams.length - 1].lastSample,
+    minVal,
+    maxVal,
+  };
 }
 
 /**
@@ -2000,6 +1677,141 @@ export function readProgramLines(prog: Program, skipHeader = false): void {
 }
 
 /**
+ * Build the elements array and display text for a line from its bytes.
+ * Uses byteSequenceSyntaxChecker to decide whether bytes need escaping
+ * (e.g. literal ASCII that should have been a keyword token).
+ * Sets line.v and line.elements.
+ */
+export function buildLineElements(line: LineInfo, bytes: ByteInfo[]): void {
+  const elements: string[] = [];
+  const errors: ('error' | 'warning' | null)[] = [];
+  let hasAnyError = false;
+
+  // Reset syntax-level counters.
+  let unknownKeywordCount = 0;
+  let keywordInLiteralCount = 0;
+  let invalidReservedCharCount = 0;
+  let invalidNonPrintableCount = 0;
+  let nonPrintableInLiteralCount = 0;
+
+  // Line number from bytes: firstByte+2 (lo) and firstByte+3 (hi).
+  const lineNum = bytes[line.firstByte + 2].v + bytes[line.firstByte + 3].v * 256;
+  elements.push(`${lineNum} `);
+  errors.push(null);  // line number element — syntax checker doesn't cover this
+
+  // Content bytes: firstByte+4 to lastByte. (The lastByte should be the 0x00 terminator,
+  // but corrupt lines may have it earlier or missing in rare cases. Known example is from
+  // the last line of the program, but this code is more defensive and copes with all lines.)
+  byteSequenceSyntaxChecker(0x00, true);  // reset
+  for (let i = line.firstByte + 4; i <= line.lastByte; i++) {
+    const b = bytes[i].v;
+    if (b === 0) break;  // terminator
+    const syntax = byteSequenceSyntaxChecker(b);
+    if (syntax.severity !== 'ok') {
+      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
+      errors.push(syntax.severity);
+      hasAnyError = true;
+      // Increment the appropriate counter using the reason from the syntax checker.
+      if (syntax.reason === 'unknownKeyword') unknownKeywordCount++;
+      else if (syntax.reason === 'keywordInLiteral') keywordInLiteralCount++;
+      else if (syntax.reason === 'invalidReservedChar') invalidReservedCharCount++;
+      else if (syntax.reason === 'invalidNonPrintable') invalidNonPrintableCount++;
+      else if (syntax.reason === 'nonPrintableInLiteral') nonPrintableInLiteralCount++;
+    } else if (b >= 0x20 && b <= 0x7E) {
+      elements.push(oricByteToChar(b));
+      errors.push(null);
+    } else if (b >= 0x80 && (b - 0x80) < KEYWORDS.length) {
+      elements.push(KEYWORDS[b - 0x80]);
+      errors.push(null);
+    } else {
+      elements.push(`«0x${b.toString(16).toUpperCase().padStart(2, '0')}»`);
+      errors.push('error');
+      hasAnyError = true;
+    }
+  }
+  line.v = elements.join('');
+  line.elements = elements;
+  line.elementErrors = hasAnyError ? errors : undefined;
+  // Stored line size = (lastByte - firstByte + 1), counting the
+  // 2-byte next-line pointer, 2 line-number bytes, content bytes,
+  // and the trailing 0x00 terminator.  Oric BASIC's line buffer
+  // tops out at 255 bytes — anything bigger is unloadable on 1.1
+  // and uneditable on 1.0.
+  line.tooLong = (line.lastByte - line.firstByte + 1) > 255;
+  line.unknownKeywordCount = unknownKeywordCount || undefined;
+  line.keywordInLiteralCount = keywordInLiteralCount || undefined;
+  line.invalidReservedCharCount = invalidReservedCharCount || undefined;
+  line.invalidNonPrintableCount = invalidNonPrintableCount || undefined;
+  line.nonPrintableInLiteralCount = nonPrintableInLiteralCount || undefined;
+  invalidateLineHealth(line);
+}
+
+/**
+ * Populate per-element error severities on each line in a program.
+ * Consolidates all element-level error detection into one pass:
+ *   - Non-monotonic line number (element 0) → 'error'
+ *   - [UNKNOWN_KEYWORD] element → 'error'
+ *   - Syntax mismatch at this element's byte → 'error'
+ *   - Underlying byte has chkErr → 'error'
+ *   - Underlying byte has unclear → 'warning'
+ *
+ * Only allocates the elementErrors array if at least one element has an issue.
+ * Must be called after flagNonMonotonicLines and flagTokenisationMismatches.
+ */
+export function flagElementErrors(prog: Program): void {
+  for (let li = 0; li < prog.lines.length; li++) {
+    const line = prog.lines[li];
+    // Start from syntax-level errors set by buildLineElements, or a fresh array.
+    const errors: ('error' | 'warning' | null)[] = line.elementErrors
+      ? [...line.elementErrors]
+      : new Array(line.elements.length).fill(null);
+    // The line-number element (errors[0]) is purely flag-derived — see
+    // buildLineElements where it's always pushed as `null` ("syntax
+    // checker doesn't cover this").  The only sources of `'error'`
+    // here are `line.nonMonotonic` and chkErr on the line-number
+    // bytes, both recomputed below from current state.  Inheriting
+    // the prior value would keep stale `'error'` after the underlying
+    // flag is cleared by another line's edit (e.g. fixing the line
+    // number that made *this* line non-monotonic by editing a
+    // neighbour) — flagNonMonotonicLines correctly clears the flag,
+    // but the stale element severity would still render red until the
+    // bytes of this line were also touched.  Reset to null so the
+    // re-derivation below sees a clean slate.
+    errors[0] = null;
+    let hasAny = errors.some(e => e !== null);
+
+    for (let ei = 0; ei < line.elements.length; ei++) {
+      let severity = errors[ei];
+
+      // Non-monotonic line number.
+      if (ei === 0 && line.nonMonotonic && severity !== 'error') {
+        severity = 'error';
+      }
+
+      // Byte-level flags (only if no harder error already set).
+      if (!severity) {
+        if (ei === 0) {
+          const b2 = prog.bytes[line.firstByte + 2];
+          const b3 = prog.bytes[line.firstByte + 3];
+          if (b2?.chkErr || b3?.chkErr)       severity = 'error';
+          else if (b2?.unclear || b3?.unclear) severity = 'warning';
+        } else {
+          const b = prog.bytes[line.firstByte + 3 + ei];
+          if (b?.chkErr)       severity = 'error';
+          else if (b?.unclear) severity = 'warning';
+        }
+      }
+
+      errors[ei] = severity;
+      if (severity) hasAny = true;
+    }
+
+    line.elementErrors = hasAny ? errors : undefined;
+    invalidateLineHealth(line);
+  }
+}
+
+/**
  * Flag lines whose line numbers are not part of the longest increasing
  * subsequence (LIS) of line numbers in the program.  These are likely
  * corrupt line-number bytes rather than intentionally out-of-order lines.
@@ -2158,3 +1970,197 @@ function hasPointerAndTerminatorIssues(prog: Program): boolean {
 
   return false;
 }
+
+
+// ── Line health utilities ────────────────────────────────────────────────────
+
+/**
+ * Determine the overall health of a line: 'error', 'warning', or 'clean'.
+ * Considers both line-level flags and byte-level flags.
+ */
+export function lineHealth(prog: Program, lineIdx: number): LineSeverity {
+  const line = prog.lines[lineIdx];
+  if (line._health !== undefined) return line._health;
+
+  let health: LineSeverity = 'clean';
+
+  // Line-level flags.
+  if (line.lenErr || line.earlyEnd || line.nonMonotonic || line.tokenisationMismatch || line.tooLong) {
+    health = 'error';
+  }
+
+  // Element-level syntax errors/warnings.
+  if (health !== 'error' && line.elementErrors) {
+    for (const e of line.elementErrors) {
+      if (e === 'error') { health = 'error'; break; }
+      if (e === 'warning') health = 'warning';
+    }
+  }
+
+  // Byte-level waveform errors.
+  if (health !== 'error') {
+    for (let i = line.firstByte; i <= line.lastByte; i++) {
+      if (prog.bytes[i]?.chkErr) { health = 'error'; break; }
+    }
+  }
+  if (health !== 'error') {
+    for (let i = line.firstByte; i <= line.lastByte; i++) {
+      if (prog.bytes[i]?.unclear && health === 'clean') health = 'warning';
+    }
+  }
+
+  line._health = health;
+  return health;
+}
+
+/**
+ * Invalidate the cached health for a line, forcing recalculation on next access.
+ */
+export function invalidateLineHealth(line: LineInfo): void {
+  line._health = undefined;
+}
+
+/**
+ * Oric memory address of this line's first byte.  For the first line this is
+ * the header's start address; for subsequent lines it's the previous line's
+ * next-line pointer value.  Pointer-driven: if a previous line had a corrupt
+ * pointer, this line's firstAddr reflects what the pointer SAYS rather than
+ * where the bytes actually sit in the canonical byte-position-to-address
+ * mapping.  The divergence shows up as lenErr.
+ */
+export function lineFirstAddr(prog: Program, lineIdx: number): number {
+  if (lineIdx === 0) return prog.header.startAddr;
+  return lineNextAddr(prog, lineIdx - 1);
+}
+
+/**
+ * Value of this line's next-line pointer (2 bytes at firstByte, little-endian)
+ * \u2014 the memory address where the next line should start.  Read directly
+ * from prog.bytes so it's always consistent with the current byte state.
+ */
+export function lineNextAddr(prog: Program, lineIdx: number): number {
+  const line = prog.lines[lineIdx];
+  return prog.bytes[line.firstByte].v | (prog.bytes[line.firstByte + 1].v << 8);
+}
+
+/**
+ * Return true if the line has any hard error (chkErr bytes, structural issues).
+ * Unclear-only lines return false.
+ */
+export function lineHasHardError(prog: Program, lineIdx: number): boolean {
+  return lineHealth(prog, lineIdx) === 'error';
+}
+
+/**
+ * Return a list of status messages for a line, describing each issue found.
+ * Used by the status bar and other UI elements that need to display error details.
+ */
+export function lineStatuses(prog: Program, lineIdx: number): LineStatus[] {
+  const line = prog.lines[lineIdx];
+  const statuses: LineStatus[] = [];
+
+  if (line.earlyEnd) {
+    statuses.push({ message: 'Unexpected end of program · null pointer before header end address', severity: 'error' });
+  }
+  if (line.lenErr) {
+    const expected = lineNextAddr(prog, lineIdx) - lineFirstAddr(prog, lineIdx);
+    const actual   = line.lastByte - line.firstByte + 1;
+    statuses.push({ message: `Line length error (expected ${expected} bytes, found ${actual})`, severity: 'error' });
+  }
+  if (line.nonMonotonic) {
+    statuses.push({ message: 'Non-monotonic line number', severity: 'error' });
+  }
+  if (line.tokenisationMismatch) {
+    statuses.push({ message: 'Tokenisation mismatch', severity: 'error' });
+  }
+  if (line.tooLong) {
+    statuses.push({ message: 'Line exceeds 255-byte maximum', severity: 'error' });
+  }
+
+  // Element-level syntax issues (counts populated by buildLineElements).
+  if (line.unknownKeywordCount) {
+    const n = line.unknownKeywordCount;
+    statuses.push({ message: `${n} unknown keyword${n !== 1 ? 's' : ''}`, severity: 'error' });
+  }
+  if (line.keywordInLiteralCount) {
+    const n = line.keywordInLiteralCount;
+    statuses.push({ message: `${n} unexpected keyword${n !== 1 ? 's' : ''} in literal`, severity: 'error' });
+  }
+  if (line.invalidReservedCharCount) {
+    const n = line.invalidReservedCharCount;
+    statuses.push({ message: `${n} invalid reserved character${n !== 1 ? 's' : ''}`, severity: 'error' });
+  }
+  if (line.invalidNonPrintableCount) {
+    const n = line.invalidNonPrintableCount;
+    statuses.push({ message: `${n} invalid non-printable character${n !== 1 ? 's' : ''}`, severity: 'error' });
+  }
+  if (line.nonPrintableInLiteralCount) {
+    const n = line.nonPrintableInLiteralCount;
+    statuses.push({ message: `${n} non-printable character${n !== 1 ? 's' : ''}`, severity: 'warning' });
+  }
+
+  // Byte-level waveform issues (summarised, not per-byte).
+  let chkErrCount = 0;
+  let unclearCount = 0;
+  for (let i = line.firstByte; i <= line.lastByte; i++) {
+    const b = prog.bytes[i];
+    if (b?.chkErr)       chkErrCount++;
+    else if (b?.unclear) unclearCount++;
+  }
+  if (chkErrCount > 0) {
+    statuses.push({ message: `${chkErrCount} checksum error byte${chkErrCount !== 1 ? 's' : ''}`, severity: 'error' });
+  }
+  if (unclearCount > 0) {
+    statuses.push({ message: `${unclearCount} unclear byte${unclearCount !== 1 ? 's' : ''}`, severity: 'warning' });
+  }
+
+  return statuses;
+}
+
+/**
+ * Determine the highest severity across all lines in a program.
+ */
+export function programHealth(prog: Program): LineSeverity {
+  let worst: LineSeverity = 'clean';
+  for (let i = 0; i < prog.lines.length; i++) {
+    const h = lineHealth(prog, i);
+    if (h === 'error') return 'error';
+    if (h === 'warning') worst = 'warning';
+  }
+  return worst;
+}
+
+/**
+ * True if the program contains at least one byte marked as an explicit
+ * (user-typed) edit.  Automatic edits (e.g. pointer fixups) don't count
+ * because they get re-derived on reparse and aren't user-entered state.
+ *
+ * Used by destructive UI actions (e.g. split / join) to decide whether
+ * to surface a "your edits will be lost" warning to the user.
+ */
+export function programHasExplicitEdits(prog: Program): boolean {
+  return prog.bytes.some(b => b.edited === 'explicit');
+}
+
+/**
+ * Summarise error/warning counts across all lines in a program.
+ * Returns a compact array of { label, count, severity } suitable for display.
+ */
+export function programSummary(prog: Program): { label: string; count: number; severity: LineSeverity }[] {
+  let errorLines = 0;
+  let warningLines = 0;
+  let cleanLines = 0;
+  for (let i = 0; i < prog.lines.length; i++) {
+    const h = lineHealth(prog, i);
+    if (h === 'error') errorLines++;
+    else if (h === 'warning') warningLines++;
+    else cleanLines++;
+  }
+  const result: { label: string; count: number; severity: LineSeverity }[] = [];
+  result.push({ label: 'lines', count: prog.lines.length, severity: 'clean' });
+  if (cleanLines > 0)   result.push({ label: 'clean', count: cleanLines, severity: 'clean' });
+  if (errorLines > 0)   result.push({ label: 'errors', count: errorLines, severity: 'error' });
+  if (warningLines > 0) result.push({ label: 'warnings', count: warningLines, severity: 'warning' });
+  return result;
+}
+
