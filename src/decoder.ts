@@ -448,7 +448,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   // rewind drive off the index.
   let minVal = 0, maxVal = 0;
   let firstHalfCycleIndex = 0, secondHalfCycleIndex = 0, nextHalfCycleIndex = startHalfCycleIndex;
-  let lengthAbove = 0, lengthBelow = 0, length = 0;
+  let firstHalfCycleLength = 0, secondHalfCycleLength = 0, length = 0;
   let streamFirstHalfCycle = startHalfCycleIndex;
   let streamMinVal = 0, streamMaxVal = 0;
 
@@ -464,11 +464,11 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     // Read this cycle out of the half-cycle array: its first half-cycle + the second.
     firstHalfCycleIndex  = nextHalfCycleIndex;
     secondHalfCycleIndex = nextHalfCycleIndex + 1;
-    maxVal = halfCycles.hcPeakValue[firstHalfCycleIndex];
-    minVal = halfCycles.hcPeakValue[secondHalfCycleIndex];
-    lengthAbove = halfCycles.hcLength[firstHalfCycleIndex];
-    lengthBelow = halfCycles.hcLength[secondHalfCycleIndex];
-    length = lengthAbove + lengthBelow;
+    maxVal = Math.max(halfCycles.hcPeakValue[firstHalfCycleIndex], halfCycles.hcPeakValue[secondHalfCycleIndex]);
+    minVal = Math.min(halfCycles.hcPeakValue[firstHalfCycleIndex], halfCycles.hcPeakValue[secondHalfCycleIndex]);
+    firstHalfCycleLength = halfCycles.hcLength[firstHalfCycleIndex];
+    secondHalfCycleLength = halfCycles.hcLength[secondHalfCycleIndex];
+    length = firstHalfCycleLength + secondHalfCycleLength;
     nextHalfCycleIndex += 2;
 
     if (minVal < streamMinVal) streamMinVal = minVal;
@@ -731,7 +731,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
         slowPossibleReframeFrom = cycleIsROMShort ? 'short' : 'long';
       } else {
         if (cycleKind === 'medium') {
-          slowPossibleReframeTo = (lengthBelow < lengthAbove) ?  'short' : 'long';
+          slowPossibleReframeTo = (secondHalfCycleLength < firstHalfCycleLength) ?  'short' : 'long';
           slowReframeHalfCycleIndex = secondHalfCycleIndex + 1;
         } else if (cycleKind === 'short' || cycleKind === 'long') {
           slowPossibleReframeTo = cycleKind;
@@ -781,7 +781,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
 
             // We mark as unclear if any cycle was unclear or if slowShorts != 7 including
             // any valid short-to-long medium transition at the end of the run in the count.
-            if (cycleKind === 'medium' && lengthAbove <= lengthBelow) {
+            if (cycleKind === 'medium' && firstHalfCycleLength <= secondHalfCycleLength) {
               slowShorts++;
             }
             slowBitUnclear = slowBitUnclear || slowShorts != 7;
