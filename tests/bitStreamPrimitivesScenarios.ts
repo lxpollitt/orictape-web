@@ -16,6 +16,8 @@ import { splitBitStream, joinBitStreams, type BitStream } from '../src/decoder';
  *  can verify that slicing preserved the right ranges. */
 function mkStream(format: 'fast' | 'slow', bitCount: number, firstSample = 1000): BitStream {
   const bitV           = new Uint8Array(bitCount);
+  const bitFirstHalfCycle = new Uint32Array(bitCount);
+  const bitLastHalfCycle  = new Uint32Array(bitCount);
   const bitL1          = new Uint16Array(bitCount);
   const bitFirstSample = new Uint32Array(bitCount);
   const bitLastSample  = new Uint32Array(bitCount);
@@ -24,6 +26,8 @@ function mkStream(format: 'fast' | 'slow', bitCount: number, firstSample = 1000)
   const bitMinIndex    = new Uint32Array(bitCount);
   for (let i = 0; i < bitCount; i++) {
     bitV[i]           = i & 1;                    // alternating 0/1
+    bitFirstHalfCycle[i] = i * 2;                 // 2 half-cycles per bit
+    bitLastHalfCycle[i]  = i * 2 + 1;
     bitL1[i]          = 10 + (i % 4);             // varied
     bitFirstSample[i] = firstSample + i * 20;     // monotonic, 20-sample bits
     bitLastSample[i]  = firstSample + i * 20 + 19;
@@ -34,7 +38,7 @@ function mkStream(format: 'fast' | 'slow', bitCount: number, firstSample = 1000)
   return {
     format,
     bitCount,
-    bitV, bitL1, bitFirstSample, bitLastSample, bitUnclear, bitMaxIndex, bitMinIndex,
+    bitV, bitFirstHalfCycle, bitLastHalfCycle, bitL1, bitFirstSample, bitLastSample, bitUnclear, bitMaxIndex, bitMinIndex,
     firstSample,
     lastSample: bitCount > 0 ? bitFirstSample[bitCount - 1] + 19 : firstSample,
     minVal:  -10000,
@@ -52,7 +56,7 @@ function compareStreams(a: BitStream, b: BitStream, label = ''): string | null {
     if (a[f] !== b[f]) return `${label}: ${String(f)} differs (${a[f]} vs ${b[f]})`;
   }
   const arrayFields: (keyof BitStream)[] = [
-    'bitV', 'bitL1', 'bitFirstSample', 'bitLastSample', 'bitUnclear', 'bitMaxIndex', 'bitMinIndex',
+    'bitV', 'bitFirstHalfCycle', 'bitLastHalfCycle', 'bitL1', 'bitFirstSample', 'bitLastSample', 'bitUnclear', 'bitMaxIndex', 'bitMinIndex',
   ];
   for (const f of arrayFields) {
     const av = a[f] as { length: number; [k: number]: number };

@@ -447,6 +447,8 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   // (every cycle is the shortest possible). We'll slice to actual size at the end.
   const maxBits = Math.ceil((halfCycles.count - startHalfCycleIndex) / 2) + 1;
   const _bitV            = new Uint8Array(maxBits);
+  const _bitFirstHalfCycle = new Uint32Array(maxBits);
+  const _bitLastHalfCycle  = new Uint32Array(maxBits);
   const _bitL1           = new Uint16Array(maxBits);
   const _bitFirstSample  = new Uint32Array(maxBits);
   const _bitLastSample   = new Uint32Array(maxBits);
@@ -459,7 +461,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   // half-cycle array and sets the sample-position/value vars below from it; the loops and
   // rewind drive off the index.
   let minVal = 0, maxVal = 0;
-  let minIndex = 0, maxIndex = 0, nextHalfCycleIndex = startHalfCycleIndex;
+  let firstHalfCycleIndex = 0, secondHalfCycleIndex = 0, nextHalfCycleIndex = startHalfCycleIndex;
   let aboveIndex = 0;
   let lengthAbove = 0, lengthBelow = 0, length = 0;
   let streamFirstSample = startHalfCycleIndex < halfCycles.count ? halfCycles.hcFirstSample[startHalfCycleIndex] : 0;
@@ -474,17 +476,15 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   /** Measure one waveform cycle and classify it as short, medium, or long.
    *  Returns false if bit is unreadbale / no useful signal found (for section of ~cycle length). */
   const readCycle = (): boolean => {
-    // Read this cycle out of the half-cycle array: a HIGH half (even index) + the LOW
-    // half after it.  
-    const hi = nextHalfCycleIndex, lo = nextHalfCycleIndex + 1;
-    maxIndex = halfCycles.hcPeakSample[hi];
-    minIndex = halfCycles.hcPeakSample[lo];
-    maxVal   = halfCycles.hcPeakValue[hi];
-    minVal   = halfCycles.hcPeakValue[lo];
-    lengthAbove = halfCycles.hcLength[hi];
-    lengthBelow = halfCycles.hcLength[lo];
+    // Read this cycle out of the half-cycle array: its first half-cycle + the second.
+    firstHalfCycleIndex  = nextHalfCycleIndex;
+    secondHalfCycleIndex = nextHalfCycleIndex + 1;
+    maxVal = halfCycles.hcPeakValue[firstHalfCycleIndex];
+    minVal = halfCycles.hcPeakValue[secondHalfCycleIndex];
+    lengthAbove = halfCycles.hcLength[firstHalfCycleIndex];
+    lengthBelow = halfCycles.hcLength[secondHalfCycleIndex];
     length = lengthAbove + lengthBelow;
-    aboveIndex = halfCycles.hcLastSample[lo] + 1;
+    aboveIndex = halfCycles.hcLastSample[secondHalfCycleIndex] + 1;
     nextHalfCycleIndex += 2;
 
     if (minVal < streamMinVal) streamMinVal = minVal;
@@ -532,12 +532,15 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit). */
   const pushBitFast = (): void => {
     _bitV[bitCount] = (cycleKind === 'short' || cycleKind === 'unreadable') ? 1 : 0;
-    _bitL1[bitCount] = Math.min(lengthAbove, 65535);
-    _bitFirstSample[bitCount] = aboveIndex - length;
-    _bitLastSample[bitCount]  = aboveIndex - 1;
+    _bitFirstHalfCycle[bitCount] = firstHalfCycleIndex;
+    _bitLastHalfCycle[bitCount]  = secondHalfCycleIndex;
     _bitUnclear[bitCount] = (cycleUnclear || cycleKind === 'long') ? 1 : 0;
-    _bitMaxIndex[bitCount] = maxIndex;
-    _bitMinIndex[bitCount] = minIndex;
+    // Legacy sample-position arrays, derived from the half-cycle indices (Step A; retired in Step B).
+    _bitL1[bitCount]          = halfCycles.hcLength[firstHalfCycleIndex];
+    _bitFirstSample[bitCount] = halfCycles.hcFirstSample[firstHalfCycleIndex];
+    _bitLastSample[bitCount]  = halfCycles.hcLastSample[secondHalfCycleIndex];
+    _bitMaxIndex[bitCount]    = halfCycles.hcPeakSample[firstHalfCycleIndex];
+    _bitMinIndex[bitCount]    = halfCycles.hcPeakSample[secondHalfCycleIndex];
     bitCount++;
   };
 
@@ -550,16 +553,16 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   // (exactly 1600 Hz = harmonic mean of 2400 and 1200 Hz). We use lengthBelow
   // and lengthAbove to determine which half is short and which is long, credit
   // the short half to the short count and the long half to the long count.
+  /* ===== Superseded Oricutron-style slow credit path - commented out, kept as a reference
+     for the phase-aware rewrite (delete once that lands; also in git). =====
   let slow1s = 0;   // consecutive short half-cycle pairs (counting full short cycles)
   let slow0s = 0;   // consecutive long half-cycle pairs (counting full long cycles)
-  let slowBitFirstSample = 0;
-  let slowBitUnclear = false;
 
   // Sample range tracking for slow half-cycle credits.
   let slowSampleFrom = 0;   // start of current half-credit's sample range
   let slowSampleTo   = 0;   // end of current half-credit's sample range
 
-  /** Record a short cycle (or short half of a transition). */
+  // Record a short cycle (or short half of a transition).
   const slowShort = (): void => {
     if (slow1s === 0) slowBitFirstSample = slowSampleFrom;
     slow1s++;
@@ -585,7 +588,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     if (slow1s >= 8) slow1s = 0;
   };
 
-  /** Record a long cycle (or long half of a transition). */
+  // Record a long cycle (or long half of a transition).
   const slowLong = (): void => {
     if (slow0s === 0) slowBitFirstSample = slowSampleFrom;
     slow0s++;
@@ -653,19 +656,23 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     }
   };
 
+  ===== end of superseded Oricutron-style slow path ===== */
+
+  // Live slow-format bit state.
+  let slowBitFirstHalfCycleIndex = 0;   // first half-cycle index of the bit being accumulated
+  let slowBitUnclear = false;
+
   // Slow format per bit cylce counts
   let slowCycles = 0;   // total cycles (including the alignment cycle)
   let slowShorts = 0;   // short cycle count (after the alignment cycle) 
   let slowLongs = 0;    // long cycle count (after the alignment cycle)
   let slowPossibleReframe = false;
-  let slowPossibleReframeIndex = 0;
+  let slowReframeHalfCycleIndex = 0;
   let slowPossibleReframeKind: CycleKind = 'short'
   let slowPossibleReframeFrom: CycleKind = 'short';
   let slowPossibleReframeTo: CycleKind = 'short';
 
   const pushBitSlow = (): void => {
-    const cycleFirst = aboveIndex - length;
-    const cycleLast  = aboveIndex - 1;
     const cycleIsROMShort = (cycleKind === 'short' || (cycleKind === 'medium' && length <= SHORT_ROM_MAX) || cycleKind == 'unreadable');
     let parsedBit = false;
     let parsedBitValue = 0;
@@ -703,7 +710,8 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
             // a medium cycle then mark it as clear (potentially a normal half-cycle stop bit);
             // otherwsie mark it as unclear.
             _bitUnclear[bitCount - 1] |= (slowPossibleReframeKind === 'medium') ? 0 : 1;
-            _bitLastSample[bitCount - 1] = slowPossibleReframeIndex - 1;
+            _bitLastHalfCycle[bitCount - 1] = slowReframeHalfCycleIndex - 1;
+            _bitLastSample[bitCount - 1]    = halfCycles.hcLastSample[slowReframeHalfCycleIndex - 1];
           } else if (cyclesBeforeReframe > 1) {
             // Bundle the cylces up two the reframe as a seperate unclear bit
             if (slowShorts == 0 && slowLongs == 0) {
@@ -716,8 +724,10 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
               _bitV[bitCount] = slowShorts > 0 ? 1 : 0;
             }
             _bitUnclear[bitCount] = 1;
-            _bitFirstSample[bitCount] = slowBitFirstSample;
-            _bitLastSample[bitCount] = slowPossibleReframeIndex - 1;
+            _bitFirstHalfCycle[bitCount] = slowBitFirstHalfCycleIndex;
+            _bitLastHalfCycle[bitCount]  = slowReframeHalfCycleIndex - 1;
+            _bitFirstSample[bitCount] = halfCycles.hcFirstSample[slowBitFirstHalfCycleIndex];
+            _bitLastSample[bitCount]  = halfCycles.hcLastSample[slowReframeHalfCycleIndex - 1];
             _bitL1[bitCount] = 0;
             bitCount++;
           } 
@@ -726,7 +736,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
           slowCycles = (slowPossibleReframeKind === 'medium') ? 0 : 1;
           slowShorts = (slowPossibleReframeKind === 'short') ? 1 : 0;
           slowLongs = (slowPossibleReframeKind === 'long') ? 1 : 0;
-          slowBitFirstSample = slowPossibleReframeIndex;
+          slowBitFirstHalfCycleIndex = slowReframeHalfCycleIndex;
           slowBitUnclear = false;
           slowPossibleReframeFrom = cycleKind;
           slowPossibleReframe = false;
@@ -748,10 +758,10 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
       } else {
         if (cycleKind === 'medium') {
           slowPossibleReframeTo = (lengthBelow < lengthAbove) ?  'short' : 'long';
-          slowPossibleReframeIndex = cycleLast + 1;
+          slowReframeHalfCycleIndex = secondHalfCycleIndex + 1;
         } else if (cycleKind === 'short' || cycleKind === 'long') {
           slowPossibleReframeTo = cycleKind;
-          slowPossibleReframeIndex = cycleFirst;
+          slowReframeHalfCycleIndex = firstHalfCycleIndex;
         }
         if (slowPossibleReframeFrom !== slowPossibleReframeTo) {
           slowPossibleReframeKind = cycleKind;
@@ -774,7 +784,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
 
     if (slowCycles == 1) {
       // The alignment bit - the ROM ignores the length of this bit
-      slowBitFirstSample = cycleFirst;      
+      slowBitFirstHalfCycleIndex = firstHalfCycleIndex;
     } else if (slowCycles == 2) {
       // The ROM uses the 2nd cycle to detemine whether to look for a run of shorts or longs; 
       // expecting either 7 shorts or 3 longs in the run (plus the alignment bit = 8 or 4 cycles in total for the bit )
@@ -833,8 +843,10 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
       if (parsedBit) {
         _bitV[bitCount] = parsedBitValue;
         _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
-        _bitFirstSample[bitCount] = slowBitFirstSample;
-        _bitLastSample[bitCount]  = cycleLast;
+        _bitFirstHalfCycle[bitCount] = slowBitFirstHalfCycleIndex;
+        _bitLastHalfCycle[bitCount]  = secondHalfCycleIndex;
+        _bitFirstSample[bitCount] = halfCycles.hcFirstSample[slowBitFirstHalfCycleIndex];
+        _bitLastSample[bitCount]  = halfCycles.hcLastSample[secondHalfCycleIndex];
         _bitL1[bitCount] = 0;
         bitCount++;
         slowCycles = 0;
@@ -892,8 +904,6 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     streamMinVal = 0;
     streamMaxVal = 0;
     streamFirstSample = halfCycles.hcFirstSample[syncRunHalfCycleIndex];
-    slow1s = 0;
-    slow0s = 0;
     slowBitUnclear = false;
   }
 
@@ -917,6 +927,8 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     format,
     bitCount,
     bitV:           _bitV.slice(0, bitCount),
+    bitFirstHalfCycle: _bitFirstHalfCycle.slice(0, bitCount),
+    bitLastHalfCycle:  _bitLastHalfCycle.slice(0, bitCount),
     bitL1:          _bitL1.slice(0, bitCount),
     bitFirstSample: _bitFirstSample.slice(0, bitCount),
     bitLastSample:  _bitLastSample.slice(0, bitCount),
@@ -936,6 +948,8 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
 export function streamBitAt(s: BitStream, i: number): BitInfo {
   return {
     v: s.bitV[i] as 0 | 1,
+    firstHalfCycle: s.bitFirstHalfCycle[i],
+    lastHalfCycle:  s.bitLastHalfCycle[i],
     l1: s.bitL1[i],
     firstSample: s.bitFirstSample[i],
     lastSample: s.bitLastSample[i],
@@ -952,6 +966,8 @@ export function emptyBitStream(format: 'fast' | 'slow' = 'fast'): BitStream {
     format,
     bitCount:       0,
     bitV:           new Uint8Array(0),
+    bitFirstHalfCycle: new Uint32Array(0),
+    bitLastHalfCycle:  new Uint32Array(0),
     bitL1:          new Uint16Array(0),
     bitFirstSample: new Uint32Array(0),
     bitLastSample:  new Uint32Array(0),
@@ -997,6 +1013,8 @@ export function splitBitStream(stream: BitStream, bitPos: number): [BitStream, B
     format:         stream.format,
     bitCount:       bitPos,
     bitV:           stream.bitV.slice(0, bitPos),
+    bitFirstHalfCycle: stream.bitFirstHalfCycle.slice(0, bitPos),
+    bitLastHalfCycle:  stream.bitLastHalfCycle.slice(0, bitPos),
     bitL1:          stream.bitL1.slice(0, bitPos),
     bitFirstSample: stream.bitFirstSample.slice(0, bitPos),
     bitLastSample:  stream.bitLastSample.slice(0, bitPos),
@@ -1012,6 +1030,8 @@ export function splitBitStream(stream: BitStream, bitPos: number): [BitStream, B
     format:         stream.format,
     bitCount:       n - bitPos,
     bitV:           stream.bitV.slice(bitPos),
+    bitFirstHalfCycle: stream.bitFirstHalfCycle.slice(bitPos),
+    bitLastHalfCycle:  stream.bitLastHalfCycle.slice(bitPos),
     bitL1:          stream.bitL1.slice(bitPos),
     bitFirstSample: stream.bitFirstSample.slice(bitPos),
     bitLastSample:  stream.bitLastSample.slice(bitPos),
@@ -1063,6 +1083,8 @@ export function joinBitStreams(streams: BitStream[]): BitStream {
   const total = streams.reduce((n, s) => n + s.bitCount, 0);
 
   const bitV           = new Uint8Array(total);
+  const bitFirstHalfCycle = new Uint32Array(total);
+  const bitLastHalfCycle  = new Uint32Array(total);
   const bitL1          = new Uint16Array(total);
   const bitFirstSample = new Uint32Array(total);
   const bitLastSample  = new Uint32Array(total);
@@ -1074,6 +1096,8 @@ export function joinBitStreams(streams: BitStream[]): BitStream {
   let maxVal = streams[0].maxVal;
   for (const s of streams) {
     bitV          .set(s.bitV,           offset);
+    bitFirstHalfCycle.set(s.bitFirstHalfCycle, offset);
+    bitLastHalfCycle .set(s.bitLastHalfCycle,  offset);
     bitL1         .set(s.bitL1,          offset);
     bitFirstSample.set(s.bitFirstSample, offset);
     bitLastSample .set(s.bitLastSample,  offset);
@@ -1089,6 +1113,8 @@ export function joinBitStreams(streams: BitStream[]): BitStream {
     format,
     bitCount:       total,
     bitV,
+    bitFirstHalfCycle,
+    bitLastHalfCycle,
     bitL1,
     bitFirstSample,
     bitLastSample,
