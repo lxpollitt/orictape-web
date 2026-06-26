@@ -912,13 +912,11 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
 
 // ── Per-bit geometry accessors ───────────────────────────────────────────────
 // Resolve a bit's half-cycle indices to sample positions via the tape's halfCycles.
-// "Assume 2 half-cycles": L1 and the max peak read the bit's first half-cycle; the
-// min peak reads its last.  (A slow bit's intermediate half-cycles aren't shown yet.)
+// bitFirstSample / bitLastSample span the whole bit; bitL1 is the bit's first
+// half-cycle length (the cell's first half — used by the fast-format phase check).
 export const bitFirstSample = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcFirstSample[s.bitFirstHalfCycle[i]];
 export const bitLastSample  = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcLastSample[s.bitLastHalfCycle[i]];
 export const bitL1          = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcLength[s.bitFirstHalfCycle[i]];
-export const bitMaxSample   = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcPeakSample[s.bitFirstHalfCycle[i]];
-export const bitMinSample   = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcPeakSample[s.bitLastHalfCycle[i]];
 
 // ── Stream-level extent accessors ────────────────────────────────────────────
 // Resolve a stream's half-cycle range to its sample span.  lastSample is the

@@ -1,5 +1,5 @@
 import type { ByteInfo, BitStream, Program, HalfCycles } from './decoder';
-import { bitFirstSample, bitLastSample, bitL1, bitMaxSample, bitMinSample, streamFirstSample, streamLastSample, emptyHalfCycles } from './decoder';
+import { bitFirstSample, bitLastSample, streamFirstSample, streamLastSample, emptyHalfCycles } from './decoder';
 
 const GREEN  = '#3d8c3d';
 const YELLOW = '#c9a428';
@@ -553,6 +553,18 @@ export class WaveformView {
     this.draw();
   }
 
+  /** First half-cycle index of the cycle under the cursor within bit `bi`,
+   *  pairing cycles from the bit's start (`firstHalfCycle`).  A trailing odd
+   *  half-cycle pairs to itself; the caller treats the missing second half as L2=0. */
+  private hoveredCycleHC(stream: BitStream, bi: number): number {
+    const hc      = this.halfCycles;
+    const firstHC = stream.bitFirstHalfCycle[bi];
+    const lastHC  = stream.bitLastHalfCycle[bi];
+    let k = firstHC;
+    while (k < lastHC && hc.hcLastSample[k] < this.hoverSample) k++;
+    return firstHC + ((k - firstHC) & ~1);
+  }
+
   private draw(): void {
     const { canvas, ctx, samples, prog } = this;
     if (!samples || !prog) {
@@ -721,14 +733,23 @@ export class WaveformView {
       ctx.globalAlpha = 1;
     }
 
-    // ── Hover bit markers (vertical lines at bit edges and L1/L2 split) ──────
+    // ── Hover markers (bit edges, the hovered cycle's edges + L1/L2 split + peaks) ──
     if (spp <= 0.75 && this.hoverBit !== null) {
       const bi    = this.hoverBit;
-      const first = bitFirstSample(stream, this.halfCycles, bi);
-      const last  = bitLastSample(stream, this.halfCycles, bi);
-      const l1    = bitL1(stream, this.halfCycles, bi);
+      const hc    = this.halfCycles;
+      const first = bitFirstSample(stream, hc, bi);
+      const last  = bitLastSample(stream, hc, bi);
       const xStart = (first - vs) / spp;
       const xEnd   = (last + 1 - vs) / spp;
+
+      // The cycle under the cursor, paired from the bit's start.
+      const chi        = this.hoveredCycleHC(stream, bi);
+      const firstHC    = stream.bitFirstHalfCycle[bi];
+      const lastHC     = stream.bitLastHalfCycle[bi];
+      const hasSecond  = chi + 1 <= lastHC;          // false = trailing odd half-cycle
+      const multiCycle = lastHC - firstHC + 1 > 2;   // bit spans more than one cycle
+      const cycLeft    = hc.hcFirstSample[chi];
+      const cycRight   = (hasSecond ? hc.hcLastSample[chi + 1] : hc.hcLastSample[chi]) + 1;
 
       // Solid lines at bit edges.
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
@@ -739,24 +760,34 @@ export class WaveformView {
       ctx.moveTo(xEnd + 0.5, 0);   ctx.lineTo(xEnd + 0.5, waveH);
       ctx.stroke();
 
-      // Dotted line at L1/L2 split (crossover point).
-      if (l1 > 0) {
-        const xSplit = (first + l1 - vs) / spp;
-        ctx.setLineDash([3, 3]);
-        ctx.beginPath();
-        ctx.moveTo(xSplit + 0.5, 0); ctx.lineTo(xSplit + 0.5, waveH);
-        ctx.stroke();
-        ctx.setLineDash([]);
+      // Dotted lines: the hovered cycle's left/right edges (only when the bit has
+      // more than one cycle — otherwise they coincide with the bit edges) and its
+      // L1/L2 split (only for a full two-half-cycle cycle).
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      if (multiCycle) {
+        const xcl = (cycLeft  - vs) / spp;
+        const xcr = (cycRight - vs) / spp;
+        ctx.moveTo(xcl + 0.5, 0); ctx.lineTo(xcl + 0.5, waveH);
+        ctx.moveTo(xcr + 0.5, 0); ctx.lineTo(xcr + 0.5, waveH);
       }
+      if (hasSecond) {
+        const xSplit = (hc.hcLastSample[chi] + 1 - vs) / spp;   // crossover between the two halves
+        ctx.moveTo(xSplit + 0.5, 0); ctx.lineTo(xSplit + 0.5, waveH);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
 
-      // Sparse dotted lines at maxIndex and minIndex (debug: where readCycle found extrema).
-      const xMax = (bitMaxSample(stream, this.halfCycles, bi) - vs) / spp;
-      const xMin = (bitMinSample(stream, this.halfCycles, bi) - vs) / spp;
+      // Sparse dotted ticks at the hovered cycle's peaks (where detection found extrema).
       ctx.strokeStyle = '#00b4ff';
       ctx.setLineDash([2, 6]);
       ctx.beginPath();
+      const xMax = (hc.hcPeakSample[chi] - vs) / spp;
       ctx.moveTo(xMax + 0.5, 0); ctx.lineTo(xMax + 0.5, waveH);
-      ctx.moveTo(xMin + 0.5, 0); ctx.lineTo(xMin + 0.5, waveH);
+      if (hasSecond) {
+        const xMin = (hc.hcPeakSample[chi + 1] - vs) / spp;
+        ctx.moveTo(xMin + 0.5, 0); ctx.lineTo(xMin + 0.5, waveH);
+      }
       ctx.stroke();
       ctx.setLineDash([]);
     }
@@ -770,18 +801,25 @@ export class WaveformView {
 
       if (this.hoverBit !== null) {
         const bi = this.hoverBit;
-        const first = bitFirstSample(stream, this.halfCycles, bi);
-        const last  = bitLastSample(stream, this.halfCycles, bi);
-        const len   = last - first + 1;
-        const l1    = bitL1(stream, this.halfCycles, bi);
-        const l2    = len - l1;
-        const hz = Math.round(this.sampleRate / len);
+        const hc = this.halfCycles;
+        const first = bitFirstSample(stream, hc, bi);
+        const last  = bitLastSample(stream, hc, bi);
+        const firstHC = stream.bitFirstHalfCycle[bi];
+        const lastHC  = stream.bitLastHalfCycle[bi];
+        // Hovered cycle (paired from the bit's start); a trailing odd half-cycle → L2 = 0.
+        const chi = this.hoveredCycleHC(stream, bi);
+        const hasSecond = chi + 1 <= lastHC;
+        const l1 = hc.hcLength[chi];
+        const l2 = hasSecond ? hc.hcLength[chi + 1] : 0;
+        const cycleLen = l1 + l2;
+        const hz = cycleLen > 0 ? Math.round(this.sampleRate / cycleLen) : 0;
         const timeSec = (first / this.sampleRate).toFixed(3);
         lines = [
           `Bit ${fmt(bi)}`,
           `Samples ${fmt(first)} - ${fmt(last)}`,
-          `Length ${len} (${l1}+${l2})`,
         ];
+        if (lastHC - firstHC + 1 > 2) lines.push(`Cycle ${((chi - firstHC) >> 1) + 1}`);
+        lines.push(`Length ${cycleLen} (${l1}+${l2})`);
         hzSuffix = `  ~${fmt(hz)}Hz`;
         timeSuffix = `${timeSec}s`;
       } else {
@@ -1127,7 +1165,10 @@ export class WaveformView {
       }
       const sample = Math.round(this.viewStart + e.offsetX * this.spp);
       const bit = this.sampleToBit(sample);
-      if (bit !== this.hoverBit || (bit === null && sample !== this.hoverSample)) {
+      // Redraw on any sample move (not just bit changes) so the hovered-cycle
+      // markers track the cursor within a bit.  Cheap: this handler already bails
+      // when zoomed out (spp > 0.75), so these redraws only happen zoomed in.
+      if (bit !== this.hoverBit || sample !== this.hoverSample) {
         this.hoverBit = bit;
         this.hoverSample = sample;
         this.draw();
