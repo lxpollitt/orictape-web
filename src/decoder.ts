@@ -10,9 +10,18 @@ import { flagTokenisationMismatches, byteSequenceSyntaxChecker } from './editor'
 import { oricByteToChar } from './oricCharset';
 import { conditionSamples } from './tapeAnalog';
 
-// BitInfo is used by the UI when reading individual bits out of a BitStream.
+
+export interface HalfCycleInfo {
+  length: number;
+  firstSample: number;
+  lastSample: number;
+  peakSample: number;
+  unclear: boolean;
+}
 export interface BitInfo {
   v: 0 | 1;
+  firstHalfCycle: number;
+  lastHalfCycle: number;
   l1: number;
   firstSample: number;
   lastSample: number;
@@ -80,10 +89,22 @@ export interface LineStatus {
   severity: 'error' | 'warning';
 }
 
-
-
-
-
+// HalfCycles stores the half-cycle data in struct-of-arrays layout using TypedArrays.
+// This is ~10x more memory-efficient than an array of HalfCycleInfo objects and
+// reduces GC pressure significantly for large tape recordings.
+// All parallel arrays have length === halfCycleCount after decoding.
+export interface HalfCycles {
+  hcCount: number;
+  hcLength: Uint16Array;
+  hcPeakSample: Uint32Array;
+  hcFirstSample: Uint32Array;
+  hcLastSample: Uint32Array;
+  hcUnclear: Uint8Array; // 0 = clean, 1 = unclear
+  firstSample: number;
+  lastSample: number;
+  minVal: number;
+  maxVal: number;
+}
 
 // BitStream stores bit data in struct-of-arrays layout using TypedArrays.
 // This is ~10x more memory-efficient than an array of BitInfo objects and
@@ -93,10 +114,14 @@ export interface BitStream {
   format: 'fast' | 'slow';
   bitCount: number;
   bitV: Uint8Array;            // bit value: 0 or 1
+  bitFirstHalfCycle: Uint32Array;
+  bitLastHalfCycle: Uint32Array;
+  bitUnclear: Uint8Array;      // 0 = clean, 1 = unclear
+
+  // TODO: all the fields below here get retired - using half-cycle info instead
   bitL1: Uint16Array;          // first half-cycle length (samples; L2 = bitLength - L1)
   bitFirstSample: Uint32Array;
   bitLastSample: Uint32Array;
-  bitUnclear: Uint8Array;      // 0 = clean, 1 = unclear
   bitMaxIndex: Uint32Array;    // debug: sample index of the max found by readCycle
   bitMinIndex: Uint32Array;    // debug: sample index of the min found by readCycle
   // Note: raw samples are NOT stored here. The UI holds them separately
