@@ -244,6 +244,36 @@ export const INVALID_CODE_LITERALS = new Set(
     .concat(0x3F)  // ? (PRINT shorthand)
 );
 
+
+
+// ── Per-bit half-cycle accessors ───────────────────────────────────────────────
+// Resolve a bit's half-cycle indices to sample positions via the tape's halfCycles.
+// bitFirstSample / bitLastSample span the whole bit; bitL1 is the bit's first
+// half-cycle length (the cell's first half — used by the fast-format phase check).
+export const bitFirstSample = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcFirstSample[s.bitFirstHalfCycle[i]];
+export const bitLastSample  = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcLastSample[s.bitLastHalfCycle[i]];
+export const bitL1          = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcLength[s.bitFirstHalfCycle[i]];
+
+// ── Stream-level extent accessors ────────────────────────────────────────────
+// Resolve a stream's half-cycle range to its sample span.  lastSample is the
+// exclusive end (one past the last sample), matching the old stream.lastSample.
+export const streamFirstSample = (s: BitStream, hc: HalfCycles): number => hc.hcFirstSample[s.firstHalfCycle];
+export const streamLastSample  = (s: BitStream, hc: HalfCycles): number => hc.hcLastSample[s.lastHalfCycle] + 1;
+
+/** Empty HalfCycles — a non-null placeholder for consumers before data loads. */
+export function emptyHalfCycles(): HalfCycles {
+  return {
+    count: 0,
+    hcLength:      new Uint16Array(0),
+    hcPeakSample:  new Uint32Array(0),
+    hcPeakValue:   new Int16Array(0),
+    hcFirstSample: new Uint32Array(0),
+    hcLastSample:  new Uint32Array(0),
+    hcUnclear:     new Uint8Array(0),
+    firstSample: 0, lastSample: 0, minVal: 0, maxVal: 0,
+  };
+}
+
 /** Detect every half-cycle in the signal. The crossover/peak detection runs continuously 
  * over the whole buffer - no gap termination, it stops only at end of samples.
  * Classification, sync and gap handling are done later the bitstream decoder, which reads 
@@ -908,34 +938,6 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   };
 
   return { stream, halfCyclesRead };
-}
-
-// ── Per-bit geometry accessors ───────────────────────────────────────────────
-// Resolve a bit's half-cycle indices to sample positions via the tape's halfCycles.
-// bitFirstSample / bitLastSample span the whole bit; bitL1 is the bit's first
-// half-cycle length (the cell's first half — used by the fast-format phase check).
-export const bitFirstSample = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcFirstSample[s.bitFirstHalfCycle[i]];
-export const bitLastSample  = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcLastSample[s.bitLastHalfCycle[i]];
-export const bitL1          = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcLength[s.bitFirstHalfCycle[i]];
-
-// ── Stream-level extent accessors ────────────────────────────────────────────
-// Resolve a stream's half-cycle range to its sample span.  lastSample is the
-// exclusive end (one past the last sample), matching the old stream.lastSample.
-export const streamFirstSample = (s: BitStream, hc: HalfCycles): number => hc.hcFirstSample[s.firstHalfCycle];
-export const streamLastSample  = (s: BitStream, hc: HalfCycles): number => hc.hcLastSample[s.lastHalfCycle] + 1;
-
-/** Empty HalfCycles — a non-null placeholder for consumers before data loads. */
-export function emptyHalfCycles(): HalfCycles {
-  return {
-    count: 0,
-    hcLength:      new Uint16Array(0),
-    hcPeakSample:  new Uint32Array(0),
-    hcPeakValue:   new Int16Array(0),
-    hcFirstSample: new Uint32Array(0),
-    hcLastSample:  new Uint32Array(0),
-    hcUnclear:     new Uint8Array(0),
-    firstSample: 0, lastSample: 0, minVal: 0, maxVal: 0,
-  };
 }
 
 /**
