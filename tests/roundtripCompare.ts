@@ -24,8 +24,8 @@
  * byte (immediately after the 0x24 marker), matching what the app displays.
  */
 
-import type { BitStream, Program } from '../src/decoder';
-import { readBitStreams, readHalfCycles, readPrograms } from '../src/decoder';
+import type { BitStream, Program, HalfCycles } from '../src/decoder';
+import { readBitStreams, readHalfCycles, readPrograms, bitFirstSample, bitLastSample, bitL1 } from '../src/decoder';
 import { conditionSamples } from '../src/tapeAnalog';
 import { parseWavFile } from '../src/wavfile';
 import { buildByteStream, encodeProgramWav, SYNC_BYTES } from '../src/audioEncoder';
@@ -38,12 +38,12 @@ export const hex = (v: number) => '0x' + v.toString(16).padStart(2, '0');
  * polarity (which otherwise decode as run-4 / mirror phase) so they decode in the
  * canonical run-3 frame and can be round-trip tested like any normal capture.
  */
-export function decodeWav(bytes: Uint8Array, invert = false): { programs: Program[]; sampleRate: number } {
+export function decodeWav(bytes: Uint8Array, invert = false): { programs: Program[]; sampleRate: number; halfCycles: HalfCycles } {
   const ab   = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   const wav  = parseWavFile(ab);
   const left = invert ? wav.left.map((s: number) => -s) : wav.left;
   const halfCycles = readHalfCycles(conditionSamples(left, wav.sampleRate), wav.sampleRate);
-  return { programs: readPrograms(readBitStreams(halfCycles, wav.sampleRate)), sampleRate: wav.sampleRate };
+  return { programs: readPrograms(readBitStreams(halfCycles, wav.sampleRate)), sampleRate: wav.sampleRate, halfCycles };
 }
 
 /** Decode a WAV byte buffer to programs (left channel), as the app would. */
@@ -61,10 +61,10 @@ export function decodeWavBytes(bytes: Uint8Array): Program[] {
  * `lines[0].firstByte` else byte 0; using the header byte instead would land
  * ~1s later (past the 0x16 leader) and mislabel machine-code programs.
  */
-export function programLabel(base: string, prog: Program, sampleRate: number): string {
+export function programLabel(base: string, prog: Program, hc: HalfCycles, sampleRate: number): string {
   const refByteIdx = prog.lines.length > 0 ? prog.lines[0].firstByte : 0;
   const refBit     = prog.bytes[refByteIdx]?.firstBit ?? 0;
-  const sample     = prog.stream.bitFirstSample[refBit] ?? 0;
+  const sample     = bitFirstSample(prog.stream, hc, refBit) ?? 0;
   const startSec   = Math.floor(sample / sampleRate);
   return `${base}_${prog.name}_${startSec}s`;
 }
@@ -93,8 +93,8 @@ export function stopRun(b: { firstBit: number; lastBit: number }): number {
  * swung, so the original recording and our (mirror-shaped) re-encode are measured
  * on the same footing - see oric-tape-format.md §4.
  */
-export const phaseHigh = (s: BitStream, bi: number): boolean =>
-  2 * s.bitL1[bi] > s.bitLastSample[bi] - s.bitFirstSample[bi] + 1;
+export const phaseHigh = (s: BitStream, hc: HalfCycles, bi: number): boolean =>
+  2 * bitL1(s, hc, bi) > bitLastSample(s, hc, bi) - bitFirstSample(s, hc, bi) + 1;
 
 /**
  * The run of clean 0x16 sync bytes immediately before the 0x24 marker, counted
@@ -123,14 +123,14 @@ export function cleanLeaderRun(prog: Program): number {
  * and the whole 3/4-cadence / phase model are fast-mode; slow mode is a different
  * regime we don't reproduce or analyse.
  */
-export function medianCellMicros(prog: Program, sampleRate: number): number {
+export function medianCellMicros(prog: Program, hc: HalfCycles, sampleRate: number): number {
   const s = prog.stream;
   const lens: number[] = [];
   const n = Math.min(prog.bytes.length, 100);
   for (let bi = 0; bi < n; bi++) {
     const b = prog.bytes[bi];
     for (let i = b.firstBit; i <= b.lastBit; i++)
-      lens.push((s.bitLastSample[i] - s.bitFirstSample[i] + 1) / sampleRate * 1e6);
+      lens.push((bitLastSample(s, hc, i) - bitFirstSample(s, hc, i) + 1) / sampleRate * 1e6);
   }
   if (lens.length === 0) return 0;
   lens.sort((a, b) => a - b);
@@ -197,7 +197,7 @@ export function programWindow(prog: Program): ProgramWindow | string {
  * (see audioBulkRoundtrip.ts's filter); a structurally unusable program
  * returns the programWindow reason string.
  */
-export function roundTripMismatch(orig: Program): string | null {
+export function roundTripMismatch(orig: Program, origHc: HalfCycles): string | null {
   const w = programWindow(orig);
   if (typeof w === 'string') return w;
   const { markerIndex, count } = w;
@@ -221,7 +221,9 @@ export function roundTripMismatch(orig: Program): string | null {
   const snapBase = origLead;
 
   const stream = buildByteStream(orig);               // the exact bytes we put on tape (mutates orig.header)
-  const reenc  = decodeWavBytes(encodeProgramWav(orig))[0];
+  const renc    = decodeWav(encodeProgramWav(orig));
+  const reenc   = renc.programs[0];
+  const reencHc = renc.halfCycles;
   if (!reenc) return 're-encode decoded no program';
   if (reenc.header.byteIndex <= 0) return 're-encode has no 0x24 marker';
   const bi = reenc.header.byteIndex - 1;              // anchor on the decoder's marker, not findIndex
@@ -257,8 +259,8 @@ export function roundTripMismatch(orig: Program): string | null {
       // just past the clean run slips its neighbours' phase - neither an encoder
       // fault, and the leader phase doesn't affect loading anyway.
       if (k >= 0 && av === 0 && bv === 0) {
-        const op = phaseHigh(orig.stream, a.firstBit + j);
-        const rp = phaseHigh(reenc.stream, bB.firstBit + j);
+        const op = phaseHigh(orig.stream, origHc, a.firstBit + j);
+        const rp = phaseHigh(reenc.stream, reencHc, bB.firstBit + j);
         if (op !== rp) return `${uiByte(k)} (${hex(want)}) frame bit ${j}: phase long-${op ? 'high' : 'low'} (recording) vs long-${rp ? 'high' : 'low'} (ours)`;
       }
 

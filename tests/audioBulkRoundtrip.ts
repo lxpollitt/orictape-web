@@ -34,7 +34,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
-import type { Program } from '../src/decoder';
+import type { Program, HalfCycles } from '../src/decoder';
 import { cleanLeaderRun, decodeWav, hex, medianCellMicros, programLabel, programWindow, roundTripMismatch, stopRun } from './roundtripCompare';
 
 const AUDIO_DIR = 'tests/audio';
@@ -58,11 +58,11 @@ interface Skip { reason: string; detail?: string }
  * a valid header are fine to round-trip).  Checks the compared region only
  * (0x24 .. last program byte) — corruption past it is irrelevant.
  */
-function skipReason(prog: Program, sampleRate: number): Skip | null {
+function skipReason(prog: Program, hc: HalfCycles, sampleRate: number): Skip | null {
   // Slow-format (CSAVE,S) recordings have ~4-5x longer cells and a different
   // cadence/phase regime we neither model nor encode — this is a fast-format
   // round-trip, so exclude them.  Fast cells are 416-624us; slow are ~2000+us.
-  if (medianCellMicros(prog, sampleRate) > 1500) return { reason: 'slow-mode recording (fast-format test only)' };
+  if (medianCellMicros(prog, hc, sampleRate) > 1500) return { reason: 'slow-mode recording (fast-format test only)' };
 
   // Structural usability + extent, derived from the header (any program type).
   const w = programWindow(prog);
@@ -131,11 +131,11 @@ for (let fi = 0; fi < files.length; fi++) {
   const base = f.replace(/\.wav$/i, '');
   process.stderr.write(isTTY ? `\r\x1b[2K\x1b[90m[${fi + 1}/${files.length}] ${f}\x1b[0m` : '');
 
-  let programs: Program[], sampleRate: number;
+  let programs: Program[], sampleRate: number, halfCycles: HalfCycles;
   try {
     // Files tagged "(Ø)" were captured with inverted playback polarity; invert the
     // samples so they decode in the canonical (run-3) frame and can be tested.
-    ({ programs, sampleRate } = decodeWav(readFileSync(join(AUDIO_DIR, f)), f.includes('(Ø)')));
+    ({ programs, sampleRate, halfCycles } = decodeWav(readFileSync(join(AUDIO_DIR, f)), f.includes('(Ø)')));
   } catch (e: any) {
     failures.push(`${base}: decode threw: ${e.message}`);
     failed++;
@@ -145,9 +145,9 @@ for (let fi = 0; fi < files.length; fi++) {
   let fileTested = 0, filePassed = 0, fileFailed = 0, fileSkipped = 0;
   for (const prog of programs) {
     totalProgs++;
-    const label = programLabel(base, prog, sampleRate);
+    const label = programLabel(base, prog, halfCycles, sampleRate);
 
-    const skip = skipReason(prog, sampleRate);
+    const skip = skipReason(prog, halfCycles, sampleRate);
     if (skip) {
       skips.set(skip.reason, (skips.get(skip.reason) ?? 0) + 1);
       fileSkipped++;
@@ -159,7 +159,7 @@ for (let fi = 0; fi < files.length; fi++) {
     testedLen.set(prog.name.length, (testedLen.get(prog.name.length) ?? 0) + 1);
     const sync = cleanLeaderRun(prog);
     syncCounts.push(sync);
-    const mismatch = roundTripMismatch(prog);
+    const mismatch = roundTripMismatch(prog, halfCycles);
     if (mismatch === null) {
       passed++; filePassed++;
       if (verbose) console.log(`  ${c.green('pass')} ${label}  ${c.dim(`(nameLen ${prog.name.length}, sync ${sync})`)}`);

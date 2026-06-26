@@ -1,9 +1,9 @@
 import './style.css';
 import { WaveformView, type StreamInfo } from './waveform';
 import type { WorkerResponse } from './worker';
-import type { Program, LineInfo, ByteInfo } from './decoder';
+import type { Program, LineInfo, ByteInfo, HalfCycles } from './decoder';
 import { lineHealth, lineHasHardError, lineStatuses, programHealth, programSummary, programHasExplicitEdits, lineFirstAddr } from './decoder';
-import { readProgramLines, readProgramBytes, flagNonMonotonicLines, splitProgram, joinPrograms } from './decoder';
+import { readProgramLines, readProgramBytes, flagNonMonotonicLines, splitProgram, joinPrograms, bitFirstSample, streamFirstSample, streamLastSample } from './decoder';
 import { applyLineEdit, splitLineWithEdits, joinLinesWithEdit, deleteLineEdit, restoreLineToOriginalBytes, fixPointersAndTerminators } from './editor';
 import { applyAssembler, type AsmApplyError } from './asmApply';
 import {
@@ -65,6 +65,8 @@ interface TapeData {
   programs:   Program[];
   /** True when loaded from a .tap file — no waveform data. */
   fromTap:    boolean;
+  /** Half-cycle data for resolving per-bit geometry; null for TAP files. */
+  halfCycles: HalfCycles | null;
 }
 
 /** Identifies one specific program from one tape. */
@@ -519,7 +521,7 @@ function computeOriginalSource(prog: Program, tape: TapeData): string {
   if (tape.fromTap) return tape.filename;
   const refByteIdx = prog.lines.length > 0 ? prog.lines[0].firstByte : 0;
   const refBit     = prog.bytes[refByteIdx]?.firstBit ?? 0;
-  const refSample  = prog.stream.bitFirstSample[refBit] ?? 0;
+  const refSample  = tape.halfCycles ? (bitFirstSample(prog.stream, tape.halfCycles, refBit) ?? 0) : 0;
   const startSec   = Math.floor(refSample / tape.sampleRate);
   const base       = tape.filename.replace(/\.wav$/i, '');
   const name       = prog.name || '(unnamed)';
@@ -612,6 +614,7 @@ fileInput.addEventListener('change', async () => {
         sampleRate: 48000,
         programs,
         fromTap:  true,
+        halfCycles: null,
       });
     } else {
       // Decode AND conditioning both run in the worker (off the main thread); it hands
@@ -621,7 +624,7 @@ fileInput.addEventListener('change', async () => {
       if (!result.ok) { showError(`${file.name}: ${result.error}`); return; }
 
       assignProgNumbers(result.programs);
-      tapes.push({ filename: file.name, samples: result.samples, sampleRate: result.sampleRate, programs: result.programs, fromTap: false });
+      tapes.push({ filename: file.name, samples: result.samples, sampleRate: result.sampleRate, programs: result.programs, fromTap: false, halfCycles: result.halfCycles });
     }
     // Set originalSource on any program where it wasn't already filled in
     // by TAP metadata.  For WAV decodes this is always recomputed; for
@@ -903,8 +906,8 @@ function buildStreamInfos(tape: typeof tapes[0]): StreamInfo[] {
     name:        prog.name,
     lineCount:   prog.lines.length,
     byteCount:   prog.bytes.length,
-    firstSample: prog.stream.firstSample,
-    lastSample:  prog.stream.lastSample,
+    firstSample: tape.halfCycles ? streamFirstSample(prog.stream, tape.halfCycles) : 0,
+    lastSample:  tape.halfCycles ? streamLastSample(prog.stream, tape.halfCycles) : 0,
   }));
 }
 
@@ -949,7 +952,7 @@ function renderAll(): void {
   renderBasic(prog);
   const activeTape = tapes[activeTapeIdx];
   if (prog && activeTape && !activeTape.fromTap && leftSamples) {
-    waveform.setData(leftSamples, prog, activeTape.sampleRate, buildStreamInfos(activeTape));
+    waveform.setData(leftSamples, prog, activeTape.sampleRate, buildStreamInfos(activeTape), activeTape.halfCycles);
   } else {
     waveform.clearData();
   }
@@ -3685,7 +3688,7 @@ function updateStatusBar(): void {
     if (prog && tape) {
       const refByteIdx  = prog.lines.length > 0 ? prog.lines[0].firstByte : 0;
       const refBit      = prog.bytes[refByteIdx]?.firstBit ?? 0;
-      const refSample   = prog.stream.bitFirstSample[refBit] ?? 0;
+      const refSample   = tape.halfCycles ? (bitFirstSample(prog.stream, tape.halfCycles, refBit) ?? 0) : 0;
       const startSec    = Math.floor(refSample / tape.sampleRate);
       const base        = tape.filename.replace(/\.wav$/i, '');
       const name        = prog.name || '(unnamed)';

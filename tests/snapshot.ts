@@ -19,11 +19,11 @@
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, basename } from 'path';
 import { parseWavFile } from '../src/wavfile';
-import { readBitStreams, readHalfCycles, readPrograms } from '../src/decoder';
+import { readBitStreams, readHalfCycles, readPrograms, bitFirstSample } from '../src/decoder';
 import { conditionSamples } from '../src/tapeAnalog';
 import { encodeTapFile } from '../src/tapEncoder';
 import { fixPointersAndTerminators } from '../src/editor';
-import type { Program } from '../src/decoder';
+import type { Program, HalfCycles } from '../src/decoder';
 
 function usage(): never {
   console.error('Usage: npx tsx tests/snapshot.ts [--no-fix] <input-dir> <output-dir>');
@@ -44,7 +44,7 @@ if (!existsSync(inputDir)) {
 
 mkdirSync(outputDir, { recursive: true });
 
-function summariseProgram(prog: Program, index: number, sampleRate: number): string {
+function summariseProgram(prog: Program, index: number, halfCycles: HalfCycles, sampleRate: number): string {
   const name = prog.name ? `"${prog.name}"` : '(unnamed)';
   const format = prog.stream.format;
   const bytes = prog.bytes.length;
@@ -53,7 +53,7 @@ function summariseProgram(prog: Program, index: number, sampleRate: number): str
   // Start time from the first BASIC line (or first byte as fallback)
   const refByteIdx  = lines > 0 ? prog.lines[0].firstByte : 0;
   const refBit      = prog.bytes[refByteIdx]?.firstBit ?? 0;
-  const refSample   = prog.stream.bitFirstSample[refBit] ?? 0;
+  const refSample   = bitFirstSample(prog.stream, halfCycles, refBit) ?? 0;
   const startSec    = (refSample / sampleRate).toFixed(1);
 
   // Byte-level stats (across the full hex stream)
@@ -134,11 +134,12 @@ for (const filename of wavFiles) {
 
   let programs: Program[];
   let sampleRate = 48000;
+  let halfCycles: HalfCycles;
   try {
     const buf     = readFileSync(filePath);
     const wav     = parseWavFile(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
     sampleRate    = wav.sampleRate;
-    const halfCycles = readHalfCycles(conditionSamples(wav.left, wav.sampleRate), wav.sampleRate);
+    halfCycles = readHalfCycles(conditionSamples(wav.left, wav.sampleRate), wav.sampleRate);
     const streams = readBitStreams(halfCycles, wav.sampleRate);
     programs      = readPrograms(streams);
   } catch (e: any) {
@@ -157,14 +158,14 @@ for (const filename of wavFiles) {
   for (let pi = 0; pi < programs.length; pi++) {
     const prog = programs[pi];
     totalPrograms++;
-    summaryLines.push(summariseProgram(prog, pi, sampleRate));
+    summaryLines.push(summariseProgram(prog, pi, halfCycles, sampleRate));
 
     // Write TAP file only for programs with a valid header and decoded BASIC lines.
     if (prog.name && prog.lines.length > 0) {
       // Derive start time from the first BASIC line's position in the WAV.
       const lineFirstByte   = prog.lines[0].firstByte;
       const lineFirstBit    = prog.bytes[lineFirstByte].firstBit;
-      const lineFirstSample = prog.stream.bitFirstSample[lineFirstBit];
+      const lineFirstSample = bitFirstSample(prog.stream, halfCycles, lineFirstBit);
       const startSec        = Math.floor(lineFirstSample / sampleRate);
 
       // Fix pointer / terminator / endAddr issues before encoding — done

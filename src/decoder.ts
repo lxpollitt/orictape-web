@@ -21,9 +21,6 @@ export interface BitInfo {
   v: 0 | 1;
   firstHalfCycle: number;
   lastHalfCycle: number;
-  l1: number;
-  firstSample: number;
-  lastSample: number;
   unclear: boolean;
 }
 
@@ -118,16 +115,10 @@ export interface BitStream {
   bitLastHalfCycle: Uint32Array;
   bitUnclear: Uint8Array;      // 0 = clean, 1 = unclear
 
-  // TODO: all the fields below here get retired - using half-cycle info instead
-  bitL1: Uint16Array;          // first half-cycle length (samples; L2 = bitLength - L1)
-  bitFirstSample: Uint32Array;
-  bitLastSample: Uint32Array;
-  bitMaxIndex: Uint32Array;    // debug: sample index of the max found by readCycle
-  bitMinIndex: Uint32Array;    // debug: sample index of the min found by readCycle
-  // Note: raw samples are NOT stored here. The UI holds them separately
-  // (from the original WAV parse) to avoid duplicating 20MB per stream.
-  firstSample: number;
-  lastSample: number;
+  // Stream-level half-cycle range (sync run through the last cycle).  Sample
+  // positions are derived on use via halfCycles — no samples are stored here.
+  firstHalfCycle: number;
+  lastHalfCycle: number;
   minVal: number;
   maxVal: number;
 }
@@ -449,12 +440,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   const _bitV            = new Uint8Array(maxBits);
   const _bitFirstHalfCycle = new Uint32Array(maxBits);
   const _bitLastHalfCycle  = new Uint32Array(maxBits);
-  const _bitL1           = new Uint16Array(maxBits);
-  const _bitFirstSample  = new Uint32Array(maxBits);
-  const _bitLastSample   = new Uint32Array(maxBits);
   const _bitUnclear      = new Uint8Array(maxBits);
-  const _bitMaxIndex     = new Uint32Array(maxBits);
-  const _bitMinIndex     = new Uint32Array(maxBits);
   let bitCount = 0;
 
   // Working state shared with readCycle.  readCycle walks nextHalfCycleIndex through the
@@ -462,9 +448,8 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   // rewind drive off the index.
   let minVal = 0, maxVal = 0;
   let firstHalfCycleIndex = 0, secondHalfCycleIndex = 0, nextHalfCycleIndex = startHalfCycleIndex;
-  let aboveIndex = 0;
   let lengthAbove = 0, lengthBelow = 0, length = 0;
-  let streamFirstSample = startHalfCycleIndex < halfCycles.count ? halfCycles.hcFirstSample[startHalfCycleIndex] : 0;
+  let streamFirstHalfCycle = startHalfCycleIndex;
   let streamMinVal = 0, streamMaxVal = 0;
 
   // Cycle classification output (set by readCycle, consumed by pushBit).
@@ -484,7 +469,6 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     lengthAbove = halfCycles.hcLength[firstHalfCycleIndex];
     lengthBelow = halfCycles.hcLength[secondHalfCycleIndex];
     length = lengthAbove + lengthBelow;
-    aboveIndex = halfCycles.hcLastSample[secondHalfCycleIndex] + 1;
     nextHalfCycleIndex += 2;
 
     if (minVal < streamMinVal) streamMinVal = minVal;
@@ -535,12 +519,6 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     _bitFirstHalfCycle[bitCount] = firstHalfCycleIndex;
     _bitLastHalfCycle[bitCount]  = secondHalfCycleIndex;
     _bitUnclear[bitCount] = (cycleUnclear || cycleKind === 'long') ? 1 : 0;
-    // Legacy sample-position arrays, derived from the half-cycle indices (Step A; retired in Step B).
-    _bitL1[bitCount]          = halfCycles.hcLength[firstHalfCycleIndex];
-    _bitFirstSample[bitCount] = halfCycles.hcFirstSample[firstHalfCycleIndex];
-    _bitLastSample[bitCount]  = halfCycles.hcLastSample[secondHalfCycleIndex];
-    _bitMaxIndex[bitCount]    = halfCycles.hcPeakSample[firstHalfCycleIndex];
-    _bitMinIndex[bitCount]    = halfCycles.hcPeakSample[secondHalfCycleIndex];
     bitCount++;
   };
 
@@ -711,7 +689,6 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
             // otherwsie mark it as unclear.
             _bitUnclear[bitCount - 1] |= (slowPossibleReframeKind === 'medium') ? 0 : 1;
             _bitLastHalfCycle[bitCount - 1] = slowReframeHalfCycleIndex - 1;
-            _bitLastSample[bitCount - 1]    = halfCycles.hcLastSample[slowReframeHalfCycleIndex - 1];
           } else if (cyclesBeforeReframe > 1) {
             // Bundle the cylces up two the reframe as a seperate unclear bit
             if (slowShorts == 0 && slowLongs == 0) {
@@ -726,9 +703,6 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
             _bitUnclear[bitCount] = 1;
             _bitFirstHalfCycle[bitCount] = slowBitFirstHalfCycleIndex;
             _bitLastHalfCycle[bitCount]  = slowReframeHalfCycleIndex - 1;
-            _bitFirstSample[bitCount] = halfCycles.hcFirstSample[slowBitFirstHalfCycleIndex];
-            _bitLastSample[bitCount]  = halfCycles.hcLastSample[slowReframeHalfCycleIndex - 1];
-            _bitL1[bitCount] = 0;
             bitCount++;
           } 
 
@@ -845,9 +819,6 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
         _bitUnclear[bitCount] = slowBitUnclear ? 1 : 0;
         _bitFirstHalfCycle[bitCount] = slowBitFirstHalfCycleIndex;
         _bitLastHalfCycle[bitCount]  = secondHalfCycleIndex;
-        _bitFirstSample[bitCount] = halfCycles.hcFirstSample[slowBitFirstHalfCycleIndex];
-        _bitLastSample[bitCount]  = halfCycles.hcLastSample[secondHalfCycleIndex];
-        _bitL1[bitCount] = 0;
         bitCount++;
         slowCycles = 0;
         slowShorts = 0;
@@ -872,7 +843,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     bitCount = 0;  // reset without reallocating
     mediumCycleCount = 0;
     longCycleCount = 0;
-    streamFirstSample = halfCycles.hcFirstSample[nextHalfCycleIndex];
+    streamFirstHalfCycle = nextHalfCycleIndex;
     // Save state at the start of this sync run attempt.
     syncRunHalfCycleIndex = nextHalfCycleIndex;
     while (nextHalfCycleIndex + 1 < halfCycles.count && bitCount < MIN_SYNC_BITS) {
@@ -903,7 +874,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     nextHalfCycleIndex = syncRunHalfCycleIndex;
     streamMinVal = 0;
     streamMaxVal = 0;
-    streamFirstSample = halfCycles.hcFirstSample[syncRunHalfCycleIndex];
+    streamFirstHalfCycle = syncRunHalfCycleIndex;
     slowBitUnclear = false;
   }
 
@@ -929,14 +900,9 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     bitV:           _bitV.slice(0, bitCount),
     bitFirstHalfCycle: _bitFirstHalfCycle.slice(0, bitCount),
     bitLastHalfCycle:  _bitLastHalfCycle.slice(0, bitCount),
-    bitL1:          _bitL1.slice(0, bitCount),
-    bitFirstSample: _bitFirstSample.slice(0, bitCount),
-    bitLastSample:  _bitLastSample.slice(0, bitCount),
     bitUnclear:     _bitUnclear.slice(0, bitCount),
-    bitMaxIndex:    _bitMaxIndex.slice(0, bitCount),
-    bitMinIndex:    _bitMinIndex.slice(0, bitCount),
-    firstSample: streamFirstSample,
-    lastSample:  aboveIndex,
+    firstHalfCycle: streamFirstHalfCycle,
+    lastHalfCycle:  nextHalfCycleIndex - 1,
     minVal: streamMinVal,
     maxVal: streamMaxVal,
   };
@@ -944,16 +910,33 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   return { stream, halfCyclesRead };
 }
 
-// Helper to read a single bit as a plain object (for UI use).
-export function streamBitAt(s: BitStream, i: number): BitInfo {
+// ── Per-bit geometry accessors ───────────────────────────────────────────────
+// Resolve a bit's half-cycle indices to sample positions via the tape's halfCycles.
+// "Assume 2 half-cycles": L1 and the max peak read the bit's first half-cycle; the
+// min peak reads its last.  (A slow bit's intermediate half-cycles aren't shown yet.)
+export const bitFirstSample = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcFirstSample[s.bitFirstHalfCycle[i]];
+export const bitLastSample  = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcLastSample[s.bitLastHalfCycle[i]];
+export const bitL1          = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcLength[s.bitFirstHalfCycle[i]];
+export const bitMaxSample   = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcPeakSample[s.bitFirstHalfCycle[i]];
+export const bitMinSample   = (s: BitStream, hc: HalfCycles, i: number): number => hc.hcPeakSample[s.bitLastHalfCycle[i]];
+
+// ── Stream-level extent accessors ────────────────────────────────────────────
+// Resolve a stream's half-cycle range to its sample span.  lastSample is the
+// exclusive end (one past the last sample), matching the old stream.lastSample.
+export const streamFirstSample = (s: BitStream, hc: HalfCycles): number => hc.hcFirstSample[s.firstHalfCycle];
+export const streamLastSample  = (s: BitStream, hc: HalfCycles): number => hc.hcLastSample[s.lastHalfCycle] + 1;
+
+/** Empty HalfCycles — a non-null placeholder for consumers before data loads. */
+export function emptyHalfCycles(): HalfCycles {
   return {
-    v: s.bitV[i] as 0 | 1,
-    firstHalfCycle: s.bitFirstHalfCycle[i],
-    lastHalfCycle:  s.bitLastHalfCycle[i],
-    l1: s.bitL1[i],
-    firstSample: s.bitFirstSample[i],
-    lastSample: s.bitLastSample[i],
-    unclear: s.bitUnclear[i] === 1,
+    count: 0,
+    hcLength:      new Uint16Array(0),
+    hcPeakSample:  new Uint32Array(0),
+    hcPeakValue:   new Int16Array(0),
+    hcFirstSample: new Uint32Array(0),
+    hcLastSample:  new Uint32Array(0),
+    hcUnclear:     new Uint8Array(0),
+    firstSample: 0, lastSample: 0, minVal: 0, maxVal: 0,
   };
 }
 
@@ -968,14 +951,9 @@ export function emptyBitStream(format: 'fast' | 'slow' = 'fast'): BitStream {
     bitV:           new Uint8Array(0),
     bitFirstHalfCycle: new Uint32Array(0),
     bitLastHalfCycle:  new Uint32Array(0),
-    bitL1:          new Uint16Array(0),
-    bitFirstSample: new Uint32Array(0),
-    bitLastSample:  new Uint32Array(0),
     bitUnclear:     new Uint8Array(0),
-    bitMaxIndex:    new Uint32Array(0),
-    bitMinIndex:    new Uint32Array(0),
-    firstSample:    0,
-    lastSample:     0,
+    firstHalfCycle: 0,
+    lastHalfCycle:  0,
     minVal:         0,
     maxVal:         0,
   };
@@ -1015,14 +993,9 @@ export function splitBitStream(stream: BitStream, bitPos: number): [BitStream, B
     bitV:           stream.bitV.slice(0, bitPos),
     bitFirstHalfCycle: stream.bitFirstHalfCycle.slice(0, bitPos),
     bitLastHalfCycle:  stream.bitLastHalfCycle.slice(0, bitPos),
-    bitL1:          stream.bitL1.slice(0, bitPos),
-    bitFirstSample: stream.bitFirstSample.slice(0, bitPos),
-    bitLastSample:  stream.bitLastSample.slice(0, bitPos),
     bitUnclear:     stream.bitUnclear.slice(0, bitPos),
-    bitMaxIndex:    stream.bitMaxIndex.slice(0, bitPos),
-    bitMinIndex:    stream.bitMinIndex.slice(0, bitPos),
-    firstSample:    stream.firstSample,
-    lastSample:     bitPos > 0 ? stream.bitLastSample[bitPos - 1] : stream.firstSample,
+    firstHalfCycle: stream.firstHalfCycle,
+    lastHalfCycle:  bitPos > 0 ? stream.bitLastHalfCycle[bitPos - 1] : stream.firstHalfCycle,
     minVal:         stream.minVal,
     maxVal:         stream.maxVal,
   };
@@ -1032,14 +1005,9 @@ export function splitBitStream(stream: BitStream, bitPos: number): [BitStream, B
     bitV:           stream.bitV.slice(bitPos),
     bitFirstHalfCycle: stream.bitFirstHalfCycle.slice(bitPos),
     bitLastHalfCycle:  stream.bitLastHalfCycle.slice(bitPos),
-    bitL1:          stream.bitL1.slice(bitPos),
-    bitFirstSample: stream.bitFirstSample.slice(bitPos),
-    bitLastSample:  stream.bitLastSample.slice(bitPos),
     bitUnclear:     stream.bitUnclear.slice(bitPos),
-    bitMaxIndex:    stream.bitMaxIndex.slice(bitPos),
-    bitMinIndex:    stream.bitMinIndex.slice(bitPos),
-    firstSample:    bitPos < n ? stream.bitFirstSample[bitPos] : stream.lastSample,
-    lastSample:     stream.lastSample,
+    firstHalfCycle: bitPos < n ? stream.bitFirstHalfCycle[bitPos] : stream.lastHalfCycle,
+    lastHalfCycle:  stream.lastHalfCycle,
     minVal:         stream.minVal,
     maxVal:         stream.maxVal,
   };
@@ -1050,17 +1018,17 @@ export function splitBitStream(stream: BitStream, bitPos: number): [BitStream, B
  * Concatenate one or more BitStreams into a single stream, in order.
  *
  * Per-bit typed arrays are concatenated in input order.  Each bit keeps its
- * original sample positions — so when the inputs came from non-adjacent
+ * original half-cycle indices — so when the inputs came from non-adjacent
  * audio regions (e.g. user-initiated join across an audio gap), the result's
- * bitFirstSample / bitLastSample arrays are NOT monotonic: there will be a
- * jump at each seam.  This is fine for byte decoding (which indexes by bit
- * position, not sample position) and the waveform view renders the gap
- * naturally because it draws each bit at its own sample position.
+ * bitFirstHalfCycle / bitLastHalfCycle arrays are NOT monotonic: there will be
+ * a jump at each seam.  This is fine for byte decoding (which indexes by bit
+ * position) and the waveform view renders the gap naturally because it draws
+ * each bit at its own resolved sample position.
  *
  * Per-stream metadata:
  *   - `format`: all inputs must match; throws otherwise
- *   - `firstSample`: first input's firstSample
- *   - `lastSample`:  last input's lastSample
+ *   - `firstHalfCycle`: first input's firstHalfCycle
+ *   - `lastHalfCycle`:  last input's lastHalfCycle
  *   - `minVal` / `maxVal`: min / max across all inputs
  *
  * Throws if the input array is empty or the formats differ.  A single-stream
@@ -1085,12 +1053,7 @@ export function joinBitStreams(streams: BitStream[]): BitStream {
   const bitV           = new Uint8Array(total);
   const bitFirstHalfCycle = new Uint32Array(total);
   const bitLastHalfCycle  = new Uint32Array(total);
-  const bitL1          = new Uint16Array(total);
-  const bitFirstSample = new Uint32Array(total);
-  const bitLastSample  = new Uint32Array(total);
   const bitUnclear     = new Uint8Array(total);
-  const bitMaxIndex    = new Uint32Array(total);
-  const bitMinIndex    = new Uint32Array(total);
   let offset = 0;
   let minVal = streams[0].minVal;
   let maxVal = streams[0].maxVal;
@@ -1098,12 +1061,7 @@ export function joinBitStreams(streams: BitStream[]): BitStream {
     bitV          .set(s.bitV,           offset);
     bitFirstHalfCycle.set(s.bitFirstHalfCycle, offset);
     bitLastHalfCycle .set(s.bitLastHalfCycle,  offset);
-    bitL1         .set(s.bitL1,          offset);
-    bitFirstSample.set(s.bitFirstSample, offset);
-    bitLastSample .set(s.bitLastSample,  offset);
     bitUnclear    .set(s.bitUnclear,     offset);
-    bitMaxIndex   .set(s.bitMaxIndex,    offset);
-    bitMinIndex   .set(s.bitMinIndex,    offset);
     offset += s.bitCount;
     if (s.minVal < minVal) minVal = s.minVal;
     if (s.maxVal > maxVal) maxVal = s.maxVal;
@@ -1115,14 +1073,9 @@ export function joinBitStreams(streams: BitStream[]): BitStream {
     bitV,
     bitFirstHalfCycle,
     bitLastHalfCycle,
-    bitL1,
-    bitFirstSample,
-    bitLastSample,
     bitUnclear,
-    bitMaxIndex,
-    bitMinIndex,
-    firstSample: streams[0].firstSample,
-    lastSample:  streams[streams.length - 1].lastSample,
+    firstHalfCycle: streams[0].firstHalfCycle,
+    lastHalfCycle:  streams[streams.length - 1].lastHalfCycle,
     minVal,
     maxVal,
   };

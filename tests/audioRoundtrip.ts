@@ -23,7 +23,7 @@ import type { ByteInfo, Program } from '../src/decoder';
 import { emptyBitStream, readBitStreams, readHalfCycles, readPrograms } from '../src/decoder';
 import { conditionSamples } from '../src/tapeAnalog';
 import { buildByteStream, encodeProgramSamples, SAMPLE_RATE, SYNC_BYTES } from '../src/audioEncoder';
-import { decodeWavBytes, hex, roundTripMismatch } from './roundtripCompare';
+import { decodeWav, hex, roundTripMismatch } from './roundtripCompare';
 
 type Result = string | null;                 // null = pass, 'SKIP …' = skipped, else failure
 type Test = { name: string; run: () => Result };
@@ -77,9 +77,10 @@ const CAPTURE = 'tests/audio/FiiO CP13 - Boots C90 - Space Station A - first.L.w
 
 test('real Oric-1 capture: bit-exact vs the recording (header TAP-normalised)', () => {
   if (!existsSync(CAPTURE)) return `SKIP capture not present: ${CAPTURE}`;
-  const prog = decodeWavBytes(readFileSync(CAPTURE))[0];
+  const { programs, halfCycles } = decodeWav(readFileSync(CAPTURE));
+  const prog = programs[0];
   if (!prog || prog.lines.length === 0) return `capture decoded no BASIC lines`;
-  return roundTripMismatch(prog);   // shared with the bulk test (audioBulkRoundtrip.ts)
+  return roundTripMismatch(prog, halfCycles);   // shared with the bulk test (audioBulkRoundtrip.ts)
 });
 
 // ── Runner ───────────────────────────────────────────────────────────────────

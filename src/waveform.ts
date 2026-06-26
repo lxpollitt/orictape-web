@@ -1,4 +1,5 @@
-import type { ByteInfo, BitStream, Program } from './decoder';
+import type { ByteInfo, BitStream, Program, HalfCycles } from './decoder';
+import { bitFirstSample, bitLastSample, bitL1, bitMaxSample, bitMinSample, streamFirstSample, streamLastSample, emptyHalfCycles } from './decoder';
 
 const GREEN  = '#3d8c3d';
 const YELLOW = '#c9a428';
@@ -53,6 +54,7 @@ export class WaveformView {
   private readonly ctx: CanvasRenderingContext2D;
 
   private samples:    Int16Array | null = null;
+  private halfCycles: HalfCycles = emptyHalfCycles();
   private prog:       Program | null    = null;
   private sampleRate  = 48000;
   private allStreams:  StreamInfo[] = [];
@@ -105,14 +107,16 @@ export class WaveformView {
   /** Clear waveform data and show a "No waveform" placeholder (used for TAP files). */
   clearData(): void {
     this.samples     = null;
+    this.halfCycles  = emptyHalfCycles();
     this.prog        = null;
     this.selByte     = null;
     this.noWaveform  = true;
     this.draw();
   }
 
-  setData(samples: Int16Array, prog: Program, sampleRate = 48000, allStreams: StreamInfo[] = []): void {
+  setData(samples: Int16Array, prog: Program, sampleRate = 48000, allStreams: StreamInfo[] = [], halfCycles: HalfCycles | null = null): void {
     this.samples      = samples;
+    this.halfCycles   = halfCycles ?? emptyHalfCycles();
     this.prog         = prog;
     this.sampleRate   = sampleRate;
     this.allStreams    = allStreams;
@@ -157,9 +161,9 @@ export class WaveformView {
     // current view would otherwise be looking at empty space outside the
     // new program).
     const visEnd = this.viewStart + this.canvas.width * this.spp;
-    const overlaps = visEnd > prog.stream.firstSample && this.viewStart < prog.stream.lastSample;
+    const overlaps = visEnd > streamFirstSample(prog.stream, this.halfCycles) && this.viewStart < streamLastSample(prog.stream, this.halfCycles);
     if (!overlaps) {
-      this.viewStart = prog.stream.firstSample;
+      this.viewStart = streamFirstSample(prog.stream, this.halfCycles);
     }
     this.clampView();
     this.updateZoomDisplay();
@@ -194,14 +198,14 @@ export class WaveformView {
     if (!this.prog || this.prog.bytes.length === 0) return null;
     const { bytes, stream } = this.prog;
     // Reject clicks outside the program's stream range.
-    if (sample < stream.firstSample || sample > stream.lastSample) return null;
+    if (sample < streamFirstSample(stream, this.halfCycles) || sample > streamLastSample(stream, this.halfCycles)) return null;
     let lo = 0, hi = bytes.length - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
       const b = bytes[mid];
       if (b.firstBit >= stream.bitCount || b.lastBit >= stream.bitCount) { hi = mid - 1; continue; }
-      const bFirst = stream.bitFirstSample[b.firstBit];
-      const bLast  = stream.bitLastSample[b.lastBit];
+      const bFirst = bitFirstSample(stream, this.halfCycles, b.firstBit);
+      const bLast  = bitLastSample(stream, this.halfCycles, b.lastBit);
       if      (sample < bFirst) hi = mid - 1;
       else if (sample > bLast)  lo = mid + 1;
       else return mid;
@@ -218,8 +222,8 @@ export class WaveformView {
     let lo = 0, hi = stream.bitCount - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      if (sample < stream.bitFirstSample[mid])      hi = mid - 1;
-      else if (sample > stream.bitLastSample[mid])   lo = mid + 1;
+      if (sample < bitFirstSample(stream, this.halfCycles, mid))      hi = mid - 1;
+      else if (sample > bitLastSample(stream, this.halfCycles, mid))   lo = mid + 1;
       else return mid;
     }
     return null;  // sample falls in a gap between bits
@@ -238,7 +242,7 @@ export class WaveformView {
    *  length).  Falls back to MAX_BYTE_MODE_SPP when no program is loaded. */
   private overview100Spp(): number {
     if (!this.prog) return MAX_BYTE_MODE_SPP;
-    const len = this.prog.stream.lastSample - this.prog.stream.firstSample;
+    const len = streamLastSample(this.prog.stream, this.halfCycles) - streamFirstSample(this.prog.stream, this.halfCycles);
     return Math.max(1, len / this.canvas.width);
   }
 
@@ -264,7 +268,7 @@ export class WaveformView {
   private isAtOverviewFit(): boolean {
     if (!this.prog) return false;
     const overviewPct  = Math.round(this.overview100Spp() / this.spp * 100);
-    const viewStartOff = Math.abs(this.viewStart - this.prog.stream.firstSample) / this.spp;
+    const viewStartOff = Math.abs(this.viewStart - streamFirstSample(this.prog.stream, this.halfCycles)) / this.spp;
     return overviewPct === 100 && viewStartOff < 1;
   }
 
@@ -278,7 +282,7 @@ export class WaveformView {
     const b = this.prog.bytes[this.selByte];
     const stream = this.prog.stream;
     if (!b || b.firstBit >= stream.bitCount || b.lastBit >= stream.bitCount) return false;
-    const byteMid  = (stream.bitFirstSample[b.firstBit] + stream.bitLastSample[b.lastBit]) / 2;
+    const byteMid  = (bitFirstSample(stream, this.halfCycles, b.firstBit) + bitLastSample(stream, this.halfCycles, b.lastBit)) / 2;
     const bytePx   = (byteMid - this.viewStart) / this.spp;
     const centrePx = this.canvas.width / 2;
     return Math.abs(bytePx - centrePx) < 1;
@@ -363,7 +367,7 @@ export class WaveformView {
   fitToProgram(): void {
     if (!this.prog) return;
     this.spp       = this.overview100Spp();
-    this.viewStart = this.prog.stream.firstSample;
+    this.viewStart = streamFirstSample(this.prog.stream, this.halfCycles);
     this.clampView();
     this.updateZoomDisplay();
     this.draw();
@@ -442,8 +446,8 @@ export class WaveformView {
    *  still on screen.  No-op when the byte is fully or partially visible.
    *  Shared by `followAdjacent` and `stayIfVisible` modes of selectByte. */
   private rescueIfByteOffScreen(b: ByteInfo, stream: BitStream): void {
-    const byteFirstSample = stream.bitFirstSample[b.firstBit];
-    const byteLastSample  = stream.bitLastSample[b.lastBit];
+    const byteFirstSample = bitFirstSample(stream, this.halfCycles, b.firstBit);
+    const byteLastSample  = bitLastSample(stream, this.halfCycles, b.lastBit);
     const visStart = this.viewStart;
     const visEnd   = this.viewStart + this.canvas.width * this.spp;
     const marginPx = 12;
@@ -465,7 +469,7 @@ export class WaveformView {
     const byte = this.selByte !== null ? this.prog.bytes[this.selByte] : null;
     const stream = this.prog.stream;
     if (byte && byte.firstBit < stream.bitCount && byte.lastBit < stream.bitCount) {
-      anchorSample = (stream.bitFirstSample[byte.firstBit] + stream.bitLastSample[byte.lastBit]) / 2;
+      anchorSample = (bitFirstSample(stream, this.halfCycles, byte.firstBit) + bitLastSample(stream, this.halfCycles, byte.lastBit)) / 2;
     } else {
       anchorSample = this.viewStart + (this.canvas.width / 2) * this.spp;
     }
@@ -498,7 +502,7 @@ export class WaveformView {
       this.draw();
       return;
     }
-    const newMid = (stream.bitFirstSample[b.firstBit] + stream.bitLastSample[b.lastBit]) / 2;
+    const newMid = (bitFirstSample(stream, this.halfCycles, b.firstBit) + bitLastSample(stream, this.halfCycles, b.lastBit)) / 2;
 
     // 'stayIfVisible' mode: don't shift the view if the new byte has any
     // overlap with the current viewport — preserves waveform context when
@@ -528,7 +532,7 @@ export class WaveformView {
     if (mode === 'followAdjacent' && prevSelByte !== null && prevSelByte !== byteIndex) {
       const oldB = this.prog.bytes[prevSelByte];
       if (oldB && oldB.firstBit < stream.bitCount && oldB.lastBit < stream.bitCount) {
-        const oldMid = (stream.bitFirstSample[oldB.firstBit] + stream.bitLastSample[oldB.lastBit]) / 2;
+        const oldMid = (bitFirstSample(stream, this.halfCycles, oldB.firstBit) + bitLastSample(stream, this.halfCycles, oldB.lastBit)) / 2;
         this.viewStart += (newMid - oldMid);
         this.clampView();
         this.rescueIfByteOffScreen(b, stream);
@@ -603,15 +607,15 @@ export class WaveformView {
     if (this.selByte !== null) {
       const b = prog.bytes[this.selByte];
       if (b && b.firstBit < stream.bitCount && b.lastBit < stream.bitCount) {
-        const x0 = (stream.bitFirstSample[b.firstBit] - vs) / spp;
-        const x1 = (stream.bitLastSample[b.lastBit]   - vs) / spp;
+        const x0 = (bitFirstSample(stream, this.halfCycles, b.firstBit) - vs) / spp;
+        const x1 = (bitLastSample(stream, this.halfCycles, b.lastBit)   - vs) / spp;
         const dFirst = b.firstBit + 1, dLast = Math.min(b.firstBit + 8, b.lastBit);
         const splitBits = x1 - x0 >= 24 && dLast >= dFirst && dLast < stream.bitCount;
         ctx.fillStyle = splitBits ? '#1a2e1a' : '#1e3a1e';   // framing (subtle) / whole byte
         ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
         if (splitBits) {
-          const dx0 = (stream.bitFirstSample[dFirst] - vs) / spp;
-          const dx1 = (stream.bitLastSample[dLast]   - vs) / spp;
+          const dx0 = (bitFirstSample(stream, this.halfCycles, dFirst) - vs) / spp;
+          const dx1 = (bitLastSample(stream, this.halfCycles, dLast)   - vs) / spp;
           ctx.fillStyle = '#1e3a1e';                         // data bits (strong)
           ctx.fillRect(dx0, 0, dx1 - dx0, h);
         }
@@ -630,7 +634,7 @@ export class WaveformView {
     // Advance bit pointer to the first bit that could be visible.
     // Save the starting index so the label pass can reuse it.
     let bi = 0;
-    while (bi < stream.bitCount && stream.bitLastSample[bi] < vs) bi++;
+    while (bi < stream.bitCount && bitLastSample(stream, this.halfCycles, bi) < vs) bi++;
     const biStart = bi;
 
     // Draw waveform left-to-right, batching canvas strokes by colour.
@@ -645,11 +649,11 @@ export class WaveformView {
       // Use Math.floor(sStart) so fractional pixel positions don't skip past
       // a bit whose last sample still overlaps this pixel.
       const sampleStart = Math.floor(sStart);
-      while (bi < stream.bitCount && stream.bitLastSample[bi] < sampleStart) bi++;
+      while (bi < stream.bitCount && bitLastSample(stream, this.halfCycles, bi) < sampleStart) bi++;
 
       // Pick colour from the first overlapping bit (if any).
       let color = DIM;
-      if (bi < stream.bitCount && stream.bitFirstSample[bi] <= sEnd) {
+      if (bi < stream.bitCount && bitFirstSample(stream, this.halfCycles, bi) <= sEnd) {
         color = this.bitIsError![bi] ? RED
               : stream.bitUnclear[bi]     ? YELLOW
               : GREEN;
@@ -702,9 +706,9 @@ export class WaveformView {
       const labelY = waveH + LABEL_H / 2;
 
       for (let lbi = biStart; lbi < stream.bitCount; lbi++) {
-        const x0 = (stream.bitFirstSample[lbi] - vs) / spp;
+        const x0 = (bitFirstSample(stream, this.halfCycles, lbi) - vs) / spp;
         if (x0 > w) break;
-        const x1  = (stream.bitLastSample[lbi] - vs) / spp;
+        const x1  = (bitLastSample(stream, this.halfCycles, lbi) - vs) / spp;
         const cx  = (x0 + x1) / 2;
         if (cx < 0) continue;
         const col = this.bitIsParityErr![lbi] ? RED
@@ -720,9 +724,9 @@ export class WaveformView {
     // ── Hover bit markers (vertical lines at bit edges and L1/L2 split) ──────
     if (spp <= 0.75 && this.hoverBit !== null) {
       const bi    = this.hoverBit;
-      const first = stream.bitFirstSample[bi];
-      const last  = stream.bitLastSample[bi];
-      const l1    = stream.bitL1[bi];
+      const first = bitFirstSample(stream, this.halfCycles, bi);
+      const last  = bitLastSample(stream, this.halfCycles, bi);
+      const l1    = bitL1(stream, this.halfCycles, bi);
       const xStart = (first - vs) / spp;
       const xEnd   = (last + 1 - vs) / spp;
 
@@ -746,8 +750,8 @@ export class WaveformView {
       }
 
       // Sparse dotted lines at maxIndex and minIndex (debug: where readCycle found extrema).
-      const xMax = (stream.bitMaxIndex[bi] - vs) / spp;
-      const xMin = (stream.bitMinIndex[bi] - vs) / spp;
+      const xMax = (bitMaxSample(stream, this.halfCycles, bi) - vs) / spp;
+      const xMin = (bitMinSample(stream, this.halfCycles, bi) - vs) / spp;
       ctx.strokeStyle = '#00b4ff';
       ctx.setLineDash([2, 6]);
       ctx.beginPath();
@@ -766,10 +770,10 @@ export class WaveformView {
 
       if (this.hoverBit !== null) {
         const bi = this.hoverBit;
-        const first = stream.bitFirstSample[bi];
-        const last  = stream.bitLastSample[bi];
+        const first = bitFirstSample(stream, this.halfCycles, bi);
+        const last  = bitLastSample(stream, this.halfCycles, bi);
         const len   = last - first + 1;
-        const l1    = stream.bitL1[bi];
+        const l1    = bitL1(stream, this.halfCycles, bi);
         const l2    = len - l1;
         const hz = Math.round(this.sampleRate / len);
         const timeSec = (first / this.sampleRate).toFixed(3);
@@ -784,14 +788,14 @@ export class WaveformView {
         // Hovering over a gap between bits — find bounds from adjacent bits.
         const sample = this.hoverSample;
         // Find the bit just before and just after this gap.
-        let prevEnd = stream.firstSample;
-        let nextStart = stream.lastSample;
+        let prevEnd = streamFirstSample(stream, this.halfCycles);
+        let nextStart = streamLastSample(stream, this.halfCycles);
         for (let bi = 0; bi < stream.bitCount; bi++) {
-          if (stream.bitLastSample[bi] < sample) {
-            prevEnd = stream.bitLastSample[bi] + 1;
+          if (bitLastSample(stream, this.halfCycles, bi) < sample) {
+            prevEnd = bitLastSample(stream, this.halfCycles, bi) + 1;
           }
-          if (stream.bitFirstSample[bi] > sample) {
-            nextStart = stream.bitFirstSample[bi];
+          if (bitFirstSample(stream, this.halfCycles, bi) > sample) {
+            nextStart = bitFirstSample(stream, this.halfCycles, bi);
             break;
           }
         }

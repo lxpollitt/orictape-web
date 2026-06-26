@@ -11,36 +11,26 @@ import { splitBitStream, joinBitStreams, type BitStream } from '../src/decoder';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Construct a deterministic BitStream for testing.  bitV and sample-position
+/** Construct a deterministic BitStream for testing.  bitV and half-cycle-index
  *  arrays are filled with patterns derived from the bit index so assertions
  *  can verify that slicing preserved the right ranges. */
-function mkStream(format: 'fast' | 'slow', bitCount: number, firstSample = 1000): BitStream {
+function mkStream(format: 'fast' | 'slow', bitCount: number, firstHalfCycle = 0): BitStream {
   const bitV           = new Uint8Array(bitCount);
   const bitFirstHalfCycle = new Uint32Array(bitCount);
   const bitLastHalfCycle  = new Uint32Array(bitCount);
-  const bitL1          = new Uint16Array(bitCount);
-  const bitFirstSample = new Uint32Array(bitCount);
-  const bitLastSample  = new Uint32Array(bitCount);
   const bitUnclear     = new Uint8Array(bitCount);
-  const bitMaxIndex    = new Uint32Array(bitCount);
-  const bitMinIndex    = new Uint32Array(bitCount);
   for (let i = 0; i < bitCount; i++) {
-    bitV[i]           = i & 1;                    // alternating 0/1
-    bitFirstHalfCycle[i] = i * 2;                 // 2 half-cycles per bit
-    bitLastHalfCycle[i]  = i * 2 + 1;
-    bitL1[i]          = 10 + (i % 4);             // varied
-    bitFirstSample[i] = firstSample + i * 20;     // monotonic, 20-sample bits
-    bitLastSample[i]  = firstSample + i * 20 + 19;
-    bitUnclear[i]     = (i % 7) === 0 ? 1 : 0;    // sparse
-    bitMaxIndex[i]    = firstSample + i * 20 + 5;
-    bitMinIndex[i]    = firstSample + i * 20 + 15;
+    bitV[i]           = i & 1;                          // alternating 0/1
+    bitFirstHalfCycle[i] = firstHalfCycle + i * 2;      // 2 half-cycles per bit
+    bitLastHalfCycle[i]  = firstHalfCycle + i * 2 + 1;
+    bitUnclear[i]     = (i % 7) === 0 ? 1 : 0;          // sparse
   }
   return {
     format,
     bitCount,
-    bitV, bitFirstHalfCycle, bitLastHalfCycle, bitL1, bitFirstSample, bitLastSample, bitUnclear, bitMaxIndex, bitMinIndex,
-    firstSample,
-    lastSample: bitCount > 0 ? bitFirstSample[bitCount - 1] + 19 : firstSample,
+    bitV, bitFirstHalfCycle, bitLastHalfCycle, bitUnclear,
+    firstHalfCycle,
+    lastHalfCycle: bitCount > 0 ? firstHalfCycle + (bitCount - 1) * 2 + 1 : firstHalfCycle,
     minVal:  -10000,
     maxVal:   10000,
   };
@@ -50,13 +40,13 @@ function mkStream(format: 'fast' | 'slow', bitCount: number, firstSample = 1000)
  *  match, or a human-readable description of the first mismatch. */
 function compareStreams(a: BitStream, b: BitStream, label = ''): string | null {
   const scalarFields: (keyof BitStream)[] = [
-    'format', 'bitCount', 'firstSample', 'lastSample', 'minVal', 'maxVal',
+    'format', 'bitCount', 'firstHalfCycle', 'lastHalfCycle', 'minVal', 'maxVal',
   ];
   for (const f of scalarFields) {
     if (a[f] !== b[f]) return `${label}: ${String(f)} differs (${a[f]} vs ${b[f]})`;
   }
   const arrayFields: (keyof BitStream)[] = [
-    'bitV', 'bitFirstHalfCycle', 'bitLastHalfCycle', 'bitL1', 'bitFirstSample', 'bitLastSample', 'bitUnclear', 'bitMaxIndex', 'bitMinIndex',
+    'bitV', 'bitFirstHalfCycle', 'bitLastHalfCycle', 'bitUnclear',
   ];
   for (const f of arrayFields) {
     const av = a[f] as { length: number; [k: number]: number };
@@ -83,10 +73,10 @@ test('split in middle preserves bits and metadata', () => {
   if (a.bitCount !== 40) return `first bitCount ${a.bitCount} (want 40)`;
   if (b.bitCount !== 60) return `second bitCount ${b.bitCount} (want 60)`;
   if (a.format !== 'fast' || b.format !== 'fast') return 'format not inherited';
-  if (a.firstSample !== s.firstSample) return `first.firstSample wrong`;
-  if (a.lastSample  !== s.bitLastSample[39]) return `first.lastSample wrong`;
-  if (b.firstSample !== s.bitFirstSample[40]) return `second.firstSample wrong`;
-  if (b.lastSample  !== s.lastSample) return `second.lastSample wrong`;
+  if (a.firstHalfCycle !== s.firstHalfCycle) return `first.firstHalfCycle wrong`;
+  if (a.lastHalfCycle  !== s.bitLastHalfCycle[39]) return `first.lastHalfCycle wrong`;
+  if (b.firstHalfCycle !== s.bitFirstHalfCycle[40]) return `second.firstHalfCycle wrong`;
+  if (b.lastHalfCycle  !== s.lastHalfCycle) return `second.lastHalfCycle wrong`;
   // Spot-check per-bit data preserved correctly.
   if (a.bitV[0]  !== s.bitV[0])  return `first.bitV[0] wrong`;
   if (a.bitV[39] !== s.bitV[39]) return `first.bitV[39] wrong`;
@@ -101,7 +91,7 @@ test('split at 0 → empty first, full second', () => {
   if (a.bitCount !== 0)  return `first bitCount ${a.bitCount} (want 0)`;
   if (b.bitCount !== 50) return `second bitCount ${b.bitCount} (want 50)`;
   if (a.bitV.length !== 0) return `first.bitV not empty`;
-  if (b.firstSample !== s.firstSample) return 'second.firstSample should match original';
+  if (b.firstHalfCycle !== s.firstHalfCycle) return 'second.firstHalfCycle should match original';
   return compareStreams(b, s, 'second-vs-original');
 });
 
@@ -111,7 +101,7 @@ test('split at bitCount → full first, empty second', () => {
   if (a.bitCount !== 50) return `first bitCount ${a.bitCount} (want 50)`;
   if (b.bitCount !== 0)  return `second bitCount ${b.bitCount} (want 0)`;
   if (b.bitV.length !== 0) return `second.bitV not empty`;
-  if (a.lastSample !== s.lastSample) return 'first.lastSample should match original';
+  if (a.lastHalfCycle !== s.lastHalfCycle) return 'first.lastHalfCycle should match original';
   return compareStreams(a, s, 'first-vs-original');
 });
 
@@ -160,26 +150,26 @@ test('join format mismatch throws', () => {
 
 test('join two streams concatenates correctly', () => {
   const a = mkStream('fast', 20, 1000);
-  const b = mkStream('fast', 30, 5000);  // non-adjacent sample positions
+  const b = mkStream('fast', 30, 5000);  // non-adjacent half-cycle indices
   const j = joinBitStreams([a, b]);
   if (j.bitCount !== 50) return `bitCount ${j.bitCount} (want 50)`;
-  if (j.firstSample !== a.firstSample) return 'firstSample should match first input';
-  if (j.lastSample  !== b.lastSample)  return 'lastSample should match last input';
+  if (j.firstHalfCycle !== a.firstHalfCycle) return 'firstHalfCycle should match first input';
+  if (j.lastHalfCycle  !== b.lastHalfCycle)  return 'lastHalfCycle should match last input';
   // Verify each bit section is copied correctly.
   for (let i = 0; i < 20; i++) {
     if (j.bitV[i] !== a.bitV[i]) return `bitV[${i}] wrong (first half)`;
-    if (j.bitFirstSample[i] !== a.bitFirstSample[i]) return `bitFirstSample[${i}] wrong (first half)`;
+    if (j.bitFirstHalfCycle[i] !== a.bitFirstHalfCycle[i]) return `bitFirstHalfCycle[${i}] wrong (first half)`;
   }
   for (let i = 0; i < 30; i++) {
     if (j.bitV[20 + i] !== b.bitV[i]) return `bitV[${20 + i}] wrong (second half)`;
-    if (j.bitFirstSample[20 + i] !== b.bitFirstSample[i]) return `bitFirstSample[${20 + i}] wrong (second half)`;
+    if (j.bitFirstHalfCycle[20 + i] !== b.bitFirstHalfCycle[i]) return `bitFirstHalfCycle[${20 + i}] wrong (second half)`;
   }
-  // Non-monotonic sample positions at the seam — expected and intentional.
-  if (j.bitFirstSample[19] >= j.bitFirstSample[20]) {
-    // This stream happens to have a.lastBit.firstSample < b.firstBit.firstSample,
+  // Non-monotonic half-cycle indices at the seam — expected and intentional.
+  if (j.bitFirstHalfCycle[19] >= j.bitFirstHalfCycle[20]) {
+    // This stream happens to have a.lastBit.firstHalfCycle < b.firstBit.firstHalfCycle,
     // so we'd expect a forward jump rather than a non-monotonic dip.
     // Both directions are valid; we just check it isn't a smooth continuation.
-    // (Here the values differ by >> 20, the normal bit spacing.)
+    // (Here the values differ by >> 2, the normal bit spacing.)
   }
   return null;
 });

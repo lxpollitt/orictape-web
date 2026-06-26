@@ -1,7 +1,7 @@
 import { parseWavFile } from './wavfile';
 import { readBitStreams, readHalfCycles, readPrograms } from './decoder';
 import { conditionSamples } from './tapeAnalog';
-import type { Program } from './decoder';
+import type { Program, HalfCycles } from './decoder';
 
 export interface WorkerRequest {
   buffer: ArrayBuffer;
@@ -15,6 +15,8 @@ export interface WorkerResult {
    *  waveform view - so the main thread never runs the heavy conditioning itself. */
   samples: Int16Array;
   sampleRate: number;
+  /** Half-cycle detection output, shared with the UI to resolve per-bit geometry. */
+  halfCycles: HalfCycles;
 }
 
 export interface WorkerError {
@@ -31,7 +33,7 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     const halfCycles = readHalfCycles(samples, sampleRate);      // half-cycle detection, once, off the main thread
     const streams = readBitStreams(halfCycles, sampleRate);
     const programs = readPrograms(streams);
-    const response: WorkerResult = { ok: true, programs, sampleCount, samples, sampleRate };
+    const response: WorkerResult = { ok: true, programs, sampleCount, samples, sampleRate, halfCycles };
     self.postMessage(response);
   } catch (err) {
     const response: WorkerError = { ok: false, error: String(err) };
