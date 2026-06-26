@@ -1,5 +1,5 @@
 import { parseWavFile } from './wavfile';
-import { readBitStreams, readPrograms } from './decoder';
+import { readBitStreams, readHalfCycles, readPrograms } from './decoder';
 import { conditionSamples } from './tapeAnalog';
 import type { Program } from './decoder';
 
@@ -28,7 +28,8 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
   try {
     const { left, sampleRate, sampleCount } = parseWavFile(e.data.buffer);
     const samples = conditionSamples(left, sampleRate);          // input stage, once, off the main thread
-    const streams = readBitStreams(samples, sampleRate, true);   // already conditioned
+    const halfCycles = readHalfCycles(samples, sampleRate);      // half-cycle detection, once, off the main thread
+    const streams = readBitStreams(halfCycles, sampleRate);
     const programs = readPrograms(streams);
     const response: WorkerResult = { ok: true, programs, sampleCount, samples, sampleRate };
     self.postMessage(response);

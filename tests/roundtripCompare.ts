@@ -25,7 +25,8 @@
  */
 
 import type { BitStream, Program } from '../src/decoder';
-import { readBitStreams, readPrograms } from '../src/decoder';
+import { readBitStreams, readHalfCycles, readPrograms } from '../src/decoder';
+import { conditionSamples } from '../src/tapeAnalog';
 import { parseWavFile } from '../src/wavfile';
 import { buildByteStream, encodeProgramWav, SYNC_BYTES } from '../src/audioEncoder';
 
@@ -41,7 +42,8 @@ export function decodeWav(bytes: Uint8Array, invert = false): { programs: Progra
   const ab   = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   const wav  = parseWavFile(ab);
   const left = invert ? wav.left.map((s: number) => -s) : wav.left;
-  return { programs: readPrograms(readBitStreams(left, wav.sampleRate)), sampleRate: wav.sampleRate };
+  const halfCycles = readHalfCycles(conditionSamples(left, wav.sampleRate), wav.sampleRate);
+  return { programs: readPrograms(readBitStreams(halfCycles, wav.sampleRate)), sampleRate: wav.sampleRate };
 }
 
 /** Decode a WAV byte buffer to programs (left channel), as the app would. */

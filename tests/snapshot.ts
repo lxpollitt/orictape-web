@@ -19,7 +19,8 @@
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, basename } from 'path';
 import { parseWavFile } from '../src/wavfile';
-import { readBitStreams, readPrograms } from '../src/decoder';
+import { readBitStreams, readHalfCycles, readPrograms } from '../src/decoder';
+import { conditionSamples } from '../src/tapeAnalog';
 import { encodeTapFile } from '../src/tapEncoder';
 import { fixPointersAndTerminators } from '../src/editor';
 import type { Program } from '../src/decoder';
@@ -137,7 +138,8 @@ for (const filename of wavFiles) {
     const buf     = readFileSync(filePath);
     const wav     = parseWavFile(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
     sampleRate    = wav.sampleRate;
-    const streams = readBitStreams(wav.left, wav.sampleRate);
+    const halfCycles = readHalfCycles(conditionSamples(wav.left, wav.sampleRate), wav.sampleRate);
+    const streams = readBitStreams(halfCycles, wav.sampleRate);
     programs      = readPrograms(streams);
   } catch (e: any) {
     summaryLines.push(`${filename}`);

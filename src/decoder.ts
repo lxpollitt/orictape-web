@@ -8,7 +8,6 @@
 
 import { flagTokenisationMismatches, byteSequenceSyntaxChecker } from './editor';
 import { oricByteToChar } from './oricCharset';
-import { conditionSamples } from './tapeAnalog';
 
 
 export interface HalfCycleInfo {
@@ -94,9 +93,10 @@ export interface LineStatus {
 // reduces GC pressure significantly for large tape recordings.
 // All parallel arrays have length === halfCycleCount after decoding.
 export interface HalfCycles {
-  hcCount: number;
+  count: number;
   hcLength: Uint16Array;
-  hcPeakSample: Uint32Array;
+  hcPeakSample: Uint32Array;   // sample index of the half-cycle's peak
+  hcPeakValue: Int16Array;     // peak amplitude at hcPeakSample (consumer's noise-floor gates)
   hcFirstSample: Uint32Array;
   hcLastSample: Uint32Array;
   hcUnclear: Uint8Array; // 0 = clean, 1 = unclear
@@ -253,61 +253,11 @@ export const INVALID_CODE_LITERALS = new Set(
     .concat(0x3F)  // ? (PRINT shorthand)
 );
 
-export function readBitStreams(samples: Int16Array, sampleRate = 48000, preconditioned = false): BitStream[] {
-  if (!preconditioned) samples = conditionSamples(samples, sampleRate);  // worker conditions once, then passes preconditioned=true
-
-  // Compute file-level peak amplitude once, used to scale noise floor thresholds
-  // to compensate for different ADC recording levels.
-  let fileMin = 0, fileMax = 0;
-  for (let i = 0; i < samples.length; i++) {
-    if (samples[i] < fileMin) fileMin = samples[i];
-    if (samples[i] > fileMax) fileMax = samples[i];
-  }
-  const filePeakAmplitude = fileMax - fileMin;
-
-  const streams: BitStream[] = [];
-  let startSample = 0;
-  while (true) {
-    const { stream, samplesRead } = readBitStream(samples, startSample, sampleRate, filePeakAmplitude);
-    if (samplesRead === 0) break;
-    streams.push(stream);
-    startSample += samplesRead;
-  }
-
-  // Adaptive amplitude filter: discard streams that look like noise rather than
-  // a real tape signal.  The noise floor of a typical ADC + tape player is
-  // 10–50× quieter than an actual recording, so we keep only streams whose
-  // peak-to-peak amplitude is at least 10% of the loudest stream found.
-  if (streams.length > 1) {
-    const peakAmplitude = Math.max(...streams.map(s => s.maxVal - s.minVal));
-    const threshold = peakAmplitude * 0.1;
-    return streams.filter(s => s.maxVal - s.minVal >= threshold);
-  }
-  return streams;
-}
-
-function readBitStream(samples: Int16Array, startSample: number, sampleRate: number, filePeakAmplitude: number): { stream: BitStream; samplesRead: number } {
-  // Cycle classification thresholds, all scaled with sample rate.
-  //
-  // At 48000 Hz the three expected full-cycle lengths are:
-  //   short  (2400 Hz) ≈ 20 samples  - bit 1 in both fast and slow format
-  //   medium (1600 Hz) ≈ 30 samples  - bit 0 in fast format only
-  //   long   (1200 Hz) ≈ 40 samples  - bit 0 (×4) in slow format only
-  //
-  // Scaled to 44100 Hz (our scaling will round to nearest integer):
-  //   short  (2400 Hz) ≈ 18 (18.3750) samples  - bit 1 in both fast and slow format
-  //   medium (1600 Hz) ≈ 28 (27.5625) samples  - bit 0 in fast format only
-  //   long   (1200 Hz) ≈ 37 (36.7500) samples  - bit 0 (×4) in slow format only
-  //
-  const SHORT_MIN     = Math.round(18 * sampleRate / 48000);  // 15 at 44100 Hz
-  const SHORT_MAX     = Math.round(22 * sampleRate / 48000);  // 20 at 44100 Hz
-  const MEDIUM_MIN    = Math.round(26 * sampleRate / 48000);  // 24 at 44100 Hz
-  const MEDIUM_MAX    = Math.round(34 * sampleRate / 48000);  // 31 at 44100 Hz
-  const LONG_MIN      = Math.round(38 * sampleRate / 48000);  // 35 at 44100 Hz
-  const LONG_MAX      = Math.round(44 * sampleRate / 48000);  // 42 at 44100 Hz
-  const SHORT_ROM_MAX_HZ = 2000;
-  const SHORT_ROM_MAX = Math.round(sampleRate/SHORT_ROM_MAX_HZ);  // 24 at 48000 Hz; 22 at 44100 Hz
-  
+/** Detect every half-cycle in the signal. The crossover/peak detection runs continuously 
+ * over the whole buffer - no gap termination, it stops only at end of samples.
+ * Classification, sync and gap handling are done later the bitstream decoder, which reads 
+ * hafl-cycles back out of this array. */
+export function readHalfCycles(samples: Int16Array, sampleRate = 48000): HalfCycles {
   // Search window sizes for searching from current peak to next (opposite polarity) peak
   //
   // At 48000 Hz:
@@ -317,49 +267,48 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   //   medium 3/4 cycle = 0.5*10+20 or 0.5*20+10 = 25 or 20
   //   long 3/4 cycle   = 0.75*40 = 30
   //
-  // Short search window = 16 -> 16/20 or 16/25 = 0.8 or 0.64 * 3/4 medium cycle 
-  // Long search window = 33 -> 33/30 = 1.1 * 3/4 long cycle 
-  // 
+  // Short search window = 16 -> 16/20 or 16/25 = 0.8 or 0.64 * 3/4 medium cycle
+  // Long search window = 33 -> 33/30 = 1.1 * 3/4 long cycle
   const SMALLEST_SEARCH_WINDOW = Math.round(16 * sampleRate / 48000);   // 15 at 44100 Hz
   const LONGEST_SEARCH_WINDOW  = Math.round(33 * sampleRate / 48000);   // 30 at 44100 Hz
-  const TURNAROUND_PCT  = 10;  // % of peak-to-threshold distance to confirm signal has turned around from peak
+  const TURNAROUND_PCT = 10;   // % of peak-to-threshold distance to confirm signal has turned around from peak
 
-  // Triggers for unreadable, noisefloor, sync, and abandon etc
-  const MIN_UREADABLE_CYCLE_LENGTH = Math.round(55 * sampleRate / 48000);  // Must be > LONG_MAX && < 2*LONGEST_SEARCH_WINDOW
-  const NOISE_FLOOR       = Math.max(100, Math.round(filePeakAmplitude * 0.02));   // ~2% of file peak
-  const SYNC_NOISE_FLOOR  = Math.max(100, Math.round(filePeakAmplitude * 0.04));   // ~4% of file peak
-  const MIN_SYNC_BITS     = 200;  // min continuous cycles before accepting a sync run
-  const MAX_POOR_SIGNAL_CYCLES = 180; // max number of poor cycles to accept before terminating a post sync bitstream
+  // Exact file min/max over every sample. This is used in readBitStream to
+  // scales its noise-floor thresholds by this whole-file peak-to-peak amplitude.
+  let fileMin = 0, fileMax = 0;
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i] < fileMin) fileMin = samples[i];
+    if (samples[i] > fileMax) fileMax = samples[i];
+  }
 
-  // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
-  // (every cycle is the shortest possible). We'll slice to actual size at the end.
-  const maxBits = Math.ceil((samples.length - startSample) / SHORT_MAX) + 1;
-  const _bitV            = new Uint8Array(maxBits);
-  const _bitL1           = new Uint16Array(maxBits);
-  const _bitFirstSample  = new Uint32Array(maxBits);
-  const _bitLastSample   = new Uint32Array(maxBits);
-  const _bitUnclear      = new Uint8Array(maxBits);
-  const _bitMaxIndex     = new Uint32Array(maxBits);
-  const _bitMinIndex     = new Uint32Array(maxBits);
-  let bitCount = 0;
+  // Pre-size to an upper bound on the half-cycle count, sliced to the actual count below.
+  // The shortest half-cycle is the ~10-sample short half, so dividing by a slightly
+  // smaller MIN_HALF_CYCLE keeps cap a safe over-estimate (it can never truncate detection).
+  const MIN_HALF_CYCLE = Math.round(8 * sampleRate / 48000);
+  const cap = Math.ceil(samples.length / MIN_HALF_CYCLE) + 2;
+  const hcLength      = new Uint16Array(cap);
+  const hcFirstSample = new Uint32Array(cap);
+  const hcLastSample  = new Uint32Array(cap);
+  const hcPeakSample  = new Uint32Array(cap);
+  const hcPeakValue   = new Int16Array(cap);
+  const hcUnclear     = new Uint8Array(cap);   // TODO: populate this as the half-cycle level
+  let count = 0;
 
-  // Working state shared with readCycle (mirrors the Go closure pattern).
+  const recordHalf = (firstSample: number, length: number, peakSample: number): void => {
+    hcLength[count]      = Math.min(length, 65535);
+    hcFirstSample[count] = firstSample;
+    hcLastSample[count]  = firstSample + length - 1;
+    hcPeakSample[count]  = peakSample;
+    hcPeakValue[count]   = samples[peakSample];
+    count++;
+  };
+
+  // Detection state, updated each iteration by the detection loop below.
   let minVal = 0, maxVal = 0, threshold = 0;
-  let minIndex = 0, maxIndex = startSample, nextMaxIndex = startSample;
-  let belowIndex = 0, aboveIndex = startSample;
-  let lengthAbove = 0, lengthBelow = 0, length = 0;
-  let streamFirstSample = startSample;
-  let streamMinVal = 0, streamMaxVal = 0;
+  let minIndex = 0, maxIndex = 0, nextMaxIndex = 0, belowIndex = 0, aboveIndex = 0;
+  let lengthAbove = 0, lengthBelow = 0;
 
-  // Cycle classification output (set by readCycle, consumed by pushBit).
-  type CycleKind = 'short' | 'medium' | 'long' | 'unreadable';
-  let cycleKind: CycleKind = 'short';
-  let cycleUnclear = false;
-  let cycleFrequency = 0;
-
-  /** Measure one waveform cycle and classify it as short, medium, or long.
-   *  Returns false if bit is unreadbale / no useful signal found (for section of ~cycle length). */
-  const readCycle = (): boolean => {
+  while (nextMaxIndex < samples.length && count + 2 <= cap) {
     // The previous readCycle already had to find this cycle's maxIndex to workout the crossover point
     maxIndex = nextMaxIndex;
 
@@ -384,7 +333,6 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       }
       if (i >= minSearchShortestEnd && maxValSinceMin >= turnaroundThreshold) break;
     }
-    if (minVal < streamMinVal) streamMinVal = minVal;
 
     // Find the cycle's mid point (the crossover point between the high half of the cycle 
     // and the low half of the cycle).
@@ -412,7 +360,6 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       }
       if (i >= maxSearchShortestEnd && minValSinceMax <= turnaroundThreshold) break;
     }
-    if (maxVal > streamMaxVal) streamMaxVal = maxVal;
 
     // Find the crossover point rising above threshold.
     threshold = (maxVal + minVal) >> 1;
@@ -421,7 +368,127 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
       if (samples[i] >= threshold) { aboveIndex = i; break; }
     }
     lengthBelow = aboveIndex - belowIndex;
+
+    recordHalf(belowIndex - lengthAbove, lengthAbove, maxIndex);   // HIGH half-cycle
+    recordHalf(belowIndex,               lengthBelow, minIndex);   // LOW  half-cycle
+  }
+
+  return {
+    count,
+    hcLength:      hcLength.slice(0, count),
+    hcFirstSample: hcFirstSample.slice(0, count),
+    hcLastSample:  hcLastSample.slice(0, count),
+    hcPeakSample:  hcPeakSample.slice(0, count),
+    hcPeakValue:   hcPeakValue.slice(0, count),
+    hcUnclear:     hcUnclear.slice(0, count),
+    firstSample: 0,
+    lastSample:  count > 0 ? hcLastSample[count - 1] : 0,
+    minVal: fileMin,
+    maxVal: fileMax,
+  };
+}
+
+export function readBitStreams(halfCycles: HalfCycles, sampleRate = 48000): BitStream[] {
+  // File-level peak amplitude, used to scale noise-floor thresholds to compensate for
+  // different ADC recording levels (halfCycles carries the exact file min/max).
+  const filePeakAmplitude = halfCycles.maxVal - halfCycles.minVal;
+
+  const streams: BitStream[] = [];
+  let startHalfCycleIndex = 0;
+  while (true) {
+    const { stream, halfCyclesRead } = readBitStream(halfCycles, startHalfCycleIndex, sampleRate, filePeakAmplitude);
+    if (halfCyclesRead === 0) break;
+    streams.push(stream);
+    startHalfCycleIndex += halfCyclesRead;
+  }
+
+  // Adaptive amplitude filter: discard streams that look like noise rather than
+  // a real tape signal.  The noise floor of a typical ADC + tape player is
+  // 10–50× quieter than an actual recording, so we keep only streams whose
+  // peak-to-peak amplitude is at least 10% of the loudest stream found.
+  if (streams.length > 1) {
+    const peakAmplitude = Math.max(...streams.map(s => s.maxVal - s.minVal));
+    const threshold = peakAmplitude * 0.1;
+    return streams.filter(s => s.maxVal - s.minVal >= threshold);
+  }
+  return streams;
+}
+
+function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, sampleRate: number, filePeakAmplitude: number): { stream: BitStream; halfCyclesRead: number } {
+  // Cycle classification thresholds, all scaled with sample rate.
+  //
+  // At 48000 Hz the three expected full-cycle lengths are:
+  //   short  (2400 Hz) ≈ 20 samples  - bit 1 in both fast and slow format
+  //   medium (1600 Hz) ≈ 30 samples  - bit 0 in fast format only
+  //   long   (1200 Hz) ≈ 40 samples  - bit 0 (×4) in slow format only
+  //
+  // Scaled to 44100 Hz (our scaling will round to nearest integer):
+  //   short  (2400 Hz) ≈ 18 (18.3750) samples  - bit 1 in both fast and slow format
+  //   medium (1600 Hz) ≈ 28 (27.5625) samples  - bit 0 in fast format only
+  //   long   (1200 Hz) ≈ 37 (36.7500) samples  - bit 0 (×4) in slow format only
+  //
+  const SHORT_MIN     = Math.round(18 * sampleRate / 48000);  // 15 at 44100 Hz
+  const SHORT_MAX     = Math.round(22 * sampleRate / 48000);  // 20 at 44100 Hz
+  const MEDIUM_MIN    = Math.round(26 * sampleRate / 48000);  // 24 at 44100 Hz
+  const MEDIUM_MAX    = Math.round(34 * sampleRate / 48000);  // 31 at 44100 Hz
+  const LONG_MIN      = Math.round(38 * sampleRate / 48000);  // 35 at 44100 Hz
+  const LONG_MAX      = Math.round(44 * sampleRate / 48000);  // 42 at 44100 Hz
+  const SHORT_ROM_MAX_HZ = 2000;
+  const SHORT_ROM_MAX = Math.round(sampleRate/SHORT_ROM_MAX_HZ);  // 24 at 48000 Hz; 22 at 44100 Hz
+
+  // Triggers for unreadable, noisefloor, sync, and abandon etc
+  const MIN_UREADABLE_CYCLE_LENGTH = Math.round(55 * sampleRate / 48000);  // Must be > LONG_MAX && < 2*LONGEST_SEARCH_WINDOW
+  const NOISE_FLOOR       = Math.max(100, Math.round(filePeakAmplitude * 0.02));   // ~2% of file peak
+  const SYNC_NOISE_FLOOR  = Math.max(100, Math.round(filePeakAmplitude * 0.04));   // ~4% of file peak
+  const MIN_SYNC_BITS     = 200;  // min continuous cycles before accepting a sync run
+  const MAX_POOR_SIGNAL_CYCLES = 180; // max number of poor cycles to accept before terminating a post sync bitstream
+
+  // Pre-allocate TypedArrays sized to the theoretical maximum number of bits
+  // (every cycle is the shortest possible). We'll slice to actual size at the end.
+  const maxBits = Math.ceil((halfCycles.count - startHalfCycleIndex) / 2) + 1;
+  const _bitV            = new Uint8Array(maxBits);
+  const _bitL1           = new Uint16Array(maxBits);
+  const _bitFirstSample  = new Uint32Array(maxBits);
+  const _bitLastSample   = new Uint32Array(maxBits);
+  const _bitUnclear      = new Uint8Array(maxBits);
+  const _bitMaxIndex     = new Uint32Array(maxBits);
+  const _bitMinIndex     = new Uint32Array(maxBits);
+  let bitCount = 0;
+
+  // Working state shared with readCycle.  readCycle walks nextHalfCycleIndex through the
+  // half-cycle array and sets the sample-position/value vars below from it; the loops and
+  // rewind drive off the index.
+  let minVal = 0, maxVal = 0;
+  let minIndex = 0, maxIndex = 0, nextHalfCycleIndex = startHalfCycleIndex;
+  let aboveIndex = 0;
+  let lengthAbove = 0, lengthBelow = 0, length = 0;
+  let streamFirstSample = startHalfCycleIndex < halfCycles.count ? halfCycles.hcFirstSample[startHalfCycleIndex] : 0;
+  let streamMinVal = 0, streamMaxVal = 0;
+
+  // Cycle classification output (set by readCycle, consumed by pushBit).
+  type CycleKind = 'short' | 'medium' | 'long' | 'unreadable';
+  let cycleKind: CycleKind = 'short';
+  let cycleUnclear = false;
+  let cycleFrequency = 0;
+
+  /** Measure one waveform cycle and classify it as short, medium, or long.
+   *  Returns false if bit is unreadbale / no useful signal found (for section of ~cycle length). */
+  const readCycle = (): boolean => {
+    // Read this cycle out of the half-cycle array: a HIGH half (even index) + the LOW
+    // half after it.  
+    const hi = nextHalfCycleIndex, lo = nextHalfCycleIndex + 1;
+    maxIndex = halfCycles.hcPeakSample[hi];
+    minIndex = halfCycles.hcPeakSample[lo];
+    maxVal   = halfCycles.hcPeakValue[hi];
+    minVal   = halfCycles.hcPeakValue[lo];
+    lengthAbove = halfCycles.hcLength[hi];
+    lengthBelow = halfCycles.hcLength[lo];
     length = lengthAbove + lengthBelow;
+    aboveIndex = halfCycles.hcLastSample[lo] + 1;
+    nextHalfCycleIndex += 2;
+
+    if (minVal < streamMinVal) streamMinVal = minVal;
+    if (maxVal > streamMaxVal) streamMaxVal = maxVal;
 
     // TODO: Simplify readCycle to returns every GAP, and have higher layer decide how many milliseconds of gaps it cares about
     // so it can make sync decision vs inside a program decision
@@ -788,21 +855,15 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   // for slow format re-decoding if needed.
   let mediumCycleCount = 0;
   let longCycleCount = 0;
-  let syncRunMaxIndex = nextMaxIndex;
-  let syncRunAboveIndex = aboveIndex;
-  let syncRunMaxVal = maxVal;
-  let syncRunThreshold = threshold;
-  while (nextMaxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
+  let syncRunHalfCycleIndex = nextHalfCycleIndex;
+  while (nextHalfCycleIndex + 1 < halfCycles.count && bitCount < MIN_SYNC_BITS) {
     bitCount = 0;  // reset without reallocating
     mediumCycleCount = 0;
     longCycleCount = 0;
-    streamFirstSample = aboveIndex;
+    streamFirstSample = halfCycles.hcFirstSample[nextHalfCycleIndex];
     // Save state at the start of this sync run attempt.
-    syncRunMaxIndex = nextMaxIndex;
-    syncRunAboveIndex = aboveIndex;
-    syncRunMaxVal = maxVal;
-    syncRunThreshold = threshold;
-    while (nextMaxIndex < samples.length && bitCount < MIN_SYNC_BITS) {
+    syncRunHalfCycleIndex = nextHalfCycleIndex;
+    while (nextHalfCycleIndex + 1 < halfCycles.count && bitCount < MIN_SYNC_BITS) {
       if (!readCycle()) break;
       if (maxVal - minVal < SYNC_NOISE_FLOOR) break; // noise floor (silence, noise, or slow ramp)
       // TS can't see that readCycle() mutates cycleKind via closure — ignore the narrowing warning.
@@ -827,20 +888,17 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     // bit extraction.  Phase 1 consumed all cycles as fast-decoded bits
     // which are wrong for slow format.
     bitCount = 0;
-    nextMaxIndex = syncRunMaxIndex;
-    aboveIndex = syncRunAboveIndex;
-    maxVal = syncRunMaxVal;
-    threshold = syncRunThreshold;
+    nextHalfCycleIndex = syncRunHalfCycleIndex;
     streamMinVal = 0;
     streamMaxVal = 0;
-    streamFirstSample = aboveIndex;
+    streamFirstSample = halfCycles.hcFirstSample[syncRunHalfCycleIndex];
     slow1s = 0;
     slow0s = 0;
     slowBitUnclear = false;
   }
 
   let consecutivePoorCycles = 0;
-  while (nextMaxIndex < samples.length) {
+  while (nextHalfCycleIndex + 1 < halfCycles.count) {
     if (readCycle() && (maxVal - minVal >= NOISE_FLOOR)) {
       consecutivePoorCycles = 0;
     } else {
@@ -851,7 +909,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
   }
 
 
-  const samplesRead = aboveIndex - startSample;
+  const halfCyclesRead = nextHalfCycleIndex - startHalfCycleIndex;
 
   // Trim TypedArrays to actual size. .slice() creates a compact copy,
   // freeing the oversized pre-allocated buffers.
@@ -871,7 +929,7 @@ function readBitStream(samples: Int16Array, startSample: number, sampleRate: num
     maxVal: streamMaxVal,
   };
 
-  return { stream, samplesRead };
+  return { stream, halfCyclesRead };
 }
 
 // Helper to read a single bit as a plain object (for UI use).

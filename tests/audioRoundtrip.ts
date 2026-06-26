@@ -20,7 +20,8 @@
 
 import { existsSync, readFileSync } from 'fs';
 import type { ByteInfo, Program } from '../src/decoder';
-import { emptyBitStream, readBitStreams, readPrograms } from '../src/decoder';
+import { emptyBitStream, readBitStreams, readHalfCycles, readPrograms } from '../src/decoder';
+import { conditionSamples } from '../src/tapeAnalog';
 import { buildByteStream, encodeProgramSamples, SAMPLE_RATE, SYNC_BYTES } from '../src/audioEncoder';
 import { decodeWavBytes, hex, roundTripMismatch } from './roundtripCompare';
 
@@ -53,7 +54,8 @@ test('square-wave audio of a synthetic program decodes back byte-exactly', () =>
   const samples = encodeProgramSamples(prog, false);
   const stream  = buildByteStream(prog, false);   // idempotent after the encoder's fixHeaderEndAddr
 
-  const progs = readPrograms(readBitStreams(samples, SAMPLE_RATE));
+  const halfCycles = readHalfCycles(conditionSamples(samples, SAMPLE_RATE), SAMPLE_RATE);
+  const progs = readPrograms(readBitStreams(halfCycles, SAMPLE_RATE));
   if (progs.length !== 1) return `decoded ${progs.length} programs, want 1`;
   const got = progs[0];
   if (got.name !== 'GAME') return `name "${got.name}", want "GAME"`;

@@ -16,7 +16,8 @@ import { readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { parseTapFile } from '../src/tapDecoder';
 import { parseWavFile } from '../src/wavfile';
-import { readBitStreams, readPrograms } from '../src/decoder';
+import { readBitStreams, readHalfCycles, readPrograms } from '../src/decoder';
+import { conditionSamples } from '../src/tapeAnalog';
 import type { Program } from '../src/decoder';
 
 function usage(): never {
@@ -69,7 +70,8 @@ for (const file of files) {
       programs = parseTapFile(ab);
     } else {
       const wav     = parseWavFile(ab);
-      const streams = readBitStreams(wav.left, wav.sampleRate);
+      const halfCycles = readHalfCycles(conditionSamples(wav.left, wav.sampleRate), wav.sampleRate);
+      const streams = readBitStreams(halfCycles, wav.sampleRate);
       programs      = readPrograms(streams);
     }
   } catch (e: any) {
