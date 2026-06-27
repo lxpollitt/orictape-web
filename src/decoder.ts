@@ -552,14 +552,14 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     _bitLastHalfCycle[bitCount]  = secondHalfCycleIndex;
     _bitUnclear[bitCount] = (cycleUnclear || cycleKind === 'long') ? 1 : 0;
 
-    
-    if (   (fastCount1s == 3 
-            || (fastCount1s > 3 && nextHalfCycleIndex == nextExpectedSkip)) 
+    if (   (   (fastCount1s == 3 && nextHalfCycleIndex >= nextExpectedSkip)
+            || (fastCount1s >= 4 && nextHalfCycleIndex == nextExpectedSkip)) 
         && (   (cycleKind === 'medium' && (nextHalfCycleIndex == nextExpectedSkip || firstHalfCycleLength <= SHORT_ROM_MAX/2))
             || (cycleKind === 'short' && firstHalfCycleLength <= SHORT_ROM_MAX/2 && secondHalfCycleLength > SHORT_ROM_MAX/2))) {
-      fastCount1s = 0;
-      nextHalfCycleIndex--;
+      // _bitLastHalfCycle[bitCount-1]  = firstHalfCycleIndex;
+      nextHalfCycleIndex = secondHalfCycleIndex;
       nextExpectedSkip = nextHalfCycleIndex + 2*14;
+      fastCount1s = 0;
       return
     } else if (cycleKind === 'short') {
       fastCount1s++
