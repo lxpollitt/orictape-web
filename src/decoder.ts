@@ -448,12 +448,12 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   //   medium (1600 Hz) ≈ 28 (27.5625) samples  - bit 0 in fast format only
   //   long   (1200 Hz) ≈ 37 (36.7500) samples  - bit 0 (×4) in slow format only
   //
-  const SHORT_MIN     = Math.round(18 * sampleRate / 48000);  // 15 at 44100 Hz
+  const SHORT_MIN     = Math.round(18 * sampleRate / 48000);  // 17 at 44100 Hz
   const SHORT_MAX     = Math.round(22 * sampleRate / 48000);  // 20 at 44100 Hz
   const MEDIUM_MIN    = Math.round(26 * sampleRate / 48000);  // 24 at 44100 Hz
   const MEDIUM_MAX    = Math.round(34 * sampleRate / 48000);  // 31 at 44100 Hz
   const LONG_MIN      = Math.round(38 * sampleRate / 48000);  // 35 at 44100 Hz
-  const LONG_MAX      = Math.round(44 * sampleRate / 48000);  // 42 at 44100 Hz
+  const LONG_MAX      = Math.round(44 * sampleRate / 48000);  // 40 at 44100 Hz
   const SHORT_ROM_MAX_HZ = 2000;
   const SHORT_ROM_MAX = Math.round(sampleRate/SHORT_ROM_MAX_HZ);  // 24 at 48000 Hz; 22 at 44100 Hz
 
@@ -544,11 +544,28 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
   };
 
   /** Convert the most recent cycle into a bit (fast format: 1 cycle = 1 bit). */
+  let fastCount1s = 0;
+  let nextExpectedSkip = 0;
   const pushBitFast = (): void => {
     _bitV[bitCount] = (cycleKind === 'short' || cycleKind === 'unreadable') ? 1 : 0;
     _bitFirstHalfCycle[bitCount] = firstHalfCycleIndex;
     _bitLastHalfCycle[bitCount]  = secondHalfCycleIndex;
     _bitUnclear[bitCount] = (cycleUnclear || cycleKind === 'long') ? 1 : 0;
+
+    
+    if (   (fastCount1s == 3 
+            || (fastCount1s > 3 && nextHalfCycleIndex == nextExpectedSkip)) 
+        && (   (cycleKind === 'medium' && (nextHalfCycleIndex == nextExpectedSkip || firstHalfCycleLength <= SHORT_ROM_MAX/2))
+            || (cycleKind === 'short' && firstHalfCycleLength <= SHORT_ROM_MAX/2 && secondHalfCycleLength > SHORT_ROM_MAX/2))) {
+      fastCount1s = 0;
+      nextHalfCycleIndex--;
+      nextExpectedSkip = nextHalfCycleIndex + 2*14;
+      return
+    } else if (cycleKind === 'short') {
+      fastCount1s++
+    } else {
+      fastCount1s = 0;
+    }
     bitCount++;
   };
 
@@ -1384,7 +1401,7 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
             break 
           }
         }
-      }    
+      }
       
       // We found a first error-free byte frame including the start bit of the byte
       // following it. Now check the rest of the byte following it is also
@@ -1394,7 +1411,10 @@ export function readProgramBytes(stream: BitStream, skipSync = false): Program {
 
       // Fast format saves normally alternate between 3 stop bits and 4 stop bits.
       // Slow format saves normally use 3 stop bits (? 99% of bytes).
-      const extraStopBit = stream.format === "fast" ? 4-stopBits : 0;
+
+      // const extraStopBit = stream.format === "fast" ? 4-stopBits : 0;
+      // @ts-expect-error
+      const extraStopBit = 0; // TODO: hack - assumes phase alignement so always 3
       for (let i=0; i<13+extraStopBit; i++) {
         const { bt, ok } = getBit();
         if (!ok) return prog;
