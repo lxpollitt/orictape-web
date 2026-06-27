@@ -736,6 +736,12 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
             // otherwsie mark it as unclear.
             _bitUnclear[bitCount - 1] |= (slowPossibleReframeKind === 'medium') ? 0 : 1;
             _bitLastHalfCycle[bitCount - 1] = slowReframeHalfCycleIndex - 1;
+            nextHalfCycleIndex = slowReframeHalfCycleIndex;
+            slowCycles = 0;
+            slowBitUnclear = false;
+            slowPossibleReframeFrom = cycleKind;
+            slowPossibleReframe = false;
+            return;
           } else if (cyclesBeforeReframe > 1) {
             // Bundle the cylces up two the reframe as a seperate unclear bit
             if (slowShorts == 0 && slowLongs == 0) {
@@ -751,6 +757,14 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
             _bitFirstHalfCycle[bitCount] = slowBitFirstHalfCycleIndex;
             _bitLastHalfCycle[bitCount]  = slowReframeHalfCycleIndex - 1;
             bitCount++;
+            nextHalfCycleIndex = slowReframeHalfCycleIndex;
+            slowCycles = 0;
+            slowLongs = 0;
+            slowShorts = 0;
+            slowBitUnclear = false;
+            slowPossibleReframeFrom = cycleKind;
+            slowPossibleReframe = false;
+            return;
           } 
 
           // Use the transition point as first cycle of the current bit
@@ -779,7 +793,8 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
       } else {
         if (cycleKind === 'medium') {
           slowPossibleReframeTo = (secondHalfCycleLength < firstHalfCycleLength) ?  'short' : 'long';
-          slowReframeHalfCycleIndex = secondHalfCycleIndex + 1;
+          // slowReframeHalfCycleIndex = secondHalfCycleIndex + 1;
+          slowReframeHalfCycleIndex = secondHalfCycleIndex; //TODO: WIP experiment - flip phase
         } else if (cycleKind === 'short' || cycleKind === 'long') {
           slowPossibleReframeTo = cycleKind;
           slowReframeHalfCycleIndex = firstHalfCycleIndex;
@@ -798,7 +813,7 @@ function readBitStream(halfCycles: HalfCycles, startHalfCycleIndex: number, samp
     // on the transition detection and reframing logic above to cope with that.
     slowBitUnclear = slowBitUnclear || cycleUnclear;
     slowCycles++;
-    // if (bitCount <50) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, slowBitUnclear, cycleUnclear, cycleFrequency, lengthAbove, lengthBelow, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
+    if (bitCount <50) console.log("pushBitSlow:", slowBitFirstHalfCycleIndex, bitCount, slowCycles, slowShorts, slowLongs, slowBitUnclear, cycleUnclear, cycleFrequency, firstHalfCycleLength, secondHalfCycleLength, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowReframeHalfCycleIndex);
     // if (bitCount>=222014 && bitCount <=222018) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, slowBitUnclear, cycleUnclear, cycleFrequency, lengthAbove, lengthBelow, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
     // if (bitCount>=256921 && bitCount <=256923) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, slowBitUnclear, cycleUnclear, cycleFrequency, lengthAbove, lengthBelow, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
     // if (bitCount>=256948 && bitCount <=256951) console.log("pushBitSlow:", cycleFirst, bitCount, slowCycles, slowShorts, slowLongs, slowBitUnclear, cycleUnclear, cycleFrequency, lengthAbove, lengthBelow, cycleKind, slowPossibleReframe, slowPossibleReframeFrom, slowPossibleReframeTo, slowPossibleReframeIndex);
